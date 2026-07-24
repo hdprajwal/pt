@@ -4,15 +4,51 @@ window, .background {
   color: #c7c7c7;
 }
 * { border-radius: 0; }
-.mono { font-family: "JetBrains Mono", monospace; }
+.mono, label {
+  font-family: "JetBrains Mono", monospace;
+}
+
+/* Flatten every bit of Adwaita chrome that bleeds through our widgets. */
+.pt-tab,
+.pt-remove,
+.pt-add-project,
+windowcontrols button {
+  background-image: none;
+  background-color: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  min-height: 0;
+  min-width: 0;
+  outline: none;
+}
+.pt-tab:focus,
+.pt-remove:focus,
+.pt-add-project:focus,
+windowcontrols button:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+/* ---- topbar ---- */
 .pt-topbar {
   background-color: #0d0d0d;
   border-bottom: 1px solid #262626;
   color: #9d9d9d;
-  padding: 4px 10px;
+  padding: 4px 12px;
   font-family: "JetBrains Mono", monospace;
-  font-size: 12px;
+  font-size: 11.5px;
 }
+windowcontrols button {
+  color: #7a7a7a;
+  padding: 0 7px;
+  -gtk-icon-size: 13px;
+}
+windowcontrols button:hover {
+  background-color: #1c1c1c;
+  color: #d0d0d0;
+}
+
+/* ---- sidebar ---- */
 .pt-sidebar {
   background-color: #111111;
   border-right: 1px solid #262626;
@@ -20,7 +56,8 @@ window, .background {
 .pt-sidebar-heading {
   color: #5c5c5c;
   font-size: 10px;
-  padding: 8px 14px 4px 14px;
+  letter-spacing: 0.1em;
+  padding: 8px 14px 6px 14px;
   font-family: "JetBrains Mono", monospace;
 }
 .pt-project-row {
@@ -30,36 +67,92 @@ window, .background {
   font-family: "JetBrains Mono", monospace;
   font-size: 13px;
 }
+.pt-project-row:hover {
+  background-color: #171717;
+}
 .pt-project-row.active {
   background-color: #1c1c1c;
   color: #ffffff;
   border-left: 2px solid #33d17a;
 }
+.pt-kbd-hint {
+  color: #5c5c5c;
+  font-size: 10px;
+  font-family: "JetBrains Mono", monospace;
+}
+.pt-remove {
+  color: #6a6a6a;
+  padding: 0 4px;
+  opacity: 0;
+}
+.pt-remove:hover {
+  color: #e06c75;
+}
+.pt-project-row:hover .pt-remove {
+  opacity: 1;
+}
+.pt-add-project {
+  color: #5c5c5c;
+  border-top: 1px solid #262626;
+  padding: 8px 14px;
+  font-size: 12px;
+}
+.pt-add-project:hover {
+  background-color: #171717;
+  color: #9d9d9d;
+}
+
+/* ---- tab strip ---- */
 .pt-tabstrip {
   background-color: #111111;
   border-bottom: 1px solid #262626;
 }
 .pt-tab {
-  padding: 6px 14px;
+  padding: 6px 15px;
   border-right: 1px solid #262626;
-  color: #888888;
-  background: none;
   border-top: none; border-bottom: none; border-left: none;
+  color: #888888;
   font-family: "JetBrains Mono", monospace;
-  font-size: 12px;
-  min-height: 0;
+  font-size: 11px;
 }
+.pt-tab:hover { background-color: #171717; }
 .pt-tab.active { background-color: #0d0d0d; color: #33d17a; }
 .pt-tab.activity { color: #e5c07b; }
+
+/* ---- statusline ---- */
 .pt-statusline {
   background-color: #111111;
   border-top: 1px solid #262626;
   color: #777777;
-  padding: 3px 12px;
+  padding: 4px 14px;
   font-family: "JetBrains Mono", monospace;
-  font-size: 11px;
+  font-size: 10.5px;
 }
+.pt-status-hint { color: #5c5c5c; }
+
+/* ---- badges / accents ---- */
 .pt-badge-dirty { color: #e5c07b; }
 .pt-badge-clean { color: #33d17a; }
 .pt-accent-green { color: #33d17a; }
-paned separator { background-color: #262626; min-width: 1px; min-height: 1px; }
+
+/* ---- empty state ---- */
+.pt-empty {
+  color: #5c5c5c;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+}
+.pt-empty-hint {
+  color: #444444;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+}
+
+/* ---- paned separators ---- */
+paned > separator {
+  background-color: #262626;
+  min-width: 1px;
+  min-height: 1px;
+}
+paned > separator:hover {
+  background-color: #33d17a;
+}
