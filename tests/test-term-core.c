@@ -133,11 +133,64 @@ static void test_long_grapheme_cluster(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+static void test_selection(void) {
+  /* Print a known word, then programmatically drag-select across it and assert
+     pt_term_core_selection_text returns it. Cells are 8x16 with PT_PAD=4, so
+     column N spans pixels [4 + 8N, 4 + 8N + 8). "SELECTME" lands at row 0,
+     columns 0..7. */
+  Ctx ctx = {0};
+  ctx.loop = g_main_loop_new(NULL, FALSE);
+  const char *argv[] = {"/bin/sh", "-c",
+    "printf 'SELECTME done-marker\\n'; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .draw = on_draw_marker };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  guint to = g_timeout_add_seconds(10, on_timeout, &ctx);
+  g_main_loop_run(ctx.loop);
+  g_source_remove(to);
+  g_assert_true(ctx.found);
+  pt_term_core_sync(core);
+
+  /* No selection yet → NULL. */
+  g_assert_null(pt_term_core_selection_text(core));
+
+  /* Drag from the first cell of "SELECTME" to just past its last char.
+     Anchor at col 0 (px ~5), release near col 8 (px ~4 + 8*8 = 68). */
+  pt_term_core_selection_press(core, 5.0, 6.0, 1000000000ULL);
+  pt_term_core_selection_drag(core, 68.0, 6.0);
+  pt_term_core_selection_release(core, 68.0, 6.0);
+
+  char *sel = pt_term_core_selection_text(core);
+  g_assert_nonnull(sel);
+  g_assert_nonnull(strstr(sel, "SELECTME"));
+  g_assert_null(strstr(sel, "done-marker"));  /* stopped before the marker */
+  g_free(sel);
+
+  /* Double-click selects just the word under the pointer. */
+  pt_term_core_selection_press(core, 20.0, 6.0, 2000000000ULL);
+  pt_term_core_selection_press(core, 20.0, 6.0, 2000100000ULL);  /* +100us=word */
+  pt_term_core_selection_release(core, 20.0, 6.0);
+  char *word = pt_term_core_selection_text(core);
+  g_assert_nonnull(word);
+  g_assert_cmpstr(g_strstrip(word), ==, "SELECTME");
+  g_free(word);
+
+  /* Clear drops the selection. */
+  pt_term_core_selection_clear(core);
+  g_assert_null(pt_term_core_selection_text(core));
+
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx.loop);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
   g_test_add_func("/termcore/exit", test_exit_status_reported);
   g_test_add_func("/termcore/keys", test_key_send_echoes);
   g_test_add_func("/termcore/long-grapheme", test_long_grapheme_cluster);
+  g_test_add_func("/termcore/selection", test_selection);
   return g_test_run();
 }

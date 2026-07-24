@@ -29,9 +29,21 @@ struct PtTermCore {
   gboolean child_exited;
   int exit_status;
 
+  /* mouse selection (see pt_term_core_selection_*) */
+  gboolean sel_active;      /* a selection is installed on the terminal */
+  gboolean sel_dragging;    /* between press and release */
+  gboolean sel_moved;       /* pointer left the anchor cell during the drag */
+  uint16_t sel_anchor_col, sel_anchor_row;
+  int click_count;          /* 1=char, 2=word, 3=line (cycles) */
+  guint64 last_press_ns;
+  uint16_t last_press_col, last_press_row;
+
   PtTermCoreCallbacks cbs;
   gpointer cbs_user;
 };
+
+/* Cell padding around the grid; mirrors PT_PAD in pt-terminal.c. */
+#define PT_CORE_PAD 4
 
 /* ---- pty write (non-blocking best effort, as in ghostling) ---- */
 static void pty_write_raw(int fd, const char *buf, size_t len) {
@@ -280,6 +292,149 @@ void pt_term_core_scroll_delta(PtTermCore *c, int rows) {
   };
   ghostty_terminal_scroll_viewport(c->terminal, sv);
   if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
+}
+
+/* ---- mouse selection ----
+ *
+ * The pinned libghostty-vt has no selection-gesture object (the brief named
+ * ghostty_selection_gesture_*, which does not exist in this ABI). We build the
+ * selection directly from the snapshot API: pixel -> viewport cell -> a fresh
+ * GhosttyGridRef pair -> GhosttySelection, installed with OPT_SELECTION which
+ * copies it into terminal-owned tracked state immediately. Grid refs are
+ * untracked snapshots (valid only until the next terminal mutation), so we
+ * always resolve refs fresh and install in the same call rather than caching
+ * them across events. Anchor is stored as a viewport cell coordinate.
+ * Click count (double = word, triple = line) is derived from press timing. */
+
+static void sel_pixel_to_cell(PtTermCore *c, double px, double py,
+                              uint16_t *col, uint16_t *row) {
+  double cx = (px - PT_CORE_PAD) / (double)c->cell_w;
+  double cy = (py - PT_CORE_PAD) / (double)c->cell_h;
+  int ic = cx < 0 ? 0 : (int)cx;
+  int ir = cy < 0 ? 0 : (int)cy;
+  if (ic > c->cols - 1) ic = c->cols - 1;
+  if (ir > c->rows - 1) ir = c->rows - 1;
+  *col = (uint16_t)ic;
+  *row = (uint16_t)ir;
+}
+
+static gboolean sel_ref_at(PtTermCore *c, uint16_t col, uint16_t row,
+                           GhosttyGridRef *out) {
+  GhosttyPoint pt = { .tag = GHOSTTY_POINT_TAG_VIEWPORT,
+                      .value = { .coordinate = { .x = col, .y = row } } };
+  *out = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+  return ghostty_terminal_grid_ref(c->terminal, pt, out) == GHOSTTY_SUCCESS;
+}
+
+static void sel_install(PtTermCore *c, const GhosttySelection *sel) {
+  ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, sel);
+  c->sel_active = TRUE;
+}
+
+static void sel_install_linear(PtTermCore *c,
+                               uint16_t c0, uint16_t r0,
+                               uint16_t c1, uint16_t r1) {
+  GhosttyGridRef start, end;
+  if (!sel_ref_at(c, c0, r0, &start) || !sel_ref_at(c, c1, r1, &end)) return;
+  GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
+  sel.start = start;
+  sel.end = end;
+  sel.rectangle = false;
+  sel_install(c, &sel);
+}
+
+static void sel_install_word(PtTermCore *c, uint16_t col, uint16_t row) {
+  GhosttyGridRef ref;
+  if (!sel_ref_at(c, col, row, &ref)) return;
+  GhosttyTerminalSelectWordOptions o =
+      GHOSTTY_INIT_SIZED(GhosttyTerminalSelectWordOptions);
+  o.ref = ref;
+  GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
+  if (ghostty_terminal_select_word(c->terminal, &o, &sel) == GHOSTTY_SUCCESS)
+    sel_install(c, &sel);
+}
+
+static void sel_install_line(PtTermCore *c, uint16_t col, uint16_t row) {
+  GhosttyGridRef ref;
+  if (!sel_ref_at(c, col, row, &ref)) return;
+  GhosttyTerminalSelectLineOptions o =
+      GHOSTTY_INIT_SIZED(GhosttyTerminalSelectLineOptions);
+  o.ref = ref;
+  GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
+  if (ghostty_terminal_select_line(c->terminal, &o, &sel) == GHOSTTY_SUCCESS)
+    sel_install(c, &sel);
+}
+
+void pt_term_core_selection_clear(PtTermCore *c) {
+  if (!c->sel_active) return;
+  ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
+  c->sel_active = FALSE;
+}
+
+void pt_term_core_selection_press(PtTermCore *c, double px, double py,
+                                  guint64 time_ns) {
+  uint16_t col, row;
+  sel_pixel_to_cell(c, px, py, &col, &row);
+
+  /* Multi-click: same cell within 500ms cycles char -> word -> line. */
+  if (c->last_press_ns != 0 && time_ns - c->last_press_ns < 500000000ULL &&
+      col == c->last_press_col && row == c->last_press_row)
+    c->click_count = c->click_count % 3 + 1;
+  else
+    c->click_count = 1;
+  c->last_press_ns = time_ns;
+  c->last_press_col = col;
+  c->last_press_row = row;
+
+  c->sel_anchor_col = col;
+  c->sel_anchor_row = row;
+  c->sel_moved = FALSE;
+  c->sel_dragging = TRUE;
+
+  pt_term_core_selection_clear(c);       /* a fresh press drops any prior sel */
+  if (c->click_count == 2) sel_install_word(c, col, row);
+  else if (c->click_count == 3) sel_install_line(c, col, row);
+  /* single click installs nothing until the pointer actually drags */
+}
+
+void pt_term_core_selection_drag(PtTermCore *c, double px, double py) {
+  if (!c->sel_dragging) return;
+  uint16_t col, row;
+  sel_pixel_to_cell(c, px, py, &col, &row);
+  if (col != c->sel_anchor_col || row != c->sel_anchor_row) c->sel_moved = TRUE;
+  /* Word/line selections stay put until the pointer leaves the anchor cell. */
+  if (c->click_count >= 2 && !c->sel_moved) return;
+  sel_install_linear(c, c->sel_anchor_col, c->sel_anchor_row, col, row);
+}
+
+void pt_term_core_selection_release(PtTermCore *c, double px, double py) {
+  if (!c->sel_dragging) return;
+  c->sel_dragging = FALSE;
+  uint16_t col, row;
+  sel_pixel_to_cell(c, px, py, &col, &row);
+  if (c->sel_moved)
+    sel_install_linear(c, c->sel_anchor_col, c->sel_anchor_row, col, row);
+  /* No drag: a single click leaves nothing; a double/triple click keeps the
+     word/line selection installed at press time. */
+}
+
+char *pt_term_core_selection_text(PtTermCore *c) {
+  if (!c->sel_active) return NULL;
+  GhosttyTerminalSelectionFormatOptions opt =
+      GHOSTTY_INIT_SIZED(GhosttyTerminalSelectionFormatOptions);
+  opt.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
+  opt.unwrap = true;                 /* clipboard semantics per header docs */
+  opt.trim = true;
+  opt.selection = NULL;              /* use the terminal's active selection */
+  uint8_t *ptr = NULL;
+  size_t len = 0;
+  if (ghostty_terminal_selection_format_alloc(c->terminal, NULL, opt,
+                                              &ptr, &len) != GHOSTTY_SUCCESS ||
+      ptr == NULL || len == 0)
+    return NULL;
+  char *out = g_strndup((const char *)ptr, len);  /* result is not NUL-term'd */
+  ghostty_free(NULL, ptr, len);                    /* free with same allocator */
+  return out;
 }
 
 gboolean pt_term_core_mouse_tracking(PtTermCore *c) {

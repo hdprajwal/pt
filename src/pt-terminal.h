@@ -9,4 +9,5 @@ GtkWidget *pt_terminal_new(const char *cwd);
 PtTermCore *pt_terminal_core(PtTerminal *t);
 char *pt_terminal_current_cwd(PtTerminal *t);  /* /proc/<pid>/cwd, caller frees */
 void pt_terminal_paste(PtTerminal *t);          /* async clipboard paste */
+void pt_terminal_copy(PtTerminal *t);           /* copy selection to clipboard */
 /* GObject signals: "exited" (int), "title-changed" (const char*), "activity" (void) */

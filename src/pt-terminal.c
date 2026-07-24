@@ -143,13 +143,22 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
       ghostty_render_state_row_cells_get(cells,
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
 
+      bool selected = false;
+      ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED, &selected);
+      /* selection highlight (#264f38) takes over the cell background */
+      GdkRGBA sel_rgba = { 0x26 / 255.0f, 0x4f / 255.0f, 0x38 / 255.0f, 1.0f };
+
       GhosttyColorRgb fg = fg_default;
       GhosttyColorRgb bg = bg_default;
       gboolean has_bg = ghostty_render_state_row_cells_get(cells,
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &bg) == GHOSTTY_SUCCESS;
 
       if (glen == 0) {
-        if (has_bg)
+        if (selected)
+          gtk_snapshot_append_color(snapshot, &sel_rgba,
+              &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
+        else if (has_bg)
           gtk_snapshot_append_color(snapshot,
               &(GdkRGBA){bg.r / 255.0f, bg.g / 255.0f, bg.b / 255.0f, 1},
               &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
@@ -166,7 +175,10 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
       if (style.inverse) {
         GhosttyColorRgb tmp = fg; fg = bg; bg = tmp; has_bg = TRUE;
       }
-      if (has_bg)
+      if (selected)
+        gtk_snapshot_append_color(snapshot, &sel_rgba,
+            &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
+      else if (has_bg)
         gtk_snapshot_append_color(snapshot,
             &(GdkRGBA){bg.r / 255.0f, bg.g / 255.0f, bg.b / 255.0f, 1},
             &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
@@ -276,8 +288,15 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
       (state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK)) == 0)
     utf8_len = g_unichar_to_utf8((gunichar)uc, utf8);
 
-  return pt_term_core_send_key(t->core, key, GHOSTTY_KEY_ACTION_PRESS, mods,
-                               unshifted, utf8, utf8_len);
+  gboolean consumed =
+      pt_term_core_send_key(t->core, key, GHOSTTY_KEY_ACTION_PRESS, mods,
+                            unshifted, utf8, utf8_len);
+  if (consumed) {
+    /* any keypress that writes to the pty drops the selection */
+    pt_term_core_selection_clear(t->core);
+    gtk_widget_queue_draw(GTK_WIDGET(t));
+  }
+  return consumed;
 }
 
 static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
@@ -292,10 +311,36 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
   return TRUE;
 }
 
-static void on_click_focus(GtkGestureClick *g, int n, double x, double y,
+static void on_click_pressed(GtkGestureClick *g, int n, double x, double y,
+                             gpointer user) {
+  (void)n;
+  PtTerminal *t = PT_TERMINAL(user);
+  gtk_widget_grab_focus(GTK_WIDGET(t));
+  if (t->core == NULL) return;
+  /* controller event time is in milliseconds; the core wants nanoseconds */
+  guint32 ms =
+      gtk_event_controller_get_current_event_time(GTK_EVENT_CONTROLLER(g));
+  pt_term_core_selection_press(t->core, x, y, (guint64)ms * 1000000ULL);
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
+static void on_click_released(GtkGestureClick *g, int n, double x, double y,
+                              gpointer user) {
+  (void)g; (void)n;
+  PtTerminal *t = PT_TERMINAL(user);
+  if (t->core == NULL) return;
+  pt_term_core_selection_release(t->core, x, y);
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
+static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
                            gpointer user) {
-  (void)g; (void)n; (void)x; (void)y;
-  gtk_widget_grab_focus(GTK_WIDGET(user));
+  PtTerminal *t = PT_TERMINAL(user);
+  if (t->core == NULL) return;
+  double sx = 0, sy = 0;
+  gtk_gesture_drag_get_start_point(g, &sx, &sy);
+  pt_term_core_selection_drag(t->core, sx + ox, sy + oy);
+  gtk_widget_queue_draw(GTK_WIDGET(t));
 }
 
 static void on_paste_text(GObject *src, GAsyncResult *res, gpointer user) {
@@ -318,6 +363,14 @@ static void on_paste_text(GObject *src, GAsyncResult *res, gpointer user) {
 void pt_terminal_paste(PtTerminal *t) {
   GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(t));
   gdk_clipboard_read_text_async(cb, NULL, on_paste_text, g_object_ref(t));
+}
+
+void pt_terminal_copy(PtTerminal *t) {
+  if (t->core == NULL) return;
+  char *text = pt_term_core_selection_text(t->core);   /* g_strndup'd */
+  if (text == NULL) return;
+  gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(t)), text);
+  g_free(text);
 }
 
 char *pt_terminal_current_cwd(PtTerminal *t) {
@@ -374,8 +427,13 @@ static void pt_terminal_init(PtTerminal *t) {
   gtk_widget_add_controller(GTK_WIDGET(t), scroll);
 
   GtkGesture *click = gtk_gesture_click_new();
-  g_signal_connect(click, "pressed", G_CALLBACK(on_click_focus), t);
+  g_signal_connect(click, "pressed", G_CALLBACK(on_click_pressed), t);
+  g_signal_connect(click, "released", G_CALLBACK(on_click_released), t);
   gtk_widget_add_controller(GTK_WIDGET(t), GTK_EVENT_CONTROLLER(click));
+
+  GtkGesture *drag = gtk_gesture_drag_new();
+  g_signal_connect(drag, "drag-update", G_CALLBACK(on_drag_update), t);
+  gtk_widget_add_controller(GTK_WIDGET(t), GTK_EVENT_CONTROLLER(drag));
 }
 
 GtkWidget *pt_terminal_new(const char *cwd) {

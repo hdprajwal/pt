@@ -265,6 +265,13 @@ static void action_paste(PtWindow *w) {
   if (term != NULL) pt_terminal_paste(term);
 }
 
+static void action_copy(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  PtTerminal *term =
+      t != NULL ? pt_pane_grid_focused_terminal(PT_PANE_GRID(t->grid)) : NULL;
+  if (term != NULL) pt_terminal_copy(term);
+}
+
 /* ---------- project add/remove ---------- */
 static void on_folder_chosen(GObject *src, GAsyncResult *res, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
@@ -352,6 +359,9 @@ static gboolean sc_focus_next(GtkWidget *wg, GVariant *a, gpointer u) {
 static gboolean sc_paste(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a; action_paste(PT_WINDOW(u)); return TRUE;
 }
+static gboolean sc_copy(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a; action_copy(PT_WINDOW(u)); return TRUE;
+}
 
 static void add_shortcut(GtkShortcutController *ctl, const char *accel,
                          GtkShortcutFunc fn, gpointer data,
@@ -383,6 +393,7 @@ static void install_shortcuts(PtWindow *w) {
   add_shortcut(ctl, "<Control><Shift>w", sc_close_pane, w, NULL);
   add_shortcut(ctl, "<Control><Shift>o", sc_focus_next, w, NULL);
   add_shortcut(ctl, "<Control><Shift>v", sc_paste, w, NULL);
+  add_shortcut(ctl, "<Control><Shift>c", sc_copy, w, NULL);
   gtk_widget_add_controller(GTK_WIDGET(w), GTK_EVENT_CONTROLLER(ctl));
 }
 

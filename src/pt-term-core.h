@@ -26,6 +26,15 @@ gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
                                guint32 unshifted_cp,
                                const char *utf8, gsize utf8_len);
 void pt_term_core_scroll_delta(PtTermCore *c, int rows);
+
+/* ---- mouse selection (viewport-relative pixels; PT_PAD-padded) ---- */
+void pt_term_core_selection_press(PtTermCore *c, double px, double py,
+                                  guint64 time_ns);
+void pt_term_core_selection_drag(PtTermCore *c, double px, double py);
+void pt_term_core_selection_release(PtTermCore *c, double px, double py);
+void pt_term_core_selection_clear(PtTermCore *c);
+char *pt_term_core_selection_text(PtTermCore *c);  /* NULL when no selection; caller g_free */
+
 gboolean pt_term_core_mouse_tracking(PtTermCore *c);
 gboolean pt_term_core_bracketed_paste(PtTermCore *c);
 void pt_term_core_sync(PtTermCore *c);              /* render_state_update */
