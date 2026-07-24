@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.19)
+project(pt C)
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+include(FetchContent)
+
+# libghostty-vt is built by ghostty's CMake wrapper via `zig build lib-vt`.
+# Resolve zig from the environment so builds follow the active toolchain.
+find_program(PT_ZIG_EXECUTABLE zig HINTS "$ENV{HOME}/.local/opt/zig-0.15.2" REQUIRED NO_CACHE)
+set(ZIG_EXECUTABLE "${PT_ZIG_EXECUTABLE}" CACHE FILEPATH "Path to the Zig compiler" FORCE)
+
+FetchContent_Declare(ghostty
+  GIT_REPOSITORY https://github.com/ghostty-org/ghostty.git
+  GIT_TAG ae52f97dcac558735cfa916ea3965f247e5c6e9e
+)
+FetchContent_MakeAvailable(ghostty)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GTK  REQUIRED IMPORTED_TARGET gtk4)
+pkg_check_modules(ADW  REQUIRED IMPORTED_TARGET libadwaita-1)
+pkg_check_modules(JSON REQUIRED IMPORTED_TARGET json-glib-1.0)
+pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0 gio-2.0)
+
+# Compile CSS into the binary as a GResource.
+find_program(GLIB_COMPILE_RESOURCES glib-compile-resources REQUIRED)
+set(PT_RES_C ${CMAKE_BINARY_DIR}/pt-resources.c)
+add_custom_command(
+  OUTPUT ${PT_RES_C}
+  COMMAND ${GLIB_COMPILE_RESOURCES}
+          --target=${PT_RES_C} --generate-source
+          --sourcedir=${CMAKE_SOURCE_DIR}/src
+          ${CMAKE_SOURCE_DIR}/src/pt.gresource.xml
+  DEPENDS src/pt.gresource.xml src/style.css
+  COMMENT "Compiling GResources")
+
+add_executable(pt src/main.c ${PT_RES_C})
+target_link_libraries(pt PRIVATE PkgConfig::GTK PkgConfig::ADW)
+
+enable_testing()
