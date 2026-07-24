@@ -5,6 +5,7 @@
 #include "pt-pane-grid.h"
 #include "pt-session.h"
 #include "pt-git-parse.h"
+#include "pt-git-monitor.h"
 
 typedef struct {
   char *title;
@@ -20,7 +21,7 @@ typedef struct {
   gboolean missing;
   PtGitStatus git;
   gboolean is_repo;
-  gpointer monitor;     /* PtGitMonitor*, wired in Task 11; NULL until then */
+  PtGitMonitor *monitor;
   PtWindow *window;     /* back-pointer; Task 11 wires git monitors through it */
 } PtProjectUI;
 
@@ -168,6 +169,17 @@ static void tab_ui_free(gpointer data) {
   g_free(t);
 }
 
+static void on_git_update(const PtGitStatus *st, gboolean is_repo,
+                          gpointer user) {
+  /* user is the PtProjectUI; find its window via stored back-pointer */
+  PtProjectUI *p = user;
+  p->git = *st;
+  p->is_repo = is_repo;
+  PtWindow *w = p->window;
+  refresh_sidebar(w);
+  refresh_statusline(w);
+}
+
 static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
                                    const char *path) {
   PtProjectUI *p = g_new0(PtProjectUI, 1);
@@ -176,17 +188,19 @@ static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
   p->window = w;
   p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
   p->missing = !g_file_test(path, G_FILE_TEST_IS_DIR);
-  if (!p->missing)
+  if (!p->missing) {
     g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(path)));
+    p->monitor = pt_git_monitor_new(path, on_git_update, p);
+  }
   return p;
 }
 
 static void project_ui_free(gpointer data) {
   PtProjectUI *p = data;
+  pt_git_monitor_free(p->monitor);
   g_free(p->name);
   g_free(p->path);
   g_ptr_array_free(p->tabs, TRUE);
-  /* monitor freed in Task 11's wiring */
   g_free(p);
 }
 
