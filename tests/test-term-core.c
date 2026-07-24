@@ -92,10 +92,52 @@ static void test_key_send_echoes(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+static void on_draw_marker(PtTermCore *core, gpointer user) {
+  Ctx *ctx = user;
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  if (text != NULL && strstr(text, "done-marker") != NULL) {
+    ctx->found = TRUE;
+    g_main_loop_quit(ctx->loop);
+  }
+  g_free(text);
+}
+
+static void test_long_grapheme_cluster(void) {
+  /* Regression: a single cell holding a base char + 19 combining marks is
+     >16 codepoints. GRAPHEMES_BUF writes all of them, so grid_text must not
+     overflow its stack buffer. UTF-8 bytes are inlined (shell printf \u is
+     not portable): 'A' U+0041 then combining U+0301..U+0313. */
+  Ctx ctx = {0};
+  ctx.loop = g_main_loop_new(NULL, FALSE);
+  const char *argv[] = {"/bin/sh", "-c",
+    "printf '%s\\n' 'A"
+    "\xCC\x81\xCC\x82\xCC\x83\xCC\x84\xCC\x85\xCC\x86\xCC\x87\xCC\x88\xCC\x89"
+    "\xCC\x8A\xCC\x8B\xCC\x8C\xCC\x8D\xCC\x8E\xCC\x8F\xCC\x90\xCC\x91\xCC\x92"
+    "\xCC\x93 done-marker'; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .draw = on_draw_marker };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  guint to = g_timeout_add_seconds(10, on_timeout, &ctx);
+  g_main_loop_run(ctx.loop);
+  g_source_remove(to);
+  g_assert_true(ctx.found);
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_nonnull(strstr(text, "A"));
+  g_free(text);
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx.loop);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
   g_test_add_func("/termcore/exit", test_exit_status_reported);
   g_test_add_func("/termcore/keys", test_key_send_echoes);
+  g_test_add_func("/termcore/long-grapheme", test_long_grapheme_cluster);
   return g_test_run();
 }

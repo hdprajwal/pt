@@ -90,7 +90,7 @@ static void effect_title_changed(GhosttyTerminal t, void *ud) {
     return;
   char buf[256];
   size_t len = title.len < sizeof(buf) - 1 ? title.len : sizeof(buf) - 1;
-  memcpy(buf, title.ptr, len);
+  if (len > 0) memcpy(buf, title.ptr, len);
   buf[len] = '\0';
   c->cbs.title(c, buf, c->cbs_user);
 }
@@ -342,14 +342,17 @@ char *pt_term_core_grid_text(PtTermCore *c) {
       ghostty_render_state_row_cells_get(cells,
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
       if (glen == 0) { g_string_append_c(out, ' '); continue; }
-      uint32_t cps[16];
-      uint32_t n = glen < 16 ? glen : 16;
+      /* GRAPHEMES_BUF writes ALL glen codepoints; the buffer must hold glen.
+         Use a stack buffer for the common case, heap for long clusters. */
+      uint32_t cps_stack[16];
+      uint32_t *cps = glen <= 16 ? cps_stack : g_new(uint32_t, glen);
       ghostty_render_state_row_cells_get(cells,
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
-      for (uint32_t i = 0; i < n; i++) {
+      for (uint32_t i = 0; i < glen; i++) {
         char u8[4];
         g_string_append_len(out, u8, utf8_encode_cp(cps[i], u8));
       }
+      if (cps != cps_stack) g_free(cps);
     }
     /* trim trailing spaces on the row */
     while (out->len > row_start && out->str[out->len - 1] == ' ')
