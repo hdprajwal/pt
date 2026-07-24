@@ -1,6 +1,6 @@
 #include "pt-pane-grid.h"
 
-enum { SIG_STRUCTURE, SIG_ACTIVITY, SIG_FOCUS, N_SIGNALS };
+enum { SIG_STRUCTURE, SIG_ACTIVITY, SIG_FOCUS, SIG_EMPTIED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtPaneGrid {
@@ -28,6 +28,47 @@ static void on_term_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   }
 }
 
+/* Is `leaf` still a live leaf of `n`? Compares by pointer identity only, so a
+ * dangling `leaf` (freed by a manual close before the idle ran) is never
+ * dereferenced — we only deref the tree nodes we walk. */
+static gboolean leaf_in_tree(PtSplitNode *n, PtSplitNode *leaf) {
+  if (n == NULL) return FALSE;
+  if (n->kind == PT_SPLIT_LEAF) return n == leaf;
+  return leaf_in_tree(n->a, leaf) || leaf_in_tree(n->b, leaf);
+}
+
+typedef struct {
+  PtPaneGrid *grid; /* owns a ref */
+  PtSplitNode *leaf;
+} CloseCtx;
+
+/* Deferred close for a clean shell exit: running synchronously from the
+ * "exited" signal would free the terminal core under its own child-watch
+ * callback frame. */
+static gboolean close_pane_idle(gpointer data) {
+  CloseCtx *ctx = data;
+  PtPaneGrid *g = ctx->grid;
+  if (leaf_in_tree(g->tree, ctx->leaf)) {
+    g->focused = ctx->leaf;
+    if (!pt_pane_grid_close_focused(g)) /* grid now empty */
+      g_signal_emit(g, signals[SIG_EMPTIED], 0);
+  }
+  g_object_unref(g);
+  g_free(ctx);
+  return G_SOURCE_REMOVE;
+}
+
+static void on_term_exited(PtTerminal *t, int status, gpointer user) {
+  if (status != 0) return; /* non-zero/signal exits keep the banner */
+  PtPaneGrid *g = PT_PANE_GRID(user);
+  PtSplitNode *leaf = g_object_get_data(G_OBJECT(t), "pt-leaf");
+  if (leaf == NULL) return;
+  CloseCtx *ctx = g_new0(CloseCtx, 1);
+  ctx->grid = g_object_ref(g);
+  ctx->leaf = leaf;
+  g_idle_add(close_pane_idle, ctx);
+}
+
 static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   if (leaf->user != NULL) return GTK_WIDGET(leaf->user);
   GtkWidget *term = pt_terminal_new(leaf->cwd);
@@ -35,6 +76,7 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   leaf->user = term;
   g_object_set_data(G_OBJECT(term), "pt-leaf", leaf);
   g_signal_connect(term, "activity", G_CALLBACK(on_term_activity), g);
+  g_signal_connect(term, "exited", G_CALLBACK(on_term_exited), g);
   GtkEventController *focus = gtk_event_controller_focus_new();
   g_signal_connect(focus, "enter", G_CALLBACK(on_term_focus_enter), g);
   gtk_widget_add_controller(term, focus);
@@ -256,6 +298,8 @@ static void pt_pane_grid_class_init(PtPaneGridClass *klass) {
   signals[SIG_ACTIVITY] = g_signal_new("activity", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_FOCUS] = g_signal_new("focus-changed", PT_TYPE_PANE_GRID,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[SIG_EMPTIED] = g_signal_new("emptied", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 

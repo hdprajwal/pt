@@ -160,6 +160,28 @@ static void on_grid_activity(PtPaneGrid *g, gpointer user) {
   }
 }
 
+/* Last pane in a grid closed via a clean shell exit → drop the owning tab.
+ * The grid may belong to a background project/tab (a background shell can exit),
+ * so scan every project. The emitting grid survives this (the idle in
+ * pt-pane-grid holds its own ref) even though tab removal unrefs it here. */
+static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  for (guint pi = 0; pi < w->projects->len; pi++) {
+    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
+    for (guint ti = 0; ti < p->tabs->len; ti++) {
+      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
+      if (t->grid != GTK_WIDGET(g)) continue;
+      g_ptr_array_remove_index(p->tabs, ti);
+      if (p->active_tab >= (int)p->tabs->len)
+        p->active_tab = (int)p->tabs->len - 1;
+      if ((int)pi == w->active_project)
+        show_active_grid(w);
+      mark_dirty(w);
+      return;
+    }
+  }
+}
+
 static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
   PtTabUI *t = g_new0(PtTabUI, 1);
   t->title = g_strdup(title);
@@ -169,6 +191,7 @@ static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
                    G_CALLBACK(on_grid_structure), w);
   g_signal_connect(t->grid, "focus-changed", G_CALLBACK(on_grid_focus), w);
   g_signal_connect(t->grid, "activity", G_CALLBACK(on_grid_activity), w);
+  g_signal_connect(t->grid, "emptied", G_CALLBACK(on_grid_emptied), w);
   return t;
 }
 
