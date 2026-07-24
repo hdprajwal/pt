@@ -46,7 +46,7 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
 
     GtkWidget *name = gtk_label_new(rows[i].name);
     gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
-    gtk_widget_set_hexpand(name, TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_MIDDLE);
     gtk_box_append(GTK_BOX(row), name);
 
     if (rows[i].missing) {
@@ -65,8 +65,21 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
       gtk_box_append(GTK_BOX(row), badge);
     }
 
+    /* spacer pushes the shortcut hint + remove button to the right edge */
+    GtkWidget *spacer = gtk_label_new(NULL);
+    gtk_widget_set_hexpand(spacer, TRUE);
+    gtk_box_append(GTK_BOX(row), spacer);
+
+    if (i < 9) {
+      char khint[8];
+      g_snprintf(khint, sizeof(khint), "^%d", i + 1);
+      GtkWidget *kbd = gtk_label_new(khint);
+      gtk_widget_add_css_class(kbd, "pt-kbd-hint");
+      gtk_box_append(GTK_BOX(row), kbd);
+    }
+
     GtkWidget *rm = gtk_button_new_with_label("×");
-    gtk_widget_add_css_class(rm, "pt-tab");
+    gtk_widget_add_css_class(rm, "pt-remove");
     g_object_set_data(G_OBJECT(rm), "pt-index", GINT_TO_POINTER(i));
     g_signal_connect(rm, "clicked", G_CALLBACK(on_remove_clicked), sb);
     gtk_box_append(GTK_BOX(row), rm);
@@ -112,7 +125,11 @@ static void pt_sidebar_init(PtSidebar *sb) {
   gtk_box_append(GTK_BOX(sb->box), sb->rows_box);
 
   GtkWidget *add = gtk_button_new_with_label("+ project");
-  gtk_widget_add_css_class(add, "pt-tab");
+  gtk_widget_add_css_class(add, "pt-add-project");
+  gtk_widget_set_halign(add, GTK_ALIGN_FILL);
+  GtkWidget *add_label = gtk_button_get_child(GTK_BUTTON(add));
+  if (GTK_IS_LABEL(add_label))
+    gtk_label_set_xalign(GTK_LABEL(add_label), 0.0f);
   g_signal_connect(add, "clicked", G_CALLBACK(on_add_clicked), sb);
   gtk_box_append(GTK_BOX(sb->box), add);
 }

@@ -114,11 +114,21 @@ static void show_active_grid(PtWindow *w) {
     const char *msg =
         (ap != NULL && ap->missing)
             ? "project directory missing — × to remove"
-            : "no project · click [+ project] to add one";
+            : "no project";
+    GtkWidget *empty = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_vexpand(empty, TRUE);
+    gtk_widget_set_halign(empty, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(empty, GTK_ALIGN_CENTER);
     GtkWidget *hint = gtk_label_new(msg);
-    gtk_widget_add_css_class(hint, "mono");
-    gtk_widget_set_vexpand(hint, TRUE);
-    gtk_box_append(GTK_BOX(w->content), hint);
+    gtk_widget_add_css_class(hint, "pt-empty");
+    gtk_box_append(GTK_BOX(empty), hint);
+    GtkWidget *keys = gtk_label_new(
+        (ap != NULL && ap->missing)
+            ? "^⇧W remove · ^1..9 switch project"
+            : "[+ project] to add · ^1..9 switch · ^⇧T new tab");
+    gtk_widget_add_css_class(keys, "pt-empty-hint");
+    gtk_box_append(GTK_BOX(empty), keys);
+    gtk_box_append(GTK_BOX(w->content), empty);
   }
   refresh_tabstrip(w);
   refresh_statusline(w);

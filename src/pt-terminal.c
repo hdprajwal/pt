@@ -17,6 +17,7 @@ struct _PtTerminal {
   int cell_w, cell_h;
   gboolean exited;
   int exit_status;
+  gboolean focused;
 };
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
@@ -235,6 +236,17 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
                             t->cell_w, t->cell_h));
   }
 
+  /* focused-pane ring: an inset 1px dark-green border drawn on top of the
+   * content (the CSS box-shadow would be painted over by our bg fill). */
+  if (t->focused) {
+    GdkRGBA ring = { 0x2f / 255.0f, 0x4f / 255.0f, 0x3a / 255.0f, 1.0f };
+    GskRoundedRect rr;
+    gsk_rounded_rect_init_from_rect(&rr, &GRAPHENE_RECT_INIT(0, 0, w, h), 0);
+    gtk_snapshot_append_border(snapshot, &rr,
+        (float[4]){ 1, 1, 1, 1 },
+        (GdkRGBA[4]){ ring, ring, ring, ring });
+  }
+
   /* exited banner */
   if (t->exited) {
     char msg[96];
@@ -263,6 +275,22 @@ static void restart_shell(PtTerminal *t) {
   t->start_cwd = cwd != NULL ? cwd : g_strdup(g_get_home_dir());
   ensure_core(t);
   gtk_widget_queue_allocate(GTK_WIDGET(t)); /* re-sizes the new core */
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
+static void on_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
+  (void)ctl;
+  PtTerminal *t = PT_TERMINAL(user);
+  t->focused = TRUE;
+  gtk_widget_add_css_class(GTK_WIDGET(t), "focused");
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
+static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
+  (void)ctl;
+  PtTerminal *t = PT_TERMINAL(user);
+  t->focused = FALSE;
+  gtk_widget_remove_css_class(GTK_WIDGET(t), "focused");
   gtk_widget_queue_draw(GTK_WIDGET(t));
 }
 
@@ -434,6 +462,11 @@ static void pt_terminal_init(PtTerminal *t) {
   GtkGesture *drag = gtk_gesture_drag_new();
   g_signal_connect(drag, "drag-update", G_CALLBACK(on_drag_update), t);
   gtk_widget_add_controller(GTK_WIDGET(t), GTK_EVENT_CONTROLLER(drag));
+
+  GtkEventController *focus = gtk_event_controller_focus_new();
+  g_signal_connect(focus, "enter", G_CALLBACK(on_focus_enter), t);
+  g_signal_connect(focus, "leave", G_CALLBACK(on_focus_leave), t);
+  gtk_widget_add_controller(GTK_WIDGET(t), focus);
 }
 
 GtkWidget *pt_terminal_new(const char *cwd) {

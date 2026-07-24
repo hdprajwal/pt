@@ -32,10 +32,17 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, GPtrArray *titles, int active) {
     char *label = g_strdup_printf("%u:%s", i + 1,
                                   (const char *)g_ptr_array_index(titles, i));
     GtkWidget *btn = gtk_button_new_with_label(label);
-    g_free(label);
+    /* Stash the base label so the activity dot can be toggled without
+     * corrupting the title text. */
+    g_object_set_data_full(G_OBJECT(btn), "pt-base-label", label, g_free);
     gtk_widget_add_css_class(btn, "pt-tab");
     if ((int)i == active) gtk_widget_add_css_class(btn, "active");
     g_object_set_data(G_OBJECT(btn), "pt-index", GINT_TO_POINTER((int)i));
+    GtkWidget *lbl = gtk_button_get_child(GTK_BUTTON(btn));
+    if (GTK_IS_LABEL(lbl)) {
+      gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_MIDDLE);
+      gtk_label_set_max_width_chars(GTK_LABEL(lbl), 24);
+    }
     g_signal_connect(btn, "clicked", G_CALLBACK(on_tab_clicked), s);
     gtk_box_append(GTK_BOX(s->box), btn);
   }
@@ -43,15 +50,33 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, GPtrArray *titles, int active) {
   gtk_widget_add_css_class(plus, "pt-tab");
   g_signal_connect(plus, "clicked", G_CALLBACK(on_new_clicked), s);
   gtk_box_append(GTK_BOX(s->box), plus);
+
+  /* right-aligned split-shortcut hint */
+  GtkWidget *spacer = gtk_label_new(NULL);
+  gtk_widget_set_hexpand(spacer, TRUE);
+  gtk_box_append(GTK_BOX(s->box), spacer);
+  GtkWidget *hint = gtk_label_new("[│ ^⇧D]  [─ ^⇧S]");
+  gtk_widget_add_css_class(hint, "pt-kbd-hint");
+  gtk_widget_set_margin_end(hint, 12);
+  gtk_box_append(GTK_BOX(s->box), hint);
 }
 
 void pt_tab_strip_set_activity(PtTabStrip *s, int index, gboolean on) {
   GtkWidget *child = gtk_widget_get_first_child(s->box);
   for (int i = 0; child != NULL && i < index; i++)
     child = gtk_widget_get_next_sibling(child);
-  if (child == NULL) return;
-  if (on) gtk_widget_add_css_class(child, "activity");
-  else gtk_widget_remove_css_class(child, "activity");
+  if (child == NULL || !GTK_IS_BUTTON(child)) return;
+  const char *base = g_object_get_data(G_OBJECT(child), "pt-base-label");
+  if (base == NULL) return;
+  if (on) {
+    char *txt = g_strconcat(base, " ●", NULL);
+    gtk_button_set_label(GTK_BUTTON(child), txt);
+    g_free(txt);
+    gtk_widget_add_css_class(child, "activity");
+  } else {
+    gtk_button_set_label(GTK_BUTTON(child), base);
+    gtk_widget_remove_css_class(child, "activity");
+  }
 }
 
 static void pt_tab_strip_dispose(GObject *obj) {
