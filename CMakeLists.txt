@@ -41,7 +41,8 @@ target_link_libraries(pt PRIVATE PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
   src/pt-git-parse.c
-  src/pt-split-tree.c)
+  src/pt-split-tree.c
+  src/pt-session.c)
 target_include_directories(ptcore PUBLIC src)
 target_link_libraries(ptcore PUBLIC ghostty-vt PkgConfig::JSON PkgConfig::GLIB util)
 
@@ -54,3 +55,7 @@ add_test(NAME git-parse COMMAND test-git-parse)
 add_executable(test-split-tree tests/test-split-tree.c)
 target_link_libraries(test-split-tree PRIVATE ptcore)
 add_test(NAME split-tree COMMAND test-split-tree)
+
+add_executable(test-session tests/test-session.c)
+target_link_libraries(test-session PRIVATE ptcore)
+add_test(NAME session COMMAND test-session)
