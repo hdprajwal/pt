@@ -39,4 +39,13 @@ add_custom_command(
 add_executable(pt src/main.c ${PT_RES_C})
 target_link_libraries(pt PRIVATE PkgConfig::GTK PkgConfig::ADW)
 
+add_library(ptcore STATIC
+  src/pt-git-parse.c)
+target_include_directories(ptcore PUBLIC src)
+target_link_libraries(ptcore PUBLIC ghostty-vt PkgConfig::JSON PkgConfig::GLIB util)
+
 enable_testing()
+
+add_executable(test-git-parse tests/test-git-parse.c)
+target_link_libraries(test-git-parse PRIVATE ptcore)
+add_test(NAME git-parse COMMAND test-git-parse)
