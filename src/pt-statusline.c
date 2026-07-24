@@ -36,7 +36,7 @@ void pt_statusline_update(PtStatusline *sl, const char *project,
   g_string_free(s, TRUE);
 
   gtk_label_set_text(GTK_LABEL(sl->hint),
-                     "^1..9 projects · ^⇧T new tab");
+                     "^1..9 projects · ^Tab tabs · ^⇧T new");
 }
 
 static void pt_statusline_dispose(GObject *obj) {

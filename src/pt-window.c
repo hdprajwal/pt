@@ -278,6 +278,24 @@ static void action_switch_tab(PtWindow *w, int idx) {
   mark_dirty(w);
 }
 
+static void action_next_tab(PtWindow *w) {
+  PtProjectUI *p = active_project(w);
+  if (p == NULL || p->tabs->len <= 1) return;
+  int len = (int)p->tabs->len;
+  p->active_tab = (p->active_tab + 1 + len) % len;
+  show_active_grid(w);
+  mark_dirty(w);
+}
+
+static void action_prev_tab(PtWindow *w) {
+  PtProjectUI *p = active_project(w);
+  if (p == NULL || p->tabs->len <= 1) return;
+  int len = (int)p->tabs->len;
+  p->active_tab = (p->active_tab - 1 + len) % len;
+  show_active_grid(w);
+  mark_dirty(w);
+}
+
 static void action_new_tab(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   if (p == NULL || p->missing) return;
@@ -397,6 +415,12 @@ static gboolean sc_tab(GtkWidget *widget, GVariant *args, gpointer user) {
 static gboolean sc_new_tab(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a; action_new_tab(PT_WINDOW(u)); return TRUE;
 }
+static gboolean sc_next_tab(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a; action_next_tab(PT_WINDOW(u)); return TRUE;
+}
+static gboolean sc_prev_tab(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a; action_prev_tab(PT_WINDOW(u)); return TRUE;
+}
 static gboolean sc_split_h(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a; action_split(PT_WINDOW(u), PT_SPLIT_H); return TRUE;
 }
@@ -419,8 +443,19 @@ static gboolean sc_copy(GtkWidget *wg, GVariant *a, gpointer u) {
 static void add_shortcut(GtkShortcutController *ctl, const char *accel,
                          GtkShortcutFunc fn, gpointer data,
                          GDestroyNotify destroy) {
+  GtkShortcutTrigger *trig = gtk_shortcut_trigger_parse_string(accel);
+  g_warn_if_fail(trig != NULL);   /* never ship a silent, unparseable binding */
   gtk_shortcut_controller_add_shortcut(ctl,
-      gtk_shortcut_new(gtk_shortcut_trigger_parse_string(accel),
+      gtk_shortcut_new(trig, gtk_callback_action_new(fn, data, destroy)));
+}
+
+/* Bind a raw keyval+mods (used for ISO_Left_Tab, which some setups deliver for
+ * Shift+Tab and which does not always round-trip through parse_string). */
+static void add_keyval_shortcut(GtkShortcutController *ctl, guint keyval,
+                                GdkModifierType mods, GtkShortcutFunc fn,
+                                gpointer data, GDestroyNotify destroy) {
+  gtk_shortcut_controller_add_shortcut(ctl,
+      gtk_shortcut_new(gtk_keyval_trigger_new(keyval, mods),
                        gtk_callback_action_new(fn, data, destroy)));
 }
 
@@ -441,6 +476,10 @@ static void install_shortcuts(PtWindow *w) {
     add_shortcut(ctl, accel, sc_tab, tc, g_free);
   }
   add_shortcut(ctl, "<Control><Shift>t", sc_new_tab, w, NULL);
+  add_shortcut(ctl, "<Control>Tab", sc_next_tab, w, NULL);
+  add_shortcut(ctl, "<Control><Shift>Tab", sc_prev_tab, w, NULL);
+  add_keyval_shortcut(ctl, GDK_KEY_ISO_Left_Tab, GDK_CONTROL_MASK,
+                      sc_prev_tab, w, NULL);
   add_shortcut(ctl, "<Control><Shift>d", sc_split_h, w, NULL);
   add_shortcut(ctl, "<Control><Shift>s", sc_split_v, w, NULL);
   add_shortcut(ctl, "<Control><Shift>w", sc_close_pane, w, NULL);
