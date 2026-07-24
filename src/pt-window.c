@@ -182,6 +182,25 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
   }
 }
 
+/* Focused pane's foreground program changed → relabel the owning tab live.
+ * Deliberately does NOT mark_dirty: command churn must not spam saves; the tab
+ * title is captured on the next structural save anyway. */
+static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  for (guint pi = 0; pi < w->projects->len; pi++) {
+    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
+    for (guint ti = 0; ti < p->tabs->len; ti++) {
+      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
+      if (t->grid != GTK_WIDGET(g)) continue;
+      g_free(t->title);
+      t->title = g_strdup(comm);
+      if ((int)pi == w->active_project)
+        refresh_tabstrip(w);
+      return;
+    }
+  }
+}
+
 static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
   PtTabUI *t = g_new0(PtTabUI, 1);
   t->title = g_strdup(title);
@@ -190,6 +209,7 @@ static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
   g_signal_connect(t->grid, "structure-changed",
                    G_CALLBACK(on_grid_structure), w);
   g_signal_connect(t->grid, "focus-changed", G_CALLBACK(on_grid_focus), w);
+  g_signal_connect(t->grid, "command-changed", G_CALLBACK(on_grid_command), w);
   g_signal_connect(t->grid, "activity", G_CALLBACK(on_grid_activity), w);
   g_signal_connect(t->grid, "emptied", G_CALLBACK(on_grid_emptied), w);
   return t;

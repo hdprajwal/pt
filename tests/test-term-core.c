@@ -2,7 +2,8 @@
 #include <string.h>
 
 typedef struct { GMainLoop *loop; PtTermCore *core;
-                 gboolean found; int exit_status; gboolean exited; } Ctx;
+                 gboolean found; int exit_status; gboolean exited;
+                 char comm[64]; } Ctx;
 
 static void on_draw(PtTermCore *core, gpointer user) {
   Ctx *ctx = user;
@@ -185,6 +186,37 @@ static void test_selection(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+static void on_command_cb(PtTermCore *core, const char *comm, gpointer user) {
+  (void)core;
+  Ctx *ctx = user;
+  g_strlcpy(ctx->comm, comm, sizeof(ctx->comm));
+  /* The pty's foreground pgrp is the shell ("sh") until it execs/forks sleep;
+     accept either non-empty comm to avoid a timing race. */
+  if (g_strcmp0(comm, "sleep") == 0 || g_strcmp0(comm, "sh") == 0) {
+    ctx->found = TRUE;
+    g_main_loop_quit(ctx->loop);
+  }
+}
+
+static void test_foreground_command(void) {
+  /* tcgetpgrp path: the foreground program of the pty should be reported. */
+  Ctx ctx = {0};
+  ctx.loop = g_main_loop_new(NULL, FALSE);
+  const char *argv[] = {"/bin/sh", "-c", "sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .command = on_command_cb };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  guint to = g_timeout_add_seconds(3, on_timeout, &ctx);
+  g_main_loop_run(ctx.loop);
+  g_source_remove(to);
+  g_assert_true(ctx.found);
+  g_assert_cmpuint(strlen(ctx.comm), >, 0);
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx.loop);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
@@ -192,5 +224,6 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/keys", test_key_send_echoes);
   g_test_add_func("/termcore/long-grapheme", test_long_grapheme_cluster);
   g_test_add_func("/termcore/selection", test_selection);
+  g_test_add_func("/termcore/foreground-command", test_foreground_command);
   return g_test_run();
 }

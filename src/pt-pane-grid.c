@@ -1,6 +1,7 @@
 #include "pt-pane-grid.h"
 
-enum { SIG_STRUCTURE, SIG_ACTIVITY, SIG_FOCUS, SIG_EMPTIED, N_SIGNALS };
+enum { SIG_STRUCTURE, SIG_ACTIVITY, SIG_FOCUS, SIG_COMMAND, SIG_EMPTIED,
+       N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtPaneGrid {
@@ -17,6 +18,14 @@ static void on_term_activity(PtTerminal *t, gpointer user) {
   g_signal_emit(PT_PANE_GRID(user), signals[SIG_ACTIVITY], 0);
 }
 
+/* Re-emit "command-changed" for the currently focused pane, when known, so the
+ * tab relabels on focus moves (not just when the fg program itself changes). */
+static void emit_focused_command(PtPaneGrid *g) {
+  if (g->focused == NULL || g->focused->user == NULL) return;
+  const char *cmd = pt_terminal_last_command(PT_TERMINAL(g->focused->user));
+  if (cmd != NULL) g_signal_emit(g, signals[SIG_COMMAND], 0, cmd);
+}
+
 static void on_term_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   PtPaneGrid *g = PT_PANE_GRID(user);
   GtkWidget *term =
@@ -25,7 +34,14 @@ static void on_term_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   if (leaf != NULL && leaf != g->focused) {
     g->focused = leaf;
     g_signal_emit(g, signals[SIG_FOCUS], 0);
+    emit_focused_command(g);
   }
+}
+
+static void on_term_command(PtTerminal *t, const char *comm, gpointer user) {
+  PtPaneGrid *g = PT_PANE_GRID(user);
+  if (g->focused != NULL && g->focused->user == (gpointer)t)
+    g_signal_emit(g, signals[SIG_COMMAND], 0, comm);
 }
 
 /* Is `leaf` still a live leaf of `n`? Compares by pointer identity only, so a
@@ -77,6 +93,7 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   g_object_set_data(G_OBJECT(term), "pt-leaf", leaf);
   g_signal_connect(term, "activity", G_CALLBACK(on_term_activity), g);
   g_signal_connect(term, "exited", G_CALLBACK(on_term_exited), g);
+  g_signal_connect(term, "command-changed", G_CALLBACK(on_term_command), g);
   GtkEventController *focus = gtk_event_controller_focus_new();
   g_signal_connect(focus, "enter", G_CALLBACK(on_term_focus_enter), g);
   gtk_widget_add_controller(term, focus);
@@ -213,6 +230,7 @@ void pt_pane_grid_focus_next(PtPaneGrid *g) {
   g->focused = pt_split_next_leaf(g->tree, g->focused);
   pt_pane_grid_focus_terminal(g);
   g_signal_emit(g, signals[SIG_FOCUS], 0);
+  emit_focused_command(g);
 }
 
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g) {
@@ -299,6 +317,8 @@ static void pt_pane_grid_class_init(PtPaneGridClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_FOCUS] = g_signal_new("focus-changed", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[SIG_COMMAND] = g_signal_new("command-changed", PT_TYPE_PANE_GRID,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_EMPTIED] = g_signal_new("emptied", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }

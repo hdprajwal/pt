@@ -5,13 +5,15 @@
 #define PT_FONT "JetBrains Mono, monospace 11"
 #define PT_PAD 4
 
-enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_ACTIVITY, N_SIGNALS };
+enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_ACTIVITY, SIG_COMMAND_CHANGED,
+       N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtTerminal {
   GtkWidget parent_instance;
   PtTermCore *core;
   char *start_cwd;
+  char *last_command;
   PangoLayout *layout;
   PangoFontDescription *font_desc;
   int cell_w, cell_h;
@@ -44,6 +46,14 @@ static void core_title(PtTermCore *core, const char *title, gpointer user) {
   g_signal_emit(PT_TERMINAL(user), signals[SIG_TITLE_CHANGED], 0, title);
 }
 
+static void core_command(PtTermCore *core, const char *comm, gpointer user) {
+  (void)core;
+  PtTerminal *t = PT_TERMINAL(user);
+  g_free(t->last_command);
+  t->last_command = g_strdup(comm);
+  g_signal_emit(t, signals[SIG_COMMAND_CHANGED], 0, comm);
+}
+
 /* ---- geometry ---- */
 static void measure_font(PtTerminal *t) {
   PangoContext *pc = gtk_widget_get_pango_context(GTK_WIDGET(t));
@@ -72,7 +82,7 @@ static void ensure_core(PtTerminal *t) {
     return;
   }
   PtTermCoreCallbacks cbs = { .draw = core_draw, .exited = core_exited,
-                              .title = core_title };
+                              .title = core_title, .command = core_command };
   pt_term_core_set_callbacks(t->core, &cbs, t);
 }
 
@@ -412,6 +422,8 @@ char *pt_terminal_current_cwd(PtTerminal *t) {
 
 PtTermCore *pt_terminal_core(PtTerminal *t) { return t->core; }
 
+const char *pt_terminal_last_command(PtTerminal *t) { return t->last_command; }
+
 /* ---- boilerplate ---- */
 static void pt_terminal_dispose(GObject *obj) {
   PtTerminal *t = PT_TERMINAL(obj);
@@ -419,6 +431,7 @@ static void pt_terminal_dispose(GObject *obj) {
   g_clear_object(&t->layout);
   g_clear_pointer(&t->font_desc, pango_font_description_free);
   g_clear_pointer(&t->start_cwd, g_free);
+  g_clear_pointer(&t->last_command, g_free);
   G_OBJECT_CLASS(pt_terminal_parent_class)->dispose(obj);
 }
 
@@ -435,6 +448,8 @@ static void pt_terminal_class_init(PtTerminalClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_ACTIVITY] = g_signal_new("activity", PT_TYPE_TERMINAL,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[SIG_COMMAND_CHANGED] = g_signal_new("command-changed", PT_TYPE_TERMINAL,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 
 static void pt_terminal_init(PtTerminal *t) {

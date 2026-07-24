@@ -9,6 +9,7 @@ typedef struct {
   void (*draw)(PtTermCore *core, gpointer user);   /* state changed; redraw */
   void (*exited)(PtTermCore *core, int status, gpointer user);
   void (*title)(PtTermCore *core, const char *title, gpointer user);
+  void (*command)(PtTermCore *core, const char *comm, gpointer user);
 } PtTermCoreCallbacks;
 
 /* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh). */

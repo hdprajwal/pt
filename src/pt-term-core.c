@@ -22,6 +22,8 @@ struct PtTermCore {
   pid_t child;
   guint fd_source;
   guint child_source;
+  guint cmd_timer;
+  char last_comm[64];
   guint16 cols, rows;
   int cell_w, cell_h;
 
@@ -105,6 +107,28 @@ static void effect_title_changed(GhosttyTerminal t, void *ud) {
   if (len > 0) memcpy(buf, title.ptr, len);
   buf[len] = '\0';
   c->cbs.title(c, buf, c->cbs_user);
+}
+
+/* ---- foreground-command watcher ----
+ * Polls the pty's foreground process group (the app the user is actually
+ * interacting with, e.g. nvim under the shell) and reports its /proc/<pid>/comm
+ * whenever it changes, so tabs can label themselves live. */
+static gboolean poll_foreground_command(gpointer ud) {
+  PtTermCore *c = ud;
+  if (c->child_exited) return G_SOURCE_CONTINUE;
+  pid_t fg = tcgetpgrp(c->pty_fd);
+  if (fg <= 0) fg = c->child;
+  char path[64];
+  g_snprintf(path, sizeof(path), "/proc/%d/comm", (int)fg);
+  char *comm = NULL;
+  if (!g_file_get_contents(path, &comm, NULL, NULL)) return G_SOURCE_CONTINUE;
+  g_strchomp(comm);              /* strip the trailing newline */
+  if (comm[0] != '\0' && strcmp(comm, c->last_comm) != 0) {
+    g_strlcpy(c->last_comm, comm, sizeof(c->last_comm));
+    if (c->cbs.command != NULL) c->cbs.command(c, c->last_comm, c->cbs_user);
+  }
+  g_free(comm);
+  return G_SOURCE_CONTINUE;
 }
 
 /* ---- child + fd sources ---- */
@@ -225,6 +249,8 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   c->fd_source = g_unix_fd_add(c->pty_fd, G_IO_IN | G_IO_HUP,
                                on_pty_readable, c);
   c->child_source = g_child_watch_add(c->child, on_child_exited, c);
+  c->cmd_timer = g_timeout_add(700, poll_foreground_command, c);
+  poll_foreground_command(c);   /* fire once so tabs label at startup */
   return c;
 }
 
@@ -528,6 +554,7 @@ void pt_term_core_free(PtTermCore *c) {
   if (c == NULL) return;
   if (c->fd_source != 0) g_source_remove(c->fd_source);
   if (c->child_source != 0) g_source_remove(c->child_source);
+  if (c->cmd_timer != 0) g_source_remove(c->cmd_timer);
   if (c->pty_fd >= 0) close(c->pty_fd);
   if (c->child > 0 && !c->child_exited) {
     kill(c->child, SIGHUP);
