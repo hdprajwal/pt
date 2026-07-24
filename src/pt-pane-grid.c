@@ -56,6 +56,10 @@ static void detach_terminals(PtSplitNode *n) {
 
 static gboolean apply_ratio_idle(gpointer data) {
   GtkPaned *paned = GTK_PANED(data);
+  if (gtk_widget_get_parent(GTK_WIDGET(paned)) == NULL) {
+    g_object_unref(paned);
+    return G_SOURCE_REMOVE;
+  }
   PtSplitNode *node = g_object_get_data(G_OBJECT(paned), "pt-node");
   if (node != NULL) {
     int total =
@@ -72,6 +76,7 @@ static gboolean apply_ratio_idle(gpointer data) {
 static void on_paned_position(GObject *obj, GParamSpec *spec, gpointer user) {
   (void)spec; (void)user;
   GtkPaned *paned = GTK_PANED(obj);
+  if (gtk_widget_get_parent(GTK_WIDGET(paned)) == NULL) return;
   PtSplitNode *node = g_object_get_data(obj, "pt-node");
   if (node == NULL) return;
   int total = (node->kind == PT_SPLIT_H)
@@ -97,7 +102,18 @@ static GtkWidget *build_widgets(PtPaneGrid *g, PtSplitNode *n) {
   return paned;
 }
 
+/* Clear "pt-node" qdata on every paned in the old widget tree so no dangling
+ * PtSplitNode* survives teardown (nodes may be freed before an idle fires). */
+static void clear_paned_nodes(GtkWidget *w) {
+  if (w == NULL) return;
+  if (GTK_IS_PANED(w)) g_object_set_data(G_OBJECT(w), "pt-node", NULL);
+  for (GtkWidget *c = gtk_widget_get_first_child(w); c != NULL;
+       c = gtk_widget_get_next_sibling(c))
+    clear_paned_nodes(c);
+}
+
 static void rebuild(PtPaneGrid *g) {
+  clear_paned_nodes(g->root_widget);
   detach_terminals(g->tree);
   if (g->root_widget != NULL) {
     gtk_widget_unparent(g->root_widget);
@@ -221,6 +237,7 @@ static void free_terminals(PtSplitNode *n) {
 static void pt_pane_grid_dispose(GObject *obj) {
   PtPaneGrid *g = PT_PANE_GRID(obj);
   if (g->root_widget != NULL) {
+    clear_paned_nodes(g->root_widget);
     detach_terminals(g->tree);
     gtk_widget_unparent(g->root_widget);
     g->root_widget = NULL;
