@@ -35,6 +35,7 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, GPtrArray *titles, int active) {
     /* Stash the base label so the activity dot can be toggled without
      * corrupting the title text. */
     g_object_set_data_full(G_OBJECT(btn), "pt-base-label", label, g_free);
+    gtk_widget_add_css_class(btn, "flat");
     gtk_widget_add_css_class(btn, "pt-tab");
     if ((int)i == active) gtk_widget_add_css_class(btn, "active");
     g_object_set_data(G_OBJECT(btn), "pt-index", GINT_TO_POINTER((int)i));
@@ -47,6 +48,7 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, GPtrArray *titles, int active) {
     gtk_box_append(GTK_BOX(s->box), btn);
   }
   GtkWidget *plus = gtk_button_new_with_label("+");
+  gtk_widget_add_css_class(plus, "flat");
   gtk_widget_add_css_class(plus, "pt-tab");
   g_signal_connect(plus, "clicked", G_CALLBACK(on_new_clicked), s);
   gtk_box_append(GTK_BOX(s->box), plus);

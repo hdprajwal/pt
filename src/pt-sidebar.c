@@ -49,6 +49,11 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
     gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_MIDDLE);
     gtk_box_append(GTK_BOX(row), name);
 
+    /* spacer keeps the name left and right-aligns badge + hint + remove */
+    GtkWidget *spacer = gtk_label_new(NULL);
+    gtk_widget_set_hexpand(spacer, TRUE);
+    gtk_box_append(GTK_BOX(row), spacer);
+
     if (rows[i].missing) {
       GtkWidget *badge = gtk_label_new("[missing]");
       gtk_widget_add_css_class(badge, "pt-badge-dirty");
@@ -65,11 +70,6 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
       gtk_box_append(GTK_BOX(row), badge);
     }
 
-    /* spacer pushes the shortcut hint + remove button to the right edge */
-    GtkWidget *spacer = gtk_label_new(NULL);
-    gtk_widget_set_hexpand(spacer, TRUE);
-    gtk_box_append(GTK_BOX(row), spacer);
-
     if (i < 9) {
       char khint[8];
       g_snprintf(khint, sizeof(khint), "^%d", i + 1);
@@ -79,6 +79,7 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
     }
 
     GtkWidget *rm = gtk_button_new_with_label("×");
+    gtk_widget_add_css_class(rm, "flat");
     gtk_widget_add_css_class(rm, "pt-remove");
     g_object_set_data(G_OBJECT(rm), "pt-index", GINT_TO_POINTER(i));
     g_signal_connect(rm, "clicked", G_CALLBACK(on_remove_clicked), sb);
@@ -125,6 +126,7 @@ static void pt_sidebar_init(PtSidebar *sb) {
   gtk_box_append(GTK_BOX(sb->box), sb->rows_box);
 
   GtkWidget *add = gtk_button_new_with_label("+ project");
+  gtk_widget_add_css_class(add, "flat");
   gtk_widget_add_css_class(add, "pt-add-project");
   gtk_widget_set_halign(add, GTK_ALIGN_FILL);
   GtkWidget *add_label = gtk_button_get_child(GTK_BUTTON(add));

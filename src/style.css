@@ -8,23 +8,30 @@ window, .background {
   font-family: "JetBrains Mono", monospace;
 }
 
-/* Flatten every bit of Adwaita chrome that bleeds through our widgets. */
-.pt-tab,
-.pt-remove,
-.pt-add-project,
+/* Flatten every bit of Adwaita chrome that bleeds through our widgets.
+ * The `button.` prefix raises specificity above Adwaita's own `button` /
+ * `.titlebutton` rules so their light background/border never shows. */
+button.pt-tab,
+button.pt-remove,
+button.pt-add-project,
+windowcontrols button.titlebutton,
 windowcontrols button {
   background-image: none;
   background-color: transparent;
   box-shadow: none;
+  border: none;
   border-radius: 0;
   min-height: 0;
   min-width: 0;
   outline: none;
+  outline-width: 0;
 }
-.pt-tab:focus,
-.pt-remove:focus,
-.pt-add-project:focus,
-windowcontrols button:focus {
+button.pt-tab:focus,
+button.pt-remove:focus,
+button.pt-add-project:focus,
+windowcontrols button:focus,
+button.pt-tab:focus-visible,
+button.pt-add-project:focus-visible {
   outline: none;
   box-shadow: none;
 }
@@ -38,14 +45,27 @@ windowcontrols button:focus {
   font-family: "JetBrains Mono", monospace;
   font-size: 11.5px;
 }
-windowcontrols button {
-  color: #7a7a7a;
+windowcontrols button.titlebutton,
+windowcontrols button.titlebutton image,
+windowcontrols button image {
+  background: none;
+  background-image: none;
+  box-shadow: none;
+  border: none;
+  color: #9d9d9d;
+  min-width: 0;
+  min-height: 0;
   padding: 0 7px;
   -gtk-icon-size: 13px;
 }
-windowcontrols button:hover {
+windowcontrols button.titlebutton:hover,
+windowcontrols button.titlebutton:hover image {
   background-color: #1c1c1c;
-  color: #d0d0d0;
+  color: #c7c7c7;
+}
+windowcontrols button.titlebutton.close:hover,
+windowcontrols button.titlebutton.close:hover image {
+  color: #e06c75;
 }
 
 /* ---- sidebar ---- */
@@ -80,24 +100,26 @@ windowcontrols button:hover {
   font-size: 10px;
   font-family: "JetBrains Mono", monospace;
 }
-.pt-remove {
+button.pt-remove {
   color: #6a6a6a;
   padding: 0 4px;
   opacity: 0;
 }
-.pt-remove:hover {
+button.pt-remove:hover {
   color: #e06c75;
 }
-.pt-project-row:hover .pt-remove {
+.pt-project-row:hover button.pt-remove {
   opacity: 1;
 }
-.pt-add-project {
+button.pt-add-project {
   color: #5c5c5c;
-  border-top: 1px solid #262626;
+  border-style: solid;
+  border-width: 1px 0 0 0;
+  border-color: #262626;
   padding: 8px 14px;
   font-size: 12px;
 }
-.pt-add-project:hover {
+button.pt-add-project:hover {
   background-color: #171717;
   color: #9d9d9d;
 }
@@ -107,17 +129,18 @@ windowcontrols button:hover {
   background-color: #111111;
   border-bottom: 1px solid #262626;
 }
-.pt-tab {
+button.pt-tab {
   padding: 6px 15px;
-  border-right: 1px solid #262626;
-  border-top: none; border-bottom: none; border-left: none;
+  border-style: solid;
+  border-width: 0 1px 0 0;
+  border-color: #262626;
   color: #888888;
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
 }
-.pt-tab:hover { background-color: #171717; }
-.pt-tab.active { background-color: #0d0d0d; color: #33d17a; }
-.pt-tab.activity { color: #e5c07b; }
+button.pt-tab:hover { background-color: #171717; }
+button.pt-tab.active { background-color: #0d0d0d; color: #33d17a; }
+button.pt-tab.activity { color: #e5c07b; }
 
 /* ---- statusline ---- */
 .pt-statusline {

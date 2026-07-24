@@ -58,6 +58,8 @@ static void pt_statusline_init(PtStatusline *sl) {
 
   sl->label = gtk_label_new("");
   gtk_label_set_xalign(GTK_LABEL(sl->label), 0.0f);
+  /* the left segments yield first if space is tight, so the hint never clips */
+  gtk_label_set_ellipsize(GTK_LABEL(sl->label), PANGO_ELLIPSIZE_END);
   gtk_box_append(GTK_BOX(sl->box), sl->label);
 
   GtkWidget *spacer = gtk_label_new(NULL);
@@ -66,6 +68,9 @@ static void pt_statusline_init(PtStatusline *sl) {
 
   sl->hint = gtk_label_new("");
   gtk_widget_add_css_class(sl->hint, "pt-status-hint");
+  gtk_label_set_ellipsize(GTK_LABEL(sl->hint), PANGO_ELLIPSIZE_NONE);
+  gtk_widget_set_halign(sl->hint, GTK_ALIGN_END);
+  gtk_widget_set_margin_end(sl->hint, 12);
   gtk_box_append(GTK_BOX(sl->box), sl->hint);
 }
 
