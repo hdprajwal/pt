@@ -110,8 +110,12 @@ static void show_active_grid(PtWindow *w) {
     gtk_box_append(GTK_BOX(w->content), t->grid);
     pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
   } else {
-    GtkWidget *hint = gtk_label_new(
-        "no project · click [+ project] to add one");
+    PtProjectUI *ap = active_project(w);
+    const char *msg =
+        (ap != NULL && ap->missing)
+            ? "project directory missing — × to remove"
+            : "no project · click [+ project] to add one";
+    GtkWidget *hint = gtk_label_new(msg);
     gtk_widget_add_css_class(hint, "mono");
     gtk_widget_set_vexpand(hint, TRUE);
     gtk_box_append(GTK_BOX(w->content), hint);
@@ -382,8 +386,91 @@ static void install_shortcuts(PtWindow *w) {
   gtk_widget_add_controller(GTK_WIDGET(w), GTK_EVENT_CONTROLLER(ctl));
 }
 
-/* ---------- persistence stub (real body in Task 12) ---------- */
-static void mark_dirty(PtWindow *w) { (void)w; }
+/* ---------- persistence ---------- */
+static PtSessionState *capture_state(PtWindow *w) {
+  PtSessionState *s = pt_session_state_new();
+  s->active_project = w->active_project;
+  for (guint i = 0; i < w->projects->len; i++) {
+    PtProjectUI *p = g_ptr_array_index(w->projects, i);
+    PtProjectState *ps = pt_project_state_new(p->name, p->path);
+    ps->active_tab = p->active_tab;
+    for (guint j = 0; j < p->tabs->len; j++) {
+      PtTabUI *t = g_ptr_array_index(p->tabs, j);
+      PtPaneGrid *grid = PT_PANE_GRID(t->grid);
+      pt_pane_grid_sync_cwds(grid);
+      /* Deep-copy the live tree via JSON round-trip (cheap, reuses code). */
+      JsonNode *j_tree = pt_split_to_json(pt_pane_grid_tree(grid));
+      PtSplitNode *copy = pt_split_from_json(j_tree);
+      json_node_unref(j_tree);
+      g_ptr_array_add(ps->tabs, pt_tab_state_new(t->title, copy));
+    }
+    g_ptr_array_add(s->projects, ps);
+  }
+  return s;
+}
+
+static gboolean do_save(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->save_source = 0;
+  PtSessionState *s = capture_state(w);
+  char *path = pt_session_default_path();
+  GError *err = NULL;
+  if (!pt_session_save(s, path, &err)) {
+    g_warning("pt: state save failed: %s", err->message);
+    g_clear_error(&err);
+  }
+  g_free(path);
+  pt_session_state_free(s);
+  return G_SOURCE_REMOVE;
+}
+
+static void mark_dirty(PtWindow *w) {
+  if (w->save_source != 0) g_source_remove(w->save_source);
+  w->save_source = g_timeout_add_seconds(1, do_save, w);
+}
+
+static void restore_state(PtWindow *w) {
+  char *path = pt_session_default_path();
+  PtSessionState *s = pt_session_load(path);
+  g_free(path);
+  if (s == NULL) return;
+  for (guint i = 0; i < s->projects->len; i++) {
+    PtProjectState *ps = g_ptr_array_index(s->projects, i);
+    PtProjectUI *p = g_new0(PtProjectUI, 1);
+    p->window = w;
+    p->name = g_strdup(ps->name);
+    p->path = g_strdup(ps->path);
+    p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
+    p->missing = !g_file_test(ps->path, G_FILE_TEST_IS_DIR);
+    if (!p->missing) {
+      for (guint j = 0; j < ps->tabs->len; j++) {
+        PtTabState *ts = g_ptr_array_index(ps->tabs, j);
+        /* steal the tree from the session copy */
+        g_ptr_array_add(p->tabs, tab_ui_new(w, ts->title, ts->tree));
+        ts->tree = NULL;
+      }
+      if (p->tabs->len == 0)
+        g_ptr_array_add(p->tabs,
+                        tab_ui_new(w, "shell", pt_split_leaf_new(p->path)));
+      p->active_tab = CLAMP(ps->active_tab, 0, (int)p->tabs->len - 1);
+      p->monitor = pt_git_monitor_new(p->path, on_git_update, p);
+    }
+    g_ptr_array_add(w->projects, p);
+  }
+  if (w->projects->len > 0)
+    w->active_project = CLAMP(s->active_project, 0,
+                              (int)w->projects->len - 1);
+  pt_session_state_free(s);
+}
+
+static gboolean on_close_request(GtkWindow *win, gpointer user) {
+  (void)user;
+  PtWindow *w = PT_WINDOW(win);
+  if (w->save_source != 0) { g_source_remove(w->save_source); w->save_source = 0; }
+  do_save(w);          /* synchronous final save */
+  w->save_source = 0;
+  return FALSE;        /* proceed with close */
+}
 
 /* ---------- construction ---------- */
 static void pt_window_dispose(GObject *obj) {
@@ -443,6 +530,8 @@ static void pt_window_init(PtWindow *w) {
   g_signal_connect(w->tabstrip, "tab-new", G_CALLBACK(on_tab_new), w);
 
   install_shortcuts(w);
+  g_signal_connect(w, "close-request", G_CALLBACK(on_close_request), NULL);
+  restore_state(w);
   refresh_sidebar(w);
   show_active_grid(w);
 }
