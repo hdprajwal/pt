@@ -64,3 +64,8 @@ add_test(NAME session COMMAND test-session)
 add_executable(test-term-core tests/test-term-core.c)
 target_link_libraries(test-term-core PRIVATE ptcore)
 add_test(NAME term-core COMMAND test-term-core)
+
+add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
+target_include_directories(test-keymap PRIVATE src)
+target_link_libraries(test-keymap PRIVATE PkgConfig::GTK ghostty-vt PkgConfig::GLIB)
+add_test(NAME keymap COMMAND test-keymap)
