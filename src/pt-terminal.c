@@ -1,0 +1,385 @@
+#include "pt-terminal.h"
+#include "pt-keymap.h"
+#include <math.h>
+
+#define PT_FONT "JetBrains Mono, monospace 11"
+#define PT_PAD 4
+
+enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_ACTIVITY, N_SIGNALS };
+static guint signals[N_SIGNALS];
+
+struct _PtTerminal {
+  GtkWidget parent_instance;
+  PtTermCore *core;
+  char *start_cwd;
+  PangoLayout *layout;
+  PangoFontDescription *font_desc;
+  int cell_w, cell_h;
+  gboolean exited;
+  int exit_status;
+};
+
+G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
+
+/* ---- core callbacks ---- */
+static void core_draw(PtTermCore *core, gpointer user) {
+  (void)core;
+  PtTerminal *t = PT_TERMINAL(user);
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+  g_signal_emit(t, signals[SIG_ACTIVITY], 0);
+}
+
+static void core_exited(PtTermCore *core, int status, gpointer user) {
+  (void)core;
+  PtTerminal *t = PT_TERMINAL(user);
+  t->exited = TRUE;
+  t->exit_status = status;
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+  g_signal_emit(t, signals[SIG_EXITED], 0, status);
+}
+
+static void core_title(PtTermCore *core, const char *title, gpointer user) {
+  (void)core;
+  g_signal_emit(PT_TERMINAL(user), signals[SIG_TITLE_CHANGED], 0, title);
+}
+
+/* ---- geometry ---- */
+static void measure_font(PtTerminal *t) {
+  PangoContext *pc = gtk_widget_get_pango_context(GTK_WIDGET(t));
+  PangoFontMetrics *m =
+      pango_context_get_metrics(pc, t->font_desc, NULL);
+  t->cell_w = PANGO_PIXELS(pango_font_metrics_get_approximate_digit_width(m));
+  t->cell_h = PANGO_PIXELS(pango_font_metrics_get_ascent(m) +
+                           pango_font_metrics_get_descent(m));
+  pango_font_metrics_unref(m);
+  if (t->cell_w < 1) t->cell_w = 8;
+  if (t->cell_h < 1) t->cell_h = 16;
+}
+
+static void ensure_core(PtTerminal *t) {
+  if (t->core != NULL) return;
+  measure_font(t);
+  GError *err = NULL;
+  t->core = pt_term_core_new(t->start_cwd, NULL, 80, 24,
+                             t->cell_w, t->cell_h, &err);
+  if (t->core == NULL) {
+    g_warning("pt: terminal spawn failed: %s",
+              err != NULL ? err->message : "?");
+    g_clear_error(&err);
+    t->exited = TRUE;
+    t->exit_status = -1;
+    return;
+  }
+  PtTermCoreCallbacks cbs = { .draw = core_draw, .exited = core_exited,
+                              .title = core_title };
+  pt_term_core_set_callbacks(t->core, &cbs, t);
+}
+
+static void pt_terminal_size_allocate(GtkWidget *widget, int width, int height,
+                                      int baseline) {
+  (void)baseline;
+  PtTerminal *t = PT_TERMINAL(widget);
+  ensure_core(t);
+  if (t->core == NULL) return;
+  int cols = (width - 2 * PT_PAD) / t->cell_w;
+  int rows = (height - 2 * PT_PAD) / t->cell_h;
+  if (cols < 2) cols = 2;
+  if (rows < 2) rows = 2;
+  pt_term_core_resize(t->core, (guint16)cols, (guint16)rows,
+                      t->cell_w, t->cell_h);
+}
+
+/* ---- rendering ---- */
+static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
+  PtTerminal *t = PT_TERMINAL(widget);
+  int w = gtk_widget_get_width(widget);
+  int h = gtk_widget_get_height(widget);
+
+  ensure_core(t);
+  if (t->core == NULL) {
+    gtk_snapshot_append_color(snapshot,
+        &(GdkRGBA){0.05f, 0.05f, 0.05f, 1}, &GRAPHENE_RECT_INIT(0, 0, w, h));
+    return;
+  }
+  pt_term_core_sync(t->core);
+  GhosttyRenderState rs = pt_term_core_render_state(t->core);
+
+  /* Default/effective colors: libghostty-vt exposes these as individual
+   * render-state queries (no aggregate colors struct in this ABI). */
+  GhosttyColorRgb bg_default = { 0x10, 0x10, 0x10 };
+  GhosttyColorRgb fg_default = { 0xd0, 0xd0, 0xd0 };
+  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_BACKGROUND,
+                           &bg_default);
+  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
+                           &fg_default);
+  bool cursor_has_value = false;
+  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_CURSOR_HAS_VALUE,
+                           &cursor_has_value);
+  GhosttyColorRgb cursor_color = fg_default;
+  if (cursor_has_value)
+    ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_CURSOR,
+                             &cursor_color);
+
+  gtk_snapshot_append_color(snapshot,
+      &(GdkRGBA){ bg_default.r / 255.0f, bg_default.g / 255.0f,
+                  bg_default.b / 255.0f, 1.0f },
+      &GRAPHENE_RECT_INIT(0, 0, w, h));
+
+  GhosttyRenderStateRowIterator iter = pt_term_core_row_iter(t->core);
+  if (ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                               &iter) != GHOSTTY_SUCCESS)
+    return;
+
+  char text[64];
+  int y = PT_PAD;
+  while (ghostty_render_state_row_iterator_next(iter)) {
+    GhosttyRenderStateRowCells cells = pt_term_core_row_cells(t->core);
+    if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                     &cells) != GHOSTTY_SUCCESS)
+      continue;
+    int x = PT_PAD;
+    while (ghostty_render_state_row_cells_next(cells)) {
+      uint32_t glen = 0;
+      ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
+
+      GhosttyColorRgb fg = fg_default;
+      GhosttyColorRgb bg = bg_default;
+      gboolean has_bg = ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &bg) == GHOSTTY_SUCCESS;
+
+      if (glen == 0) {
+        if (has_bg)
+          gtk_snapshot_append_color(snapshot,
+              &(GdkRGBA){bg.r / 255.0f, bg.g / 255.0f, bg.b / 255.0f, 1},
+              &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
+        x += t->cell_w;
+        continue;
+      }
+
+      if (ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR, &fg) != GHOSTTY_SUCCESS)
+        fg = fg_default;
+      GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
+      ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
+      if (style.inverse) {
+        GhosttyColorRgb tmp = fg; fg = bg; bg = tmp; has_bg = TRUE;
+      }
+      if (has_bg)
+        gtk_snapshot_append_color(snapshot,
+            &(GdkRGBA){bg.r / 255.0f, bg.g / 255.0f, bg.b / 255.0f, 1},
+            &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
+
+      /* GRAPHEMES_BUF writes glen codepoints — buffer must hold ALL of them
+       * (see Task 5 review: stack overflow otherwise). */
+      uint32_t cps_stack[16];
+      uint32_t *cps = glen <= 16 ? cps_stack : g_new(uint32_t, glen);
+      ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
+      int pos = 0;
+      for (uint32_t i = 0; i < glen && pos < 60; i++)
+        pos += g_unichar_to_utf8((gunichar)cps[i], text + pos);
+      text[pos] = '\0';
+      if (cps != cps_stack) g_free(cps);
+
+      pango_layout_set_text(t->layout, text, pos);
+      pango_layout_set_attributes(t->layout, NULL);
+      if (style.bold || style.italic) {
+        PangoAttrList *attrs = pango_attr_list_new();
+        if (style.bold)
+          pango_attr_list_insert(attrs,
+              pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+        if (style.italic)
+          pango_attr_list_insert(attrs,
+              pango_attr_style_new(PANGO_STYLE_ITALIC));
+        pango_layout_set_attributes(t->layout, attrs);
+        pango_attr_list_unref(attrs);
+      }
+      gtk_snapshot_save(snapshot);
+      gtk_snapshot_translate(snapshot, &GRAPHENE_POINT_INIT(x, y));
+      gtk_snapshot_append_layout(snapshot, t->layout,
+          &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1});
+      gtk_snapshot_restore(snapshot);
+      x += t->cell_w;
+    }
+    y += t->cell_h;
+  }
+
+  /* cursor */
+  bool cur_visible = false, cur_in_vp = false;
+  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE,
+                           &cur_visible);
+  ghostty_render_state_get(rs,
+      GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE, &cur_in_vp);
+  if (cur_visible && cur_in_vp && !t->exited) {
+    uint16_t cx = 0, cy = 0;
+    ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &cx);
+    ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cy);
+    GhosttyColorRgb cc = cursor_has_value ? cursor_color : fg_default;
+    gtk_snapshot_append_color(snapshot,
+        &(GdkRGBA){cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.55f},
+        &GRAPHENE_RECT_INIT(PT_PAD + cx * t->cell_w, PT_PAD + cy * t->cell_h,
+                            t->cell_w, t->cell_h));
+  }
+
+  /* exited banner */
+  if (t->exited) {
+    char msg[96];
+    g_snprintf(msg, sizeof(msg),
+               "[process exited: %d]  Enter=restart  Ctrl+Shift+W=close",
+               t->exit_status);
+    gtk_snapshot_append_color(snapshot, &(GdkRGBA){0, 0, 0, 0.75f},
+        &GRAPHENE_RECT_INIT(0, h - t->cell_h - 8, w, t->cell_h + 8));
+    pango_layout_set_attributes(t->layout, NULL);
+    pango_layout_set_text(t->layout, msg, -1);
+    gtk_snapshot_save(snapshot);
+    gtk_snapshot_translate(snapshot, &GRAPHENE_POINT_INIT(PT_PAD, h - t->cell_h - 4));
+    gtk_snapshot_append_layout(snapshot, t->layout,
+                               &(GdkRGBA){0.9f, 0.76f, 0.48f, 1});
+    gtk_snapshot_restore(snapshot);
+  }
+}
+
+/* ---- input ---- */
+static void restart_shell(PtTerminal *t) {
+  char *cwd = pt_terminal_current_cwd(t);
+  if (t->core != NULL) pt_term_core_free(t->core);
+  t->core = NULL;
+  t->exited = FALSE;
+  g_free(t->start_cwd);
+  t->start_cwd = cwd != NULL ? cwd : g_strdup(g_get_home_dir());
+  ensure_core(t);
+  gtk_widget_queue_allocate(GTK_WIDGET(t)); /* re-sizes the new core */
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
+static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
+                               guint keycode, GdkModifierType state,
+                               gpointer user) {
+  (void)ctl; (void)keycode;
+  PtTerminal *t = PT_TERMINAL(user);
+  if (t->exited) {
+    if (keyval == GDK_KEY_Return) { restart_shell(t); return TRUE; }
+    return FALSE;
+  }
+  if (t->core == NULL) return FALSE;
+
+  GhosttyKey key = pt_keymap_from_keyval(keyval);
+  GhosttyMods mods = pt_keymap_mods(state);
+  guint32 unshifted = pt_keymap_unshifted_codepoint(keyval);
+
+  char utf8[8];
+  gsize utf8_len = 0;
+  guint32 uc = gdk_keyval_to_unicode(keyval);
+  if (uc != 0 && g_unichar_isprint(uc) &&
+      (state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK)) == 0)
+    utf8_len = g_unichar_to_utf8((gunichar)uc, utf8);
+
+  return pt_term_core_send_key(t->core, key, GHOSTTY_KEY_ACTION_PRESS, mods,
+                               unshifted, utf8, utf8_len);
+}
+
+static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
+                          gpointer user) {
+  (void)ctl; (void)dx;
+  PtTerminal *t = PT_TERMINAL(user);
+  if (t->core == NULL) return FALSE;
+  /* When an app tracks the mouse (vim, htop), it owns the wheel; v1 forwards
+   * nothing in that case rather than corrupting viewport state. */
+  if (pt_term_core_mouse_tracking(t->core)) return TRUE;
+  pt_term_core_scroll_delta(t->core, dy > 0 ? 3 : -3);
+  return TRUE;
+}
+
+static void on_click_focus(GtkGestureClick *g, int n, double x, double y,
+                           gpointer user) {
+  (void)g; (void)n; (void)x; (void)y;
+  gtk_widget_grab_focus(GTK_WIDGET(user));
+}
+
+static void on_paste_text(GObject *src, GAsyncResult *res, gpointer user) {
+  PtTerminal *t = PT_TERMINAL(user);
+  char *text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(src), res, NULL);
+  if (text == NULL) { g_object_unref(t); return; }
+  if (t->core != NULL) {
+    if (pt_term_core_bracketed_paste(t->core)) {
+      pt_term_core_write(t->core, "\x1b[200~", 6);
+      pt_term_core_write(t->core, text, -1);
+      pt_term_core_write(t->core, "\x1b[201~", 6);
+    } else {
+      pt_term_core_write(t->core, text, -1);
+    }
+  }
+  g_free(text);
+  g_object_unref(t);
+}
+
+void pt_terminal_paste(PtTerminal *t) {
+  GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(t));
+  gdk_clipboard_read_text_async(cb, NULL, on_paste_text, g_object_ref(t));
+}
+
+char *pt_terminal_current_cwd(PtTerminal *t) {
+  if (t->core == NULL) return g_strdup(t->start_cwd);
+  char proc[64];
+  g_snprintf(proc, sizeof(proc), "/proc/%d/cwd",
+             (int)pt_term_core_shell_pid(t->core));
+  char *cwd = g_file_read_link(proc, NULL);
+  return cwd != NULL ? cwd : g_strdup(t->start_cwd);
+}
+
+PtTermCore *pt_terminal_core(PtTerminal *t) { return t->core; }
+
+/* ---- boilerplate ---- */
+static void pt_terminal_dispose(GObject *obj) {
+  PtTerminal *t = PT_TERMINAL(obj);
+  g_clear_pointer(&t->core, pt_term_core_free);
+  g_clear_object(&t->layout);
+  g_clear_pointer(&t->font_desc, pango_font_description_free);
+  g_clear_pointer(&t->start_cwd, g_free);
+  G_OBJECT_CLASS(pt_terminal_parent_class)->dispose(obj);
+}
+
+static void pt_terminal_class_init(PtTerminalClass *klass) {
+  GObjectClass *oc = G_OBJECT_CLASS(klass);
+  GtkWidgetClass *wc = GTK_WIDGET_CLASS(klass);
+  oc->dispose = pt_terminal_dispose;
+  wc->snapshot = pt_terminal_snapshot;
+  wc->size_allocate = pt_terminal_size_allocate;
+  gtk_widget_class_set_css_name(wc, "pt-terminal");
+  signals[SIG_EXITED] = g_signal_new("exited", PT_TYPE_TERMINAL,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
+  signals[SIG_TITLE_CHANGED] = g_signal_new("title-changed", PT_TYPE_TERMINAL,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_ACTIVITY] = g_signal_new("activity", PT_TYPE_TERMINAL,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+}
+
+static void pt_terminal_init(PtTerminal *t) {
+  gtk_widget_set_focusable(GTK_WIDGET(t), TRUE);
+  gtk_widget_set_hexpand(GTK_WIDGET(t), TRUE);
+  gtk_widget_set_vexpand(GTK_WIDGET(t), TRUE);
+  t->font_desc = pango_font_description_from_string(PT_FONT);
+  t->layout = gtk_widget_create_pango_layout(GTK_WIDGET(t), NULL);
+  pango_layout_set_font_description(t->layout, t->font_desc);
+
+  GtkEventController *key = gtk_event_controller_key_new();
+  g_signal_connect(key, "key-pressed", G_CALLBACK(on_key_pressed), t);
+  gtk_widget_add_controller(GTK_WIDGET(t), key);
+
+  GtkEventController *scroll =
+      gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_VERTICAL);
+  g_signal_connect(scroll, "scroll", G_CALLBACK(on_scroll), t);
+  gtk_widget_add_controller(GTK_WIDGET(t), scroll);
+
+  GtkGesture *click = gtk_gesture_click_new();
+  g_signal_connect(click, "pressed", G_CALLBACK(on_click_focus), t);
+  gtk_widget_add_controller(GTK_WIDGET(t), GTK_EVENT_CONTROLLER(click));
+}
+
+GtkWidget *pt_terminal_new(const char *cwd) {
+  PtTerminal *t = g_object_new(PT_TYPE_TERMINAL, NULL);
+  t->start_cwd = g_strdup(cwd != NULL ? cwd : g_get_home_dir());
+  return GTK_WIDGET(t);
+}

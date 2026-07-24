@@ -36,8 +36,8 @@ add_custom_command(
   DEPENDS src/pt.gresource.xml src/style.css
   COMMENT "Compiling GResources")
 
-add_executable(pt src/main.c ${PT_RES_C})
-target_link_libraries(pt PRIVATE PkgConfig::GTK PkgConfig::ADW)
+add_executable(pt src/main.c src/pt-terminal.c src/pt-keymap.c ${PT_RES_C})
+target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
   src/pt-git-parse.c
