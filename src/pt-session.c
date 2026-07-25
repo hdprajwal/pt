@@ -125,10 +125,12 @@ PtSessionState *pt_session_from_json_text(const char *text) {
         json_object_get_string_member_with_default(po, "path", "/"));
     p->active_tab =
         (int)json_object_get_int_member_with_default(po, "active_tab", 0);
-    /* Older state files predate accents: fall back to cycling by position. */
-    int accent = (int)json_object_get_int_member_with_default(
-        po, "accent", (gint64)(i % PT_ACCENT_COUNT));
-    p->accent = CLAMP(accent, 0, PT_ACCENT_COUNT - 1);
+    /* Older state files predate accents: fall back to cycling by position.
+       s->projects->len is the index this project is about to occupy, which
+       stays correct even if a malformed element above was skipped. */
+    gint64 accent = json_object_get_int_member_with_default(
+        po, "accent", (gint64)(s->projects->len % PT_ACCENT_COUNT));
+    p->accent = (int)CLAMP(accent, 0, PT_ACCENT_COUNT - 1);
     JsonArray *tabs = json_object_has_member(po, "tabs")
                           ? json_object_get_array_member(po, "tabs") : NULL;
     for (guint j = 0; tabs != NULL && j < json_array_get_length(tabs); j++) {

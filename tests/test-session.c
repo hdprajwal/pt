@@ -103,6 +103,21 @@ static void test_accent_default_when_absent(void) {
   pt_session_state_free(s);
 }
 
+/* An explicit 0 must survive: it is a real accent, not a missing member. */
+static void test_accent_explicit_zero_beats_index_default(void) {
+  const char *json =
+    "{\"version\":1,\"active_project\":0,\"font_size\":11,\"projects\":["
+    "{\"name\":\"a\",\"path\":\"/tmp/a\",\"accent\":3,\"active_tab\":0,\"tabs\":[]},"
+    "{\"name\":\"b\",\"path\":\"/tmp/b\",\"accent\":0,\"active_tab\":0,\"tabs\":[]}]}";
+  PtSessionState *s = pt_session_from_json_text(json);
+  g_assert_nonnull(s);
+  g_assert_cmpint(((PtProjectState *)g_ptr_array_index(s->projects, 0))->accent,
+                  ==, 3);
+  g_assert_cmpint(((PtProjectState *)g_ptr_array_index(s->projects, 1))->accent,
+                  ==, 0);
+  pt_session_state_free(s);
+}
+
 static void test_accent_out_of_range_is_clamped(void) {
   const char *json =
     "{\"version\":1,\"active_project\":0,\"font_size\":11,\"projects\":["
@@ -128,6 +143,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/session/missing", test_load_missing_returns_null);
   g_test_add_func("/session/accent-roundtrip", test_accent_roundtrip);
   g_test_add_func("/session/accent-default", test_accent_default_when_absent);
+  g_test_add_func("/session/accent-explicit-zero",
+                  test_accent_explicit_zero_beats_index_default);
   g_test_add_func("/session/accent-clamp", test_accent_out_of_range_is_clamped);
   return g_test_run();
 }
