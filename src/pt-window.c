@@ -261,6 +261,22 @@ static void on_grid_activity(PtPaneGrid *g, gpointer user) {
   }
 }
 
+/* Drop tab ti of project pi and everything under it — the array's free func
+ * unparents the grid, which kills its panes and their PTYs. Every "the tab is
+ * going away" path ends here: a clean shell exit, the last pane closing, the
+ * tab's × button. active_tab follows the tab that stayed under it (decrement
+ * when a lower slot went), then clamps to the new end. */
+static void remove_tab_at(PtWindow *w, guint pi, guint ti) {
+  PtProjectUI *p = g_ptr_array_index(w->projects, pi);
+  g_ptr_array_remove_index(p->tabs, ti);
+  if (p->active_tab > (int)ti) p->active_tab--;
+  if (p->active_tab >= (int)p->tabs->len)
+    p->active_tab = (int)p->tabs->len - 1;
+  if ((int)pi == w->active_project) show_active_grid(w);
+  refresh_sidebar(w);   /* shell count dropped; do not wait for the poll */
+  mark_dirty(w);
+}
+
 /* Last pane in a grid closed via a clean shell exit → drop the owning tab.
  * The grid may belong to a background project/tab (a background shell can exit),
  * so scan every project. The emitting grid survives this (the idle in
@@ -273,13 +289,7 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
     for (guint ti = 0; ti < p->tabs->len; ti++) {
       PtTabUI *t = g_ptr_array_index(p->tabs, ti);
       if (t->grid != GTK_WIDGET(g)) continue;
-      g_ptr_array_remove_index(p->tabs, ti);
-      if (p->active_tab >= (int)p->tabs->len)
-        p->active_tab = (int)p->tabs->len - 1;
-      if ((int)pi == w->active_project)
-        show_active_grid(w);
-      refresh_sidebar(w);   /* shell count dropped; do not wait for the poll */
-      mark_dirty(w);
+      remove_tab_at(w, pi, ti);
       return;
     }
   }
@@ -510,20 +520,23 @@ static gboolean find_grid(PtWindow *w, PtPaneGrid *g, guint *out_pi,
 static void do_close_pane(PtWindow *w, PtPaneGrid *g) {
   guint pi = 0, ti = 0;
   if (!find_grid(w, g, &pi, &ti)) return;
-  PtProjectUI *p = g_ptr_array_index(w->projects, pi);
   if (!pt_pane_grid_close_focused(g)) {
     /* last pane closed → close the owning tab, whichever one it is */
-    g_ptr_array_remove_index(p->tabs, ti);
-    if (p->active_tab > (int)ti) p->active_tab--;
-    if (p->active_tab >= (int)p->tabs->len)
-      p->active_tab = (int)p->tabs->len - 1;
-    if ((int)pi == w->active_project) show_active_grid(w);
+    remove_tab_at(w, pi, ti);
+    return;
   }
-  /* Both branches move a sidebar number — the shell count when the tab went,
-   * the running count when only a pane did — so refresh either way rather than
-   * leaving the row stale until the next comm poll. */
+  /* The running count on the sidebar row just moved, so refresh rather than
+   * leaving it stale until the next comm poll. */
   refresh_sidebar(w);
   mark_dirty(w);
+}
+
+/* Close the whole tab that owns grid g — every pane, not just the focused one.
+ * No-op when g is no longer owned by any tab (see find_grid). */
+static void do_close_tab(PtWindow *w, PtPaneGrid *g) {
+  guint pi = 0, ti = 0;
+  if (!find_grid(w, g, &pi, &ti)) return;
+  remove_tab_at(w, pi, ti);
 }
 
 /* Response-callback payload: keeps the target grid alive (the tab holding it
@@ -531,8 +544,9 @@ static void do_close_pane(PtWindow *w, PtPaneGrid *g) {
  * through the closure's GDestroyNotify, so it survives a dialog that is torn
  * down without ever emitting a response. */
 typedef struct {
-  PtWindow *window;   /* owned ref */
-  PtPaneGrid *grid;   /* owned ref */
+  PtWindow *window;    /* owned ref */
+  PtPaneGrid *grid;    /* owned ref */
+  gboolean whole_tab;  /* the tab's ×, not ⌃⇧W: take every pane */
 } PtCloseCtx;
 
 static void close_ctx_free(gpointer data, GClosure *closure) {
@@ -549,13 +563,39 @@ static void on_close_pane_response(AdwAlertDialog *dlg, const char *response,
   (void)dlg;
   PtCloseCtx *c = user;
   if (g_strcmp0(response, "close") == 0) {
-    do_close_pane(c->window, c->grid);
+    if (c->whole_tab) do_close_tab(c->window, c->grid);
+    else              do_close_pane(c->window, c->grid);
     return;
   }
   /* Cancelled (or dismissed): hand the keyboard back to the pane we asked
-   * about, if that grid is still on screen. */
-  if (find_grid(c->window, c->grid, NULL, NULL))
+   * about, if that grid is still on screen. A background tab's grid is
+   * unparented, so check for a root before grabbing focus into nowhere. */
+  if (find_grid(c->window, c->grid, NULL, NULL) &&
+      gtk_widget_get_root(GTK_WIDGET(c->grid)) != NULL)
     pt_pane_grid_focus_terminal(c->grid);
+}
+
+/* One dialog for both close paths; the ⌃⇧W wording is the pane one. */
+static void present_close_confirm(PtWindow *w, PtPaneGrid *grid,
+                                  gboolean whole_tab) {
+  AdwDialog *dlg = adw_alert_dialog_new(
+      whole_tab ? "Close tab?" : "Close shell?",
+      whole_tab ? "A process is still running in this tab."
+                : "A process is still running in this shell.");
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dlg),
+                                 "cancel", "Cancel", "close", "Close", NULL);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dlg), "close",
+                                           ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dlg), "cancel");
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dlg), "cancel");
+  PtCloseCtx *c = g_new0(PtCloseCtx, 1);
+  c->window = g_object_ref(w);
+  c->grid = g_object_ref(grid);
+  c->whole_tab = whole_tab;
+  w->close_confirm_open = TRUE;
+  g_signal_connect_data(dlg, "response", G_CALLBACK(on_close_pane_response), c,
+                        close_ctx_free, 0);
+  adw_dialog_present(dlg, GTK_WIDGET(w));
 }
 
 /* Closing a pane that is mid-command kills the command. Only ask when there is
@@ -570,21 +610,22 @@ static void action_close_pane(PtWindow *w) {
     do_close_pane(w, grid);
     return;
   }
-  AdwDialog *dlg = adw_alert_dialog_new(
-      "Close shell?", "A process is still running in this shell.");
-  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dlg),
-                                 "cancel", "Cancel", "close", "Close", NULL);
-  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dlg), "close",
-                                           ADW_RESPONSE_DESTRUCTIVE);
-  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dlg), "cancel");
-  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dlg), "cancel");
-  PtCloseCtx *c = g_new0(PtCloseCtx, 1);
-  c->window = g_object_ref(w);
-  c->grid = g_object_ref(grid);
-  w->close_confirm_open = TRUE;
-  g_signal_connect_data(dlg, "response", G_CALLBACK(on_close_pane_response), c,
-                        close_ctx_free, 0);
-  adw_dialog_present(dlg, GTK_WIDGET(w));
+  present_close_confirm(w, grid, FALSE);
+}
+
+/* The tab's × takes the whole tab, so ask when ANY of its panes is mid-command,
+ * not just the focused one. Shares the ⌃⇧W dialog and its re-entrancy guard. */
+static void action_close_tab(PtWindow *w, int idx) {
+  if (w->close_confirm_open) return;   /* never stack confirm dialogs */
+  PtProjectUI *p = active_project(w);
+  if (p == NULL || idx < 0 || (guint)idx >= p->tabs->len) return;
+  PtTabUI *t = g_ptr_array_index(p->tabs, idx);
+  PtPaneGrid *grid = PT_PANE_GRID(t->grid);
+  if (!pt_pane_grid_any_running(grid)) {
+    do_close_tab(w, grid);
+    return;
+  }
+  present_close_confirm(w, grid, TRUE);
 }
 
 static void action_split(PtWindow *w, PtSplitKind kind) {
@@ -693,6 +734,11 @@ static void on_tab_selected(PtTabStrip *s, int idx, gpointer user) {
 static void on_tab_new(PtTabStrip *s, gpointer user) {
   (void)s;
   action_new_tab(PT_WINDOW(user));
+}
+
+static void on_tab_close(PtTabStrip *s, int idx, gpointer user) {
+  (void)s;
+  action_close_tab(PT_WINDOW(user), idx);
 }
 
 /* ---------- command palette ---------- */
@@ -1109,6 +1155,7 @@ static void pt_window_init(PtWindow *w) {
   g_signal_connect(w->tabstrip, "tab-selected",
                    G_CALLBACK(on_tab_selected), w);
   g_signal_connect(w->tabstrip, "tab-new", G_CALLBACK(on_tab_new), w);
+  g_signal_connect(w->tabstrip, "tab-close", G_CALLBACK(on_tab_close), w);
 
   install_shortcuts(w);
   g_signal_connect(w, "close-request", G_CALLBACK(on_close_request), NULL);

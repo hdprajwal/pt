@@ -1,7 +1,7 @@
 #include "pt-tab-strip.h"
 #include "pt-accent.h"
 
-enum { SIG_SELECTED, SIG_NEW, N_SIGNALS };
+enum { SIG_SELECTED, SIG_NEW, SIG_CLOSE, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtTabStrip {
@@ -17,9 +17,31 @@ struct _PtTabStrip {
 
 G_DEFINE_FINAL_TYPE(PtTabStrip, pt_tab_strip, GTK_TYPE_WIDGET)
 
-static void on_tab_clicked(GtkButton *btn, gpointer user) {
-  int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "pt-index"));
+/* The tab is a box, not a button: a GtkButton nested in a GtkButton is fragile,
+ * so selection rides a click gesture (same shape as the sidebar's project row)
+ * and the × stays a real button.
+ *
+ * A press on the × must NOT also select: selecting rebuilds the strip on the
+ * spot, and a button destroyed between press and release never emits "clicked"
+ * (the same hazard the rebuild dedupe exists for) — the close would be eaten by
+ * the switch. The button does not claim the sequence early enough to stop this
+ * gesture, so hit-test the press and stand down when it landed on the ×. */
+static void on_tab_pressed(GtkGestureClick *g, int n, double x, double y,
+                           gpointer user) {
+  (void)n;
+  GtkWidget *tab = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+  GtkWidget *close = g_object_get_data(G_OBJECT(tab), "pt-close");
+  GtkWidget *hit = gtk_widget_pick(tab, x, y, GTK_PICK_DEFAULT);
+  if (close != NULL && hit != NULL &&
+      (hit == close || gtk_widget_is_ancestor(hit, close)))
+    return;
+  int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(tab), "pt-index"));
   g_signal_emit(PT_TAB_STRIP(user), signals[SIG_SELECTED], 0, idx);
+}
+
+static void on_tab_close_clicked(GtkButton *btn, gpointer user) {
+  int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "pt-index"));
+  g_signal_emit(PT_TAB_STRIP(user), signals[SIG_CLOSE], 0, idx);
 }
 
 static void on_new_clicked(GtkButton *btn, gpointer user) {
@@ -81,13 +103,10 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
     const PtTabInfo *info = &tabs[i];
     gboolean is_active = (i == active);
 
-    GtkWidget *btn = gtk_button_new();
-    gtk_widget_add_css_class(btn, "flat");
-    gtk_widget_add_css_class(btn, "pt-tab");
-    if (is_active) gtk_widget_add_css_class(btn, "active");
-    g_object_set_data(G_OBJECT(btn), "pt-index", GINT_TO_POINTER(i));
-
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
+    gtk_widget_add_css_class(row, "pt-tab");
+    if (is_active) gtk_widget_add_css_class(row, "active");
+    g_object_set_data(G_OBJECT(row), "pt-index", GINT_TO_POINTER(i));
 
     GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_add_css_class(dot, "pt-dot");
@@ -115,9 +134,21 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
       gtk_box_append(GTK_BOX(row), badge);
     }
 
-    gtk_button_set_child(GTK_BUTTON(btn), row);
-    g_signal_connect(btn, "clicked", G_CALLBACK(on_tab_clicked), s);
-    gtk_box_append(GTK_BOX(s->box), btn);
+    /* Hidden (opacity 0) until the tab is hovered — see .pt-tab-close in
+     * style.css. It closes the whole tab, panes and all. */
+    GtkWidget *close = gtk_button_new_with_label("×");
+    gtk_widget_add_css_class(close, "flat");
+    gtk_widget_add_css_class(close, "pt-tab-close");
+    gtk_widget_set_valign(close, GTK_ALIGN_CENTER);
+    g_object_set_data(G_OBJECT(close), "pt-index", GINT_TO_POINTER(i));
+    g_signal_connect(close, "clicked", G_CALLBACK(on_tab_close_clicked), s);
+    gtk_box_append(GTK_BOX(row), close);
+    g_object_set_data(G_OBJECT(row), "pt-close", close);
+
+    GtkGesture *click = gtk_gesture_click_new();
+    g_signal_connect(click, "pressed", G_CALLBACK(on_tab_pressed), s);
+    gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
+    gtk_box_append(GTK_BOX(s->box), row);
   }
 
   GtkWidget *plus = gtk_button_new_with_label("+");
@@ -143,6 +174,8 @@ static void pt_tab_strip_class_init(PtTabStripClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
   signals[SIG_NEW] = g_signal_new("tab-new", PT_TYPE_TAB_STRIP,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[SIG_CLOSE] = g_signal_new("tab-close", PT_TYPE_TAB_STRIP,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
 }
 
 static void pt_tab_strip_init(PtTabStrip *s) {

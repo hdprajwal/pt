@@ -13,15 +13,15 @@ label {
 .mono { font-family: "JetBrains Mono", monospace; }
 
 /* Flatten Adwaita chrome (kept from previous theme, class list updated). */
-button.pt-tab, button.pt-remove, button.pt-add-project, button.pt-tab-new,
+button.pt-tab-close, button.pt-remove, button.pt-add-project, button.pt-tab-new,
 windowcontrols button.titlebutton, windowcontrols button {
   background-image: none; background-color: transparent;
   box-shadow: none; border: none; min-height: 0; min-width: 0;
   outline: none; outline-width: 0;
 }
-button.pt-tab:focus, button.pt-remove:focus, button.pt-add-project:focus,
+button.pt-tab-close:focus, button.pt-remove:focus, button.pt-add-project:focus,
 button.pt-tab-new:focus, windowcontrols button:focus,
-button.pt-tab:focus-visible, button.pt-add-project:focus-visible {
+button.pt-tab-close:focus-visible, button.pt-add-project:focus-visible {
   outline: none; box-shadow: none;
 }
 windowcontrols button.titlebutton, windowcontrols button.titlebutton image,
@@ -133,25 +133,35 @@ button.pt-add-project:hover { background-color: rgba(255,255,255,.045); color: #
 .pt-tabstrip {
   background-color: #101317;
   border-bottom: 1px solid rgba(255,255,255,.06);
-  min-height: 42px;
-  padding: 0 8px;
+  min-height: 30px;
+  padding: 0 4px;
 }
-button.pt-tab {
-  min-height: 28px; padding: 0 11px; margin-right: 4px;
+.pt-tab {
+  min-height: 16px; padding: 0 4px; margin-right: 4px;
   color: #8a9199;
 }
-button.pt-tab:hover { background-color: rgba(255,255,255,.045); }
-button.pt-tab.active {
+.pt-tab:hover { background-color: rgba(255,255,255,.045); }
+.pt-tab.active {
   background-color: rgba(255,255,255,.08);
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
 }
 .pt-tab-label { font-family: "JetBrains Mono", monospace; font-size: 12px; color: #8a9199; }
-button.pt-tab.active .pt-tab-label { color: #e6e8ea; }
+.pt-tab.active .pt-tab-label { color: #e6e8ea; }
+/* Revealed on tab hover only, like the sidebar's ×. Sized so it cannot grow
+ * the tab: no min box, glyph-height only, padding on the sides alone. */
+.pt-tab button.pt-tab-close,
+.pt-tab button.pt-tab-close label {
+  color: #5c646f; font-size: 12px;
+}
+.pt-tab button.pt-tab-close { padding: 0 3px; opacity: 0; }
+.pt-tab button.pt-tab-close:hover,
+.pt-tab button.pt-tab-close:hover label { color: #f2777a; }
+.pt-tab:hover button.pt-tab-close { opacity: 1; }
 .pt-badge {
   font-family: "JetBrains Mono", monospace; font-weight: 500; font-size: 9.5px;
   color: #0b0d10; padding: 3px 5px;
 }
-button.pt-tab-new { min-width: 26px; min-height: 26px; color: #5c646f; font-size: 14px; }
+button.pt-tab-new { min-width: 22px; min-height: 22px; padding: 0; color: #5c646f; font-size: 14px; }
 button.pt-tab-new:hover { background-color: rgba(255,255,255,.045); color: #e6e8ea; }
 
 /* ---- status bar (34px) ---- */
