@@ -42,6 +42,7 @@ add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
+  src/pt-block.c
   src/pt-config.c
   src/pt-fuzzy.c
   src/pt-git-parse.c
@@ -86,6 +87,10 @@ add_test(NAME config COMMAND test-config)
 add_executable(test-theme tests/test-theme.c)
 target_link_libraries(test-theme PRIVATE ptcore)
 add_test(NAME theme COMMAND test-theme)
+
+add_executable(test-block tests/test-block.c)
+target_link_libraries(test-block PRIVATE ptcore)
+add_test(NAME block COMMAND test-block)
 
 add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
 target_include_directories(test-keymap PRIVATE src)

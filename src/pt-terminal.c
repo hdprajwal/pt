@@ -1,4 +1,5 @@
 #include "pt-terminal.h"
+#include "pt-block.h"
 #include "pt-keymap.h"
 #include "pt-session.h"      /* PT_FONT_SIZE_DEFAULT, shared with persistence */
 #include <math.h>
@@ -272,6 +273,26 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
       uint32_t *cps = glen <= 16 ? cps_stack : g_new(uint32_t, glen);
       ghostty_render_state_row_cells_get(cells,
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
+
+      /* Block elements are drawn from the cell metrics, never shaped: the
+       * font's ink is narrower than the rounded cell width, which seams every
+       * boundary between adjacent block cells. */
+      PtBlockRect rects[4];
+      int nrects = glen == 1 ? pt_block_glyph_rects(cps[0], rects) : 0;
+      if (nrects > 0) {
+        for (int i = 0; i < nrects; i++)
+          gtk_snapshot_append_color(snapshot,
+              &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f,
+                         rects[i].alpha},
+              &GRAPHENE_RECT_INIT(x + rects[i].x * t->cell_w,
+                                  y + rects[i].y * t->cell_h,
+                                  rects[i].w * t->cell_w,
+                                  rects[i].h * t->cell_h));
+        if (cps != cps_stack) g_free(cps);  /* this path skips the free below */
+        x += t->cell_w;
+        continue;
+      }
+
       int pos = 0;
       for (uint32_t i = 0; i < glen && pos < 60; i++)
         pos += g_unichar_to_utf8((gunichar)cps[i], text + pos);
