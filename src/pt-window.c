@@ -36,6 +36,7 @@ struct _PtWindow {
   GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
+  gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
 };
 
 G_DEFINE_FINAL_TYPE(PtWindow, pt_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -299,6 +300,29 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
   }
 }
 
+/* PT_BRANCH has to be right for a project's *first* shells, but the git
+ * monitor's first poll is async and lands long after they spawn — without this
+ * every restored shell (i.e. every shell at app start) got PT_BRANCH="".
+ * Reading .git/HEAD is a single small file read, no subprocess; the monitor
+ * overwrites p->git with the authoritative status shortly after.
+ * Leaves the branch untouched when there is no .git/HEAD (non-repo, or a
+ * worktree/submodule whose .git is a gitdir: pointer — the monitor covers it). */
+static void seed_git_branch(PtProjectUI *p) {
+  static const char ref_prefix[] = "ref: refs/heads/";
+  char *head = g_build_filename(p->path, ".git", "HEAD", NULL);
+  char *txt = NULL;
+  if (g_file_get_contents(head, &txt, NULL, NULL)) {
+    g_strstrip(txt);
+    if (g_str_has_prefix(txt, ref_prefix))
+      g_strlcpy(p->git.branch, txt + sizeof(ref_prefix) - 1,
+                sizeof p->git.branch);
+    else if (txt[0] != '\0')
+      g_strlcpy(p->git.branch, "(detached)", sizeof p->git.branch);
+  }
+  g_free(txt);
+  g_free(head);
+}
+
 /* Terminals are spawned deep inside the pane grid (leaves become terminals
  * during rebuild), so the project context reaches the child through the
  * module-level default env instead of a parameter. Every path that can create
@@ -367,8 +391,7 @@ static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
   p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
   p->missing = !g_file_test(path, G_FILE_TEST_IS_DIR);
   if (!p->missing) {
-    /* branch is still "" here — the monitor has not run yet; the first shell of
-     * a brand-new project gets an empty PT_BRANCH, later ones get the real one. */
+    seed_git_branch(p);   /* the monitor has not polled yet; read HEAD directly */
     set_spawn_env_for(p);
     g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(path)));
     p->monitor = pt_git_monitor_new(path, on_git_update, p);
@@ -430,41 +453,85 @@ static void action_new_tab(PtWindow *w) {
   mark_dirty(w);
 }
 
-static void do_close_pane(PtWindow *w) {
-  PtProjectUI *p = active_project(w);
-  PtTabUI *t = active_tab(p);
-  if (t == NULL) return;
-  if (!pt_pane_grid_close_focused(PT_PANE_GRID(t->grid))) {
-    /* last pane closed → close the tab */
-    g_ptr_array_remove_index(p->tabs, p->active_tab);
+/* Locate the tab that owns a grid. Confirmation is async, so by response time
+ * the grid may have been dropped already (its last shell exited cleanly →
+ * on_grid_emptied removed the tab) — a plain "close the active tab's pane"
+ * would then hit whatever tab slid into that slot. */
+static gboolean find_grid(PtWindow *w, PtPaneGrid *g, guint *out_pi,
+                          guint *out_ti) {
+  if (w->projects == NULL || g == NULL) return FALSE;
+  for (guint pi = 0; pi < w->projects->len; pi++) {
+    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
+    for (guint ti = 0; ti < p->tabs->len; ti++) {
+      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
+      if (t->grid != GTK_WIDGET(g)) continue;
+      if (out_pi != NULL) *out_pi = pi;
+      if (out_ti != NULL) *out_ti = ti;
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/* Close the focused pane of grid g (not of whatever happens to be active now).
+ * No-op when g is no longer owned by any tab. */
+static void do_close_pane(PtWindow *w, PtPaneGrid *g) {
+  guint pi = 0, ti = 0;
+  if (!find_grid(w, g, &pi, &ti)) return;
+  PtProjectUI *p = g_ptr_array_index(w->projects, pi);
+  if (!pt_pane_grid_close_focused(g)) {
+    /* last pane closed → close the owning tab, whichever one it is */
+    g_ptr_array_remove_index(p->tabs, ti);
+    if (p->active_tab > (int)ti) p->active_tab--;
     if (p->active_tab >= (int)p->tabs->len)
       p->active_tab = (int)p->tabs->len - 1;
-    show_active_grid(w);
+    if ((int)pi == w->active_project) show_active_grid(w);
   }
   mark_dirty(w);
+}
+
+/* Response-callback payload: keeps the target grid alive (the tab holding it
+ * can be dropped while the dialog is up) and the window resolvable. Freed
+ * through the closure's GDestroyNotify, so it survives a dialog that is torn
+ * down without ever emitting a response. */
+typedef struct {
+  PtWindow *window;   /* owned ref */
+  PtPaneGrid *grid;   /* owned ref */
+} PtCloseCtx;
+
+static void close_ctx_free(gpointer data, GClosure *closure) {
+  (void)closure;
+  PtCloseCtx *c = data;
+  c->window->close_confirm_open = FALSE;
+  g_object_unref(c->grid);
+  g_object_unref(c->window);
+  g_free(c);
 }
 
 static void on_close_pane_response(AdwAlertDialog *dlg, const char *response,
                                    gpointer user) {
   (void)dlg;
-  PtWindow *w = PT_WINDOW(user);
+  PtCloseCtx *c = user;
   if (g_strcmp0(response, "close") == 0) {
-    do_close_pane(w);
+    do_close_pane(c->window, c->grid);
     return;
   }
-  /* Cancelled (or dismissed): hand the keyboard straight back to the pane. */
-  PtTabUI *t = active_tab(active_project(w));
-  if (t != NULL) pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
+  /* Cancelled (or dismissed): hand the keyboard back to the pane we asked
+   * about, if that grid is still on screen. */
+  if (find_grid(c->window, c->grid, NULL, NULL))
+    pt_pane_grid_focus_terminal(c->grid);
 }
 
 /* Closing a pane that is mid-command kills the command. Only ask when there is
  * actually something to lose — at a bare prompt this closes silently. */
 static void action_close_pane(PtWindow *w) {
+  if (w->close_confirm_open) return;   /* repeated ⌃⇧W must not stack dialogs */
   PtTabUI *t = active_tab(active_project(w));
   if (t == NULL) return;
-  PtTerminal *term = pt_pane_grid_focused_terminal(PT_PANE_GRID(t->grid));
+  PtPaneGrid *grid = PT_PANE_GRID(t->grid);
+  PtTerminal *term = pt_pane_grid_focused_terminal(grid);
   if (term == NULL || !pt_terminal_running(term)) {
-    do_close_pane(w);
+    do_close_pane(w, grid);
     return;
   }
   AdwDialog *dlg = adw_alert_dialog_new(
@@ -475,7 +542,12 @@ static void action_close_pane(PtWindow *w) {
                                            ADW_RESPONSE_DESTRUCTIVE);
   adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dlg), "cancel");
   adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dlg), "cancel");
-  g_signal_connect(dlg, "response", G_CALLBACK(on_close_pane_response), w);
+  PtCloseCtx *c = g_new0(PtCloseCtx, 1);
+  c->window = g_object_ref(w);
+  c->grid = g_object_ref(grid);
+  w->close_confirm_open = TRUE;
+  g_signal_connect_data(dlg, "response", G_CALLBACK(on_close_pane_response), c,
+                        close_ctx_free, 0);
   adw_dialog_present(dlg, GTK_WIDGET(w));
 }
 
@@ -808,7 +880,8 @@ static void restore_state(PtWindow *w) {
     p->missing = !g_file_test(ps->path, G_FILE_TEST_IS_DIR);
     if (!p->missing) {
       /* per project, not once for the whole restore: each project's shells must
-       * see their own PT_PROJECT/PT_ACCENT */
+       * see their own PT_PROJECT/PT_ACCENT/PT_BRANCH */
+      seed_git_branch(p);
       set_spawn_env_for(p);
       for (guint j = 0; j < ps->tabs->len; j++) {
         PtTabState *ts = g_ptr_array_index(ps->tabs, j);
