@@ -3,15 +3,22 @@
 #include <math.h>
 
 #define PT_FONT_FAMILY "JetBrains Mono, monospace"
-#define PT_FONT_SIZE_DEFAULT 11
+#define PT_FONT_SIZE_DEFAULT 9
 #define PT_FONT_SIZE_MIN 6
 #define PT_FONT_SIZE_MAX 32
-#define PT_PAD 4
+/* Inset between the pane edge and the character grid (mirrored by
+ * PT_CORE_PAD_X / PT_CORE_PAD_Y in pt-term-core.c for hit-testing). */
+#define PT_PAD_X 20
+#define PT_PAD_Y 18
 
-/* One font size shared by every terminal (kero-less global zoom). Live
+/* One font size shared by every terminal: zoom is global, not per-pane. Live
  * widgets register here so a size change can re-measure them all. */
 static int font_size_pts = PT_FONT_SIZE_DEFAULT;
 static GSList *live_terminals;
+
+/* Env applied by pt_terminal_new when the caller has no project context
+ * (pane grids build terminals straight from split-tree leaves). */
+static char **default_env;
 
 enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_ACTIVITY, SIG_COMMAND_CHANGED,
        N_SIGNALS };
@@ -21,6 +28,7 @@ struct _PtTerminal {
   GtkWidget parent_instance;
   PtTermCore *core;
   char *start_cwd;
+  char **env;                /* extra child env, or NULL */
   char *last_command;
   PangoLayout *layout;
   PangoFontDescription *font_desc;
@@ -75,11 +83,29 @@ static void measure_font(PtTerminal *t) {
   if (t->cell_h < 1) t->cell_h = 16;
 }
 
+/* Design palette: the ANSI slots pt overrides so status output matches the
+ * app chrome. Everything else keeps libghostty's built-in defaults. */
+static void apply_palette(PtTermCore *core) {
+  GhosttyTerminal term = pt_term_core_terminal(core);
+  GhosttyColorRgb palette[256];
+  if (ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
+                           palette) != GHOSTTY_SUCCESS)
+    return;
+  const GhosttyColorRgb red = { 0xf2, 0x77, 0x7a };
+  const GhosttyColorRgb green = { 0x6e, 0xe7, 0xa0 };
+  const GhosttyColorRgb yellow = { 0xf2, 0xb2, 0x5c };
+  palette[1] = palette[9] = red;
+  palette[2] = palette[10] = green;
+  palette[3] = palette[11] = yellow;
+  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, palette);
+}
+
 static void ensure_core(PtTerminal *t) {
   if (t->core != NULL) return;
   measure_font(t);
   GError *err = NULL;
-  t->core = pt_term_core_new(t->start_cwd, NULL, 80, 24,
+  t->core = pt_term_core_new(t->start_cwd, NULL,
+                             (const char *const *)t->env, 80, 24,
                              t->cell_w, t->cell_h, &err);
   if (t->core == NULL) {
     g_warning("pt: terminal spawn failed: %s",
@@ -89,6 +115,7 @@ static void ensure_core(PtTerminal *t) {
     t->exit_status = -1;
     return;
   }
+  apply_palette(t->core);
   PtTermCoreCallbacks cbs = { .draw = core_draw, .exited = core_exited,
                               .title = core_title, .command = core_command };
   pt_term_core_set_callbacks(t->core, &cbs, t);
@@ -100,8 +127,8 @@ static void pt_terminal_size_allocate(GtkWidget *widget, int width, int height,
   PtTerminal *t = PT_TERMINAL(widget);
   ensure_core(t);
   if (t->core == NULL) return;
-  int cols = (width - 2 * PT_PAD) / t->cell_w;
-  int rows = (height - 2 * PT_PAD) / t->cell_h;
+  int cols = (width - 2 * PT_PAD_X) / t->cell_w;
+  int rows = (height - 2 * PT_PAD_Y) / t->cell_h;
   if (cols < 2) cols = 2;
   if (rows < 2) rows = 2;
   pt_term_core_resize(t->core, (guint16)cols, (guint16)rows,
@@ -117,7 +144,8 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   ensure_core(t);
   if (t->core == NULL) {
     gtk_snapshot_append_color(snapshot,
-        &(GdkRGBA){0.05f, 0.05f, 0.05f, 1}, &GRAPHENE_RECT_INIT(0, 0, w, h));
+        &(GdkRGBA){0x0b / 255.0f, 0x0d / 255.0f, 0x10 / 255.0f, 1},
+        &GRAPHENE_RECT_INIT(0, 0, w, h));
     return;
   }
   pt_term_core_sync(t->core);
@@ -125,8 +153,8 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
 
   /* Default/effective colors: libghostty-vt exposes these as individual
    * render-state queries (no aggregate colors struct in this ABI). */
-  GhosttyColorRgb bg_default = { 0x10, 0x10, 0x10 };
-  GhosttyColorRgb fg_default = { 0xd0, 0xd0, 0xd0 };
+  GhosttyColorRgb bg_default = { 0x0b, 0x0d, 0x10 };
+  GhosttyColorRgb fg_default = { 0xd6, 0xda, 0xe0 };
   ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_BACKGROUND,
                            &bg_default);
   ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
@@ -150,13 +178,13 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     return;
 
   char text[64];
-  int y = PT_PAD;
+  int y = PT_PAD_Y;
   while (ghostty_render_state_row_iterator_next(iter)) {
     GhosttyRenderStateRowCells cells = pt_term_core_row_cells(t->core);
     if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                                      &cells) != GHOSTTY_SUCCESS)
       continue;
-    int x = PT_PAD;
+    int x = PT_PAD_X;
     while (ghostty_render_state_row_cells_next(cells)) {
       uint32_t glen = 0;
       ghostty_render_state_row_cells_get(cells,
@@ -250,7 +278,8 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     GhosttyColorRgb cc = cursor_has_value ? cursor_color : fg_default;
     gtk_snapshot_append_color(snapshot,
         &(GdkRGBA){cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.55f},
-        &GRAPHENE_RECT_INIT(PT_PAD + cx * t->cell_w, PT_PAD + cy * t->cell_h,
+        &GRAPHENE_RECT_INIT(PT_PAD_X + cx * t->cell_w,
+                            PT_PAD_Y + cy * t->cell_h,
                             t->cell_w, t->cell_h));
   }
 
@@ -276,7 +305,8 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     pango_layout_set_attributes(t->layout, NULL);
     pango_layout_set_text(t->layout, msg, -1);
     gtk_snapshot_save(snapshot);
-    gtk_snapshot_translate(snapshot, &GRAPHENE_POINT_INIT(PT_PAD, h - t->cell_h - 4));
+    gtk_snapshot_translate(snapshot,
+                           &GRAPHENE_POINT_INIT(PT_PAD_X, h - t->cell_h - 4));
     gtk_snapshot_append_layout(snapshot, t->layout,
                                &(GdkRGBA){0.9f, 0.76f, 0.48f, 1});
     gtk_snapshot_restore(snapshot);
@@ -432,6 +462,14 @@ PtTermCore *pt_terminal_core(PtTerminal *t) { return t->core; }
 
 const char *pt_terminal_last_command(PtTerminal *t) { return t->last_command; }
 
+gboolean pt_terminal_running(PtTerminal *t) {
+  return t->core != NULL && pt_term_core_running(t->core);
+}
+
+int pt_terminal_last_exit(PtTerminal *t) {
+  return t->core != NULL ? pt_term_core_last_exit(t->core) : -1;
+}
+
 /* ---- global font zoom ---- */
 int pt_terminal_font_size(void) { return font_size_pts; }
 
@@ -459,6 +497,7 @@ static void pt_terminal_dispose(GObject *obj) {
   g_clear_object(&t->layout);
   g_clear_pointer(&t->font_desc, pango_font_description_free);
   g_clear_pointer(&t->start_cwd, g_free);
+  g_clear_pointer(&t->env, g_strfreev);
   g_clear_pointer(&t->last_command, g_free);
   G_OBJECT_CLASS(pt_terminal_parent_class)->dispose(obj);
 }
@@ -514,8 +553,18 @@ static void pt_terminal_init(PtTerminal *t) {
   gtk_widget_add_controller(GTK_WIDGET(t), focus);
 }
 
-GtkWidget *pt_terminal_new(const char *cwd) {
+void pt_terminal_set_default_env(const char *const *env_pairs) {
+  g_clear_pointer(&default_env, g_strfreev);
+  if (env_pairs != NULL) default_env = g_strdupv((char **)env_pairs);
+}
+
+GtkWidget *pt_terminal_new_full(const char *cwd, const char *const *env_pairs) {
   PtTerminal *t = g_object_new(PT_TYPE_TERMINAL, NULL);
   t->start_cwd = g_strdup(cwd != NULL ? cwd : g_get_home_dir());
+  if (env_pairs != NULL) t->env = g_strdupv((char **)env_pairs);
   return GTK_WIDGET(t);
+}
+
+GtkWidget *pt_terminal_new(const char *cwd) {
+  return pt_terminal_new_full(cwd, (const char *const *)default_env);
 }
