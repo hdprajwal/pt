@@ -59,10 +59,20 @@ static void refresh_sidebar(PtWindow *w) {
   for (int i = 0; i < n; i++) {
     PtProjectUI *p = g_ptr_array_index(w->projects, i);
     rows[i].name = p->name;
+    rows[i].path = p->path;
     rows[i].missing = p->missing;
     rows[i].is_repo = p->is_repo;
     rows[i].changed = p->git.changed;
     g_strlcpy(rows[i].branch, p->git.branch, sizeof(rows[i].branch));
+    /* accent field lands with the project bar task */
+    rows[i].accent = i % PT_ACCENT_COUNT;
+    rows[i].shell_count = (int)p->tabs->len;
+    int running = 0;
+    for (guint j = 0; j < p->tabs->len; j++) {
+      PtTabUI *t = g_ptr_array_index(p->tabs, j);
+      if (pt_pane_grid_any_running(PT_PANE_GRID(t->grid))) running++;
+    }
+    rows[i].running = running;
   }
   pt_sidebar_set_projects(PT_SIDEBAR(w->sidebar), rows, n, w->active_project);
   g_free(rows);
@@ -401,6 +411,14 @@ static void on_project_selected(PtSidebar *sb, int idx, gpointer user) {
   action_switch_project(PT_WINDOW(user), idx);
 }
 
+/* Escape in the sidebar search hands the keyboard back to the terminal. */
+static void on_search_escape(PtSidebar *sb, gpointer user) {
+  (void)sb;
+  PtWindow *w = PT_WINDOW(user);
+  PtTabUI *t = active_tab(active_project(w));
+  if (t != NULL) pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
+}
+
 static void on_tab_selected(PtTabStrip *s, int idx, gpointer user) {
   (void)s;
   action_switch_tab(PT_WINDOW(user), idx);
@@ -695,6 +713,8 @@ static void pt_window_init(PtWindow *w) {
   g_signal_connect(w->sidebar, "project-add", G_CALLBACK(on_project_add), w);
   g_signal_connect(w->sidebar, "project-remove",
                    G_CALLBACK(on_project_remove), w);
+  g_signal_connect(w->sidebar, "search-escape",
+                   G_CALLBACK(on_search_escape), w);
   g_signal_connect(w->tabstrip, "tab-selected",
                    G_CALLBACK(on_tab_selected), w);
   g_signal_connect(w->tabstrip, "tab-new", G_CALLBACK(on_tab_new), w);

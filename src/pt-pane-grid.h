@@ -25,6 +25,8 @@ typedef enum {
 void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir);
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
 int pt_pane_grid_pane_count(PtPaneGrid *g);
+/* TRUE when any pane in the grid has a foreground process other than the shell. */
+gboolean pt_pane_grid_any_running(PtPaneGrid *g);
 int pt_pane_grid_focused_index(PtPaneGrid *g);
 void pt_pane_grid_sync_cwds(PtPaneGrid *g); /* leaf->cwd ← live terminal cwd */
 void pt_pane_grid_focus_terminal(PtPaneGrid *g); /* grab focus on focused pane */

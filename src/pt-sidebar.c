@@ -1,16 +1,58 @@
 #include "pt-sidebar.h"
+#include "pt-fuzzy.h"
+#include "pt-session.h"   /* PT_ACCENT_COUNT */
 
-enum { SIG_SELECTED, SIG_ADD, SIG_REMOVE, N_SIGNALS };
+enum { SIG_SELECTED, SIG_ADD, SIG_REMOVE, SIG_SEARCH_ESCAPE, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtSidebar {
   GtkWidget parent_instance;
-  GtkWidget *box;      /* vertical: heading, rows..., stretch, add button */
+  GtkWidget *box;          /* vertical: header, search, rows, sep, add */
+  GtkWidget *count_label;
+  GtkWidget *search;       /* GtkText */
   GtkWidget *rows_box;
+  PtSidebarRow *rows;      /* owned deep copy; name/path are g_strdup'd */
+  int n_rows;
+  int active;
+  char *query;             /* owned; NULL or "" means "show everything" */
 };
 
 G_DEFINE_FINAL_TYPE(PtSidebar, pt_sidebar, GTK_TYPE_WIDGET)
 
+/* ---------- owned row storage ---------- */
+static void clear_rows(PtSidebar *sb) {
+  for (int i = 0; i < sb->n_rows; i++) {
+    g_free((char *)sb->rows[i].name);
+    g_free((char *)sb->rows[i].path);
+  }
+  g_clear_pointer(&sb->rows, g_free);
+  sb->n_rows = 0;
+}
+
+/* ---------- helpers ---------- */
+static void add_accent_class(GtkWidget *wdg, int accent) {
+  int a = accent % PT_ACCENT_COUNT;
+  if (a < 0) a += PT_ACCENT_COUNT;
+  char cls[8];
+  g_snprintf(cls, sizeof(cls), "pt-a%d", a);
+  gtk_widget_add_css_class(wdg, cls);
+}
+
+static gboolean row_matches(PtSidebar *sb, int i) {
+  if (sb->query == NULL || sb->query[0] == '\0') return TRUE;
+  return pt_fuzzy_score(sb->query, sb->rows[i].name) != 0 ||
+         pt_fuzzy_score(sb->query, sb->rows[i].path) != 0;
+}
+
+/* First row that survives the current filter, in original index space.
+ * -1 when nothing matches. */
+static int first_visible_index(PtSidebar *sb) {
+  for (int i = 0; i < sb->n_rows; i++)
+    if (row_matches(sb, i)) return i;
+  return -1;
+}
+
+/* ---------- callbacks ---------- */
 static void on_row_clicked(GtkGestureClick *g, int n, double x, double y,
                            gpointer user) {
   (void)n; (void)x; (void)y;
@@ -32,49 +74,78 @@ static void on_add_clicked(GtkButton *btn, gpointer user) {
   g_signal_emit(PT_SIDEBAR(user), signals[SIG_ADD], 0);
 }
 
-void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
-                             int n_rows, int active) {
+/* ---------- row rendering ---------- */
+static void rebuild_rows(PtSidebar *sb) {
   GtkWidget *child;
   while ((child = gtk_widget_get_first_child(sb->rows_box)) != NULL)
     gtk_box_remove(GTK_BOX(sb->rows_box), child);
 
-  for (int i = 0; i < n_rows; i++) {
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  int shown = 0;
+  for (int i = 0; i < sb->n_rows; i++) {
+    if (!row_matches(sb, i)) continue;
+    shown++;
+    const PtSidebarRow *r = &sb->rows[i];
+
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(row, "pt-project-row");
-    if (i == active) gtk_widget_add_css_class(row, "active");
+    add_accent_class(row, r->accent);
+    if (i == sb->active) gtk_widget_add_css_class(row, "active");
+    /* Original project index — the window never sees filtered positions. */
     g_object_set_data(G_OBJECT(row), "pt-index", GINT_TO_POINTER(i));
 
-    /* Two-line column: project name on top, branch (+ dirty state) below. */
-    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
-    GtkWidget *name = gtk_label_new(rows[i].name);
-    gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
-    gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_MIDDLE);
-    gtk_box_append(GTK_BOX(col), name);
+    GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(dot, "pt-dot");
+    gtk_widget_add_css_class(dot, "pt-dot-7");
+    add_accent_class(dot, r->accent);
+    gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(row), dot);
 
-    if (rows[i].missing) {
-      GtkWidget *branch = gtk_label_new("[missing]");
-      gtk_label_set_xalign(GTK_LABEL(branch), 0.0f);
-      gtk_widget_add_css_class(branch, "pt-branch");
-      gtk_widget_add_css_class(branch, "pt-badge-dirty");
-      gtk_box_append(GTK_BOX(col), branch);
-    } else if (rows[i].is_repo) {
-      char *btxt = rows[i].changed > 0
-          ? g_strdup_printf("%s ●%d", rows[i].branch, rows[i].changed)
-          : g_strdup(rows[i].branch);
+    GtkWidget *name = gtk_label_new(r->name);
+    gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(name, "pt-name");
+    gtk_box_append(GTK_BOX(row), name);
+
+    char *btxt = NULL;
+    gboolean dirty = FALSE;
+    if (r->missing) {
+      btxt = g_strdup("[missing]");
+      dirty = TRUE;
+    } else if (r->is_repo) {
+      btxt = r->changed > 0 ? g_strdup_printf("%s ✚%d", r->branch, r->changed)
+                            : g_strdup(r->branch);
+      dirty = r->changed > 0;
+    }
+    if (btxt != NULL) {
       GtkWidget *branch = gtk_label_new(btxt);
       g_free(btxt);
       gtk_label_set_xalign(GTK_LABEL(branch), 0.0f);
-      gtk_label_set_ellipsize(GTK_LABEL(branch), PANGO_ELLIPSIZE_MIDDLE);
+      gtk_label_set_ellipsize(GTK_LABEL(branch), PANGO_ELLIPSIZE_END);
+      gtk_widget_set_hexpand(branch, FALSE);
       gtk_widget_add_css_class(branch, "pt-branch");
-      if (rows[i].changed > 0) gtk_widget_add_css_class(branch, "dirty");
-      gtk_box_append(GTK_BOX(col), branch);
+      if (dirty) gtk_widget_add_css_class(branch, "dirty");
+      gtk_box_append(GTK_BOX(row), branch);
     }
-    gtk_box_append(GTK_BOX(row), col);
 
-    /* spacer keeps the column left and right-aligns hint + remove */
     GtkWidget *spacer = gtk_label_new(NULL);
     gtk_widget_set_hexpand(spacer, TRUE);
     gtk_box_append(GTK_BOX(row), spacer);
+
+    char ctxt[32];
+    GtkWidget *count;
+    if (r->running > 0) {
+      g_snprintf(ctxt, sizeof(ctxt), "%d ⏵", r->running);
+      count = gtk_label_new(ctxt);
+      gtk_widget_add_css_class(count, "pt-run-count");
+      add_accent_class(count, r->accent);
+    } else {
+      g_snprintf(ctxt, sizeof(ctxt), "%d", r->shell_count);
+      count = gtk_label_new(ctxt);
+      gtk_widget_add_css_class(count, "pt-shell-count");
+    }
+    gtk_widget_set_halign(count, GTK_ALIGN_END);
+    gtk_widget_set_valign(count, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(row), count);
 
     GtkWidget *rm = gtk_button_new_with_label("×");
     gtk_widget_add_css_class(rm, "flat");
@@ -89,10 +160,65 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
     gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
     gtk_box_append(GTK_BOX(sb->rows_box), row);
   }
+
+  char n[16];
+  g_snprintf(n, sizeof(n), "%d", shown);
+  gtk_label_set_text(GTK_LABEL(sb->count_label), n);
 }
 
+/* ---------- search ---------- */
+static void on_search_changed(GtkEditable *ed, gpointer user) {
+  PtSidebar *sb = user;
+  g_free(sb->query);
+  sb->query = g_strdup(gtk_editable_get_text(ed));
+  rebuild_rows(sb);
+}
+
+static void on_search_activate(GtkText *txt, gpointer user) {
+  (void)txt;
+  PtSidebar *sb = user;
+  int idx = first_visible_index(sb);
+  if (idx >= 0) g_signal_emit(sb, signals[SIG_SELECTED], 0, idx);
+}
+
+static gboolean on_search_key(GtkEventControllerKey *ctl, guint keyval,
+                              guint keycode, GdkModifierType state,
+                              gpointer user) {
+  (void)ctl; (void)keycode; (void)state;
+  if (keyval != GDK_KEY_Escape) return FALSE;
+  PtSidebar *sb = user;
+  /* Clearing the entry fires "changed", which resets query and rebuilds. */
+  gtk_editable_set_text(GTK_EDITABLE(sb->search), "");
+  g_signal_emit(sb, signals[SIG_SEARCH_ESCAPE], 0);
+  return TRUE;
+}
+
+void pt_sidebar_focus_search(PtSidebar *sb) {
+  gtk_widget_grab_focus(sb->search);
+}
+
+/* ---------- public API ---------- */
+void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
+                             int n_rows, int active) {
+  clear_rows(sb);
+  if (n_rows > 0) {
+    sb->rows = g_new0(PtSidebarRow, n_rows);
+    sb->n_rows = n_rows;
+    for (int i = 0; i < n_rows; i++) {
+      sb->rows[i] = rows[i];
+      sb->rows[i].name = g_strdup(rows[i].name);
+      sb->rows[i].path = g_strdup(rows[i].path);
+    }
+  }
+  sb->active = active;
+  rebuild_rows(sb);
+}
+
+/* ---------- GObject ---------- */
 static void pt_sidebar_dispose(GObject *obj) {
   PtSidebar *sb = PT_SIDEBAR(obj);
+  clear_rows(sb);
+  g_clear_pointer(&sb->query, g_free);
   g_clear_pointer(&sb->box, gtk_widget_unparent);
   G_OBJECT_CLASS(pt_sidebar_parent_class)->dispose(obj);
 }
@@ -107,30 +233,70 @@ static void pt_sidebar_class_init(PtSidebarClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_REMOVE] = g_signal_new("project-remove", PT_TYPE_SIDEBAR,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
+  signals[SIG_SEARCH_ESCAPE] = g_signal_new("search-escape", PT_TYPE_SIDEBAR,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void pt_sidebar_init(PtSidebar *sb) {
   gtk_widget_add_css_class(GTK_WIDGET(sb), "pt-sidebar");
-  gtk_widget_set_size_request(GTK_WIDGET(sb), 190, -1);
+  gtk_widget_set_size_request(GTK_WIDGET(sb), 266, -1);
+  sb->active = -1;
   sb->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_parent(sb->box, GTK_WIDGET(sb));
 
-  GtkWidget *heading = gtk_label_new("PROJECTS");
-  gtk_label_set_xalign(GTK_LABEL(heading), 0.0f);
-  gtk_widget_add_css_class(heading, "pt-sidebar-heading");
-  gtk_box_append(GTK_BOX(sb->box), heading);
+  /* header: PROJECTS ................ <n> */
+  GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *title = gtk_label_new("PROJECTS");
+  gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
+  gtk_widget_set_hexpand(title, TRUE);
+  gtk_widget_add_css_class(title, "pt-sidebar-header");
+  gtk_box_append(GTK_BOX(header), title);
+  sb->count_label = gtk_label_new("0");
+  gtk_widget_set_halign(sb->count_label, GTK_ALIGN_END);
+  gtk_widget_add_css_class(sb->count_label, "pt-sidebar-count");
+  gtk_box_append(GTK_BOX(header), sb->count_label);
+  gtk_box_append(GTK_BOX(sb->box), header);
+
+  /* search: ⌕ [.................] */
+  GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class(search_box, "pt-search");
+  GtkWidget *glyph = gtk_label_new("⌕");
+  gtk_widget_add_css_class(glyph, "pt-search-glyph");
+  gtk_box_append(GTK_BOX(search_box), glyph);
+  sb->search = gtk_text_new();
+  gtk_text_set_placeholder_text(GTK_TEXT(sb->search), "Search or ^K");
+  gtk_widget_set_hexpand(sb->search, TRUE);
+  g_signal_connect(sb->search, "changed",
+                   G_CALLBACK(on_search_changed), sb);
+  g_signal_connect(sb->search, "activate",
+                   G_CALLBACK(on_search_activate), sb);
+  GtkEventController *keys = gtk_event_controller_key_new();
+  g_signal_connect(keys, "key-pressed", G_CALLBACK(on_search_key), sb);
+  gtk_widget_add_controller(sb->search, keys);
+  gtk_box_append(GTK_BOX(search_box), sb->search);
+  gtk_box_append(GTK_BOX(sb->box), search_box);
 
   sb->rows_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_vexpand(sb->rows_box, TRUE);
   gtk_box_append(GTK_BOX(sb->box), sb->rows_box);
 
-  GtkWidget *add = gtk_button_new_with_label("+ project");
+  GtkWidget *sep = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class(sep, "pt-sidebar-footer-sep");
+  gtk_box_append(GTK_BOX(sb->box), sep);
+
+  GtkWidget *add = gtk_button_new();
   gtk_widget_add_css_class(add, "flat");
   gtk_widget_add_css_class(add, "pt-add-project");
   gtk_widget_set_halign(add, GTK_ALIGN_FILL);
-  GtkWidget *add_label = gtk_button_get_child(GTK_BUTTON(add));
-  if (GTK_IS_LABEL(add_label))
-    gtk_label_set_xalign(GTK_LABEL(add_label), 0.0f);
+  GtkWidget *add_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  GtkWidget *add_label = gtk_label_new("+ Add project");
+  gtk_label_set_xalign(GTK_LABEL(add_label), 0.0f);
+  gtk_widget_set_hexpand(add_label, TRUE);
+  gtk_box_append(GTK_BOX(add_box), add_label);
+  GtkWidget *add_hint = gtk_label_new("^N");
+  gtk_widget_add_css_class(add_hint, "pt-add-hint");
+  gtk_box_append(GTK_BOX(add_box), add_hint);
+  gtk_button_set_child(GTK_BUTTON(add), add_box);
   g_signal_connect(add, "clicked", G_CALLBACK(on_add_clicked), sb);
   gtk_box_append(GTK_BOX(sb->box), add);
 }

@@ -329,6 +329,17 @@ int pt_pane_grid_pane_count(PtPaneGrid *g) {
   return pt_split_count_leaves(g->tree);
 }
 
+static gboolean any_running_walk(PtSplitNode *n) {
+  if (n == NULL) return FALSE;
+  if (n->kind == PT_SPLIT_LEAF)
+    return n->user != NULL && pt_terminal_running(PT_TERMINAL(n->user));
+  return any_running_walk(n->a) || any_running_walk(n->b);
+}
+
+gboolean pt_pane_grid_any_running(PtPaneGrid *g) {
+  return any_running_walk(g->tree);
+}
+
 static void index_walk(PtSplitNode *n, PtSplitNode *target, int *idx,
                        int *found) {
   if (n == NULL || *found >= 0) return;
