@@ -4,7 +4,7 @@
 static void test_defaults(void) {
   PtConfig *c = pt_config_new();
   g_assert_cmpstr(c->theme, ==, "pt-dark");
-  g_assert_cmpint(c->font_size, ==, 11);
+  g_assert_cmpint(c->font_size, ==, 9);
   g_assert_cmpstr(c->font_family, ==, "JetBrains Mono");
   g_assert_cmpfloat(c->ui_font_size, ==, 12.5);
   g_assert_cmpstr(c->ui_font_family, ==, "IBM Plex Sans");
@@ -40,7 +40,7 @@ static void test_parse(void) {
 static void test_parse_bad_values(void) {
   /* Junk numbers fall back to defaults; parser never crashes. */
   PtConfig *c = pt_config_parse("font-size = huge\nui-font-size = \n");
-  g_assert_cmpint(c->font_size, ==, 11);
+  g_assert_cmpint(c->font_size, ==, 9);
   g_assert_cmpfloat(c->ui_font_size, ==, 12.5);
   pt_config_free(c);
 }
@@ -56,7 +56,7 @@ static void test_parse_out_of_range_font_size(void) {
   };
   for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
     PtConfig *c = pt_config_parse(bad[i]);
-    g_assert_cmpint(c->font_size, ==, 11);
+    g_assert_cmpint(c->font_size, ==, 9);
     pt_config_free(c);
   }
   /* The edges of the accepted range still parse. */

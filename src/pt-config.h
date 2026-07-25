@@ -1,7 +1,10 @@
 #pragma once
 #include <glib.h>
 
-#define PT_CONFIG_FONT_SIZE_DEFAULT 11
+/* Canonical terminal font size, in points, for a fresh config and for the
+ * Ctrl+0 reset. pt-session.h aliases PT_FONT_SIZE_DEFAULT to this so the
+ * persisted default and the config default can never drift apart. */
+#define PT_CONFIG_FONT_SIZE_DEFAULT 9
 /* Range the parser accepts for font-size; out-of-range values warn and keep
  * the default. Callers may clamp to a tighter range for display. */
 #define PT_CONFIG_FONT_SIZE_MIN 1

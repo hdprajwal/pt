@@ -43,7 +43,10 @@ struct _PtWindow {
   PtConfig *config;
   GFileMonitor *config_monitor;
   GFileMonitor *theme_monitor;
-  guint config_reload_source;   /* debounce */
+  /* Separate debounces: a themes-dir event must never swallow a pending
+   * config reload (or the config edit that armed it would be lost). */
+  guint config_reload_source;
+  guint theme_reload_source;
   guint config_save_source;     /* debounce */
 };
 
@@ -110,6 +113,12 @@ static void config_save_soon(PtWindow *w) {
 static gboolean config_reload_now(gpointer user) {
   PtWindow *w = PT_WINDOW(user);
   w->config_reload_source = 0;
+  /* A save of ours is still queued, so memory is newer than disk: reloading
+   * here would resurrect the pre-edit file. Closes the 150ms hole where a
+   * zoom at t=1100 gets reverted by the reload our own t=1000 write triggers
+   * at t=1150. The save itself lands next, and its echo reloads a matching
+   * file, so nothing is lost by skipping this one. */
+  if (w->config_save_source != 0) return G_SOURCE_REMOVE;
   char *path = pt_config_default_path();
   PtConfig *fresh = pt_config_load(path);
   g_free(path);
@@ -141,7 +150,7 @@ static void on_config_changed(GFileMonitor *m, GFile *f, GFile *other,
  * though the config text itself is unchanged. */
 static gboolean theme_reload_now(gpointer user) {
   PtWindow *w = PT_WINDOW(user);
-  w->config_reload_source = 0;
+  w->theme_reload_source = 0;
   apply_config(w);
   return G_SOURCE_REMOVE;
 }
@@ -154,8 +163,8 @@ static void on_theme_file_changed(GFileMonitor *m, GFile *f, GFile *other,
       ev != G_FILE_MONITOR_EVENT_CREATED)
     return;
   PtWindow *w = PT_WINDOW(user);
-  if (w->config_reload_source != 0) g_source_remove(w->config_reload_source);
-  w->config_reload_source = g_timeout_add(150, theme_reload_now, w);
+  if (w->theme_reload_source != 0) g_source_remove(w->theme_reload_source);
+  w->theme_reload_source = g_timeout_add(150, theme_reload_now, w);
 }
 
 static void watch_config(PtWindow *w) {
@@ -192,13 +201,18 @@ static void init_config(PtWindow *w, PtSessionState *state) {
   gboolean has_font_line =
       had_file && g_regex_match_simple("^\\s*font-size\\s*=", cfg_text,
                                        G_REGEX_MULTILINE, 0);
-  if (!has_font_line && state != NULL)
+  gboolean seeded = !has_font_line && state != NULL;
+  if (seeded)
     w->config->font_size = state->font_size;
   g_free(cfg_text);
   g_free(cfg_path);
   pt_style_init(gtk_widget_get_display(GTK_WIDGET(w)));
   apply_config(w);
   watch_config(w);
+  /* Write the seed out once. Without this the config file still has no
+   * font-size line, so the first unrelated external edit reloads the plain
+   * default and the user watches their font jump. */
+  if (seeded) config_save_soon(w);
 }
 
 static void refresh_projectbar(PtWindow *w) {
@@ -988,31 +1002,40 @@ static gboolean sc_copy(GtkWidget *wg, GVariant *a, gpointer u) {
   if (palette_blocks(PT_WINDOW(u))) return FALSE;
   action_copy(PT_WINDOW(u)); return TRUE;
 }
+/* The three zoom handlers own font-size: they push it into the terminals, into
+ * the session (mark_dirty) and into the config file. NULL config = disposed
+ * window, same guard convention as active_project(). */
 static gboolean sc_zoom_in(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  PtWindow *w = PT_WINDOW(u);
+  if (palette_blocks(w)) return FALSE;
+  if (w->config == NULL) return TRUE;
   pt_terminal_set_font_size(pt_terminal_font_size() + 1);
-  mark_dirty(PT_WINDOW(u));
-  PT_WINDOW(u)->config->font_size = pt_terminal_font_size();
-  config_save_soon(PT_WINDOW(u));
+  mark_dirty(w);
+  w->config->font_size = pt_terminal_font_size();
+  config_save_soon(w);
   return TRUE;
 }
 static gboolean sc_zoom_out(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  PtWindow *w = PT_WINDOW(u);
+  if (palette_blocks(w)) return FALSE;
+  if (w->config == NULL) return TRUE;
   pt_terminal_set_font_size(pt_terminal_font_size() - 1);
-  mark_dirty(PT_WINDOW(u));
-  PT_WINDOW(u)->config->font_size = pt_terminal_font_size();
-  config_save_soon(PT_WINDOW(u));
+  mark_dirty(w);
+  w->config->font_size = pt_terminal_font_size();
+  config_save_soon(w);
   return TRUE;
 }
 static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  pt_terminal_set_font_size(PT_FONT_SIZE_DEFAULT);
-  mark_dirty(PT_WINDOW(u));
-  PT_WINDOW(u)->config->font_size = pt_terminal_font_size();
-  config_save_soon(PT_WINDOW(u));
+  PtWindow *w = PT_WINDOW(u);
+  if (palette_blocks(w)) return FALSE;
+  if (w->config == NULL) return TRUE;
+  pt_terminal_set_font_size(PT_CONFIG_FONT_SIZE_DEFAULT);
+  mark_dirty(w);
+  w->config->font_size = pt_terminal_font_size();
+  config_save_soon(w);
   return TRUE;
 }
 static gboolean sc_focus_dir(GtkWidget *wg, GVariant *a, gpointer u) {
@@ -1221,6 +1244,10 @@ static void pt_window_dispose(GObject *obj) {
   if (w->config_reload_source != 0) {
     g_source_remove(w->config_reload_source);
     w->config_reload_source = 0;
+  }
+  if (w->theme_reload_source != 0) {
+    g_source_remove(w->theme_reload_source);
+    w->theme_reload_source = 0;
   }
   if (w->config_save_source != 0) {
     g_source_remove(w->config_save_source);

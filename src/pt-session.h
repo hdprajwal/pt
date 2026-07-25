@@ -1,15 +1,17 @@
 #pragma once
 
 #include <glib.h>
+#include "pt-config.h"
 #include "pt-split-tree.h"
 
 /* Number of entries in the fixed accent cycle projects are coloured from. */
 #define PT_ACCENT_COUNT 6
 
-/* Terminal font size, in points, for a fresh session and for Ctrl+0 reset.
- * Lives here (rather than in pt-terminal.h) because pt-session.c must not
- * pull in GTK, and the persisted default has to agree with the widget's. */
-#define PT_FONT_SIZE_DEFAULT 9
+/* Terminal font size, in points, for a fresh session. Kept as an alias so
+ * existing callers keep compiling; pt-config.h owns the value, because the
+ * config file is now the source of truth for fonts and the persisted default
+ * has to agree with it. */
+#define PT_FONT_SIZE_DEFAULT PT_CONFIG_FONT_SIZE_DEFAULT
 
 typedef struct { char *title; PtSplitNode *tree; } PtTabState;
 typedef struct {
