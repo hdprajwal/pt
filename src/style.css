@@ -1,16 +1,16 @@
 /* pt — "Terminal Projects" design. Dark only. 2px radii, per-project accents. */
 
 window, .background {
-  background-color: #0e1013;
-  color: #e6e8ea;
+  background-color: var(--pt-background);
+  color: var(--pt-text);
   border-radius: 3px;
 }
 * { border-radius: 2px; }
 label {
-  font-family: "IBM Plex Sans", sans-serif;
-  font-size: 12.5px;
+  font-family: var(--pt-font-sans);
+  font-size: var(--pt-fs-base);
 }
-.mono { font-family: "JetBrains Mono", monospace; }
+.mono { font-family: var(--pt-font-mono); }
 
 /* Flatten Adwaita chrome (kept from previous theme, class list updated). */
 button.pt-tab-close, button.pt-remove, button.pt-add-project, button.pt-tab-new,
@@ -27,44 +27,44 @@ button.pt-tab-close:focus-visible, button.pt-add-project:focus-visible {
 windowcontrols button.titlebutton, windowcontrols button.titlebutton image,
 windowcontrols button image {
   background: none; background-image: none; box-shadow: none; border: none;
-  color: #8a9199; min-width: 0; min-height: 0; padding: 0 2px;
+  color: var(--pt-text-muted); min-width: 0; min-height: 0; padding: 0 2px;
   -gtk-icon-size: 13px;
 }
 windowcontrols button.titlebutton:hover,
 windowcontrols button.titlebutton:hover image {
-  background-color: rgba(255,255,255,.045); color: #e6e8ea;
+  background-color: var(--pt-hover); color: var(--pt-text);
 }
 windowcontrols button.titlebutton.close:hover,
-windowcontrols button.titlebutton.close:hover image { color: #f2777a; }
+windowcontrols button.titlebutton.close:hover image { color: var(--pt-err); }
 windowcontrols button.titlebutton.close,
 windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
 
 /* ---- status dots (the only circles) ---- */
-.pt-dot { border-radius: 50%; background-color: #4e5661; }
+.pt-dot { border-radius: 50%; background-color: var(--pt-text-dim); }
 .pt-dot-6 { min-width: 6px; min-height: 6px; }
 .pt-dot-7 { min-width: 7px; min-height: 7px; }
 .pt-dot-8 { min-width: 8px; min-height: 8px; }
-.pt-dot.running { background-color: #6ee7a0; box-shadow: 0 0 0 3px rgba(110,231,160,.18); }
-.pt-dot.idle    { background-color: #4e5661; box-shadow: none; }
-.pt-dot.error   { background-color: #f2777a; box-shadow: none; }
+.pt-dot.running { background-color: var(--pt-ok); box-shadow: 0 0 0 3px var(--pt-ok-glow); }
+.pt-dot.idle    { background-color: var(--pt-text-dim); box-shadow: none; }
+.pt-dot.error   { background-color: var(--pt-err); box-shadow: none; }
 
 /* ---- sidebar (266px, fixed) ---- */
 .pt-sidebar {
-  background-color: #12151a;
-  border-right: 1px solid rgba(255,255,255,.06);
+  background-color: var(--pt-surface);
+  border-right: 1px solid var(--pt-border);
 }
 .pt-sidebar-header {
-  color: #727a85; font-family: "IBM Plex Sans", sans-serif;
-  font-weight: 600; font-size: 12px; letter-spacing: .08em;
+  color: var(--pt-text-mid); font-family: var(--pt-font-sans);
+  font-weight: 600; font-size: var(--pt-fs-md); letter-spacing: .08em;
   padding: 10px 14px 8px 14px;
 }
 .pt-sidebar-count {
-  color: #4e5661; font-family: "JetBrains Mono", monospace; font-size: 11px;
+  color: var(--pt-text-dim); font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm);
   padding: 10px 14px 8px 14px;
 }
 .pt-search {
   background-color: rgba(255,255,255,.04);
-  border: 1px solid rgba(255,255,255,.06);
+  border: 1px solid var(--pt-border);
   /* 26 + 1px border top/bottom = 28 rendered, matching the other bars */
   min-height: 26px;
   margin: 0 8px 6px 8px;
@@ -72,79 +72,79 @@ windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
 }
 .pt-search text, .pt-search entry {
   background: none; border: none; box-shadow: none;
-  color: #e6e8ea; font-family: "JetBrains Mono", monospace; font-size: 11.5px;
-  caret-color: #e6e8ea;
+  color: var(--pt-text); font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm2);
+  caret-color: var(--pt-text);
 }
-.pt-search-glyph { color: #4e5661; font-size: 12px; padding-right: 6px; }
+.pt-search-glyph { color: var(--pt-text-dim); font-size: var(--pt-fs-md); padding-right: 6px; }
 
 .pt-project-row {
   min-height: 30px;
   margin: 0 8px 1px 8px;
   padding: 0 10px;
-  color: #e6e8ea;
+  color: var(--pt-text);
 }
-.pt-project-row:hover { background-color: rgba(255,255,255,.045); }
-.pt-project-row.active { background-color: rgba(255,255,255,.07); }
+.pt-project-row:hover { background-color: var(--pt-hover); }
+.pt-project-row.active { background-color: var(--pt-active); }
 .pt-project-row .pt-name {
-  font-family: "IBM Plex Sans", sans-serif; font-weight: 600;
-  font-size: 13px; color: #e6e8ea;
+  font-family: var(--pt-font-sans); font-weight: 600;
+  font-size: var(--pt-fs-lg); color: var(--pt-text);
 }
 .pt-project-row .pt-branch {
-  font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: #5c646f;
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-faint);
 }
-.pt-project-row .pt-branch.dirty { color: #f2b25c; }
+.pt-project-row .pt-branch.dirty { color: var(--pt-warn); }
 .pt-shell-count {
-  font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: #4e5661;
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-dim);
 }
-.pt-run-count { font-family: "JetBrains Mono", monospace; font-size: 10.5px; }
+.pt-run-count { font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); }
 /* Size the label too: the global `label` rule outranks the button's own
  * font-size on the child (same trick as .pt-tab button.pt-tab-close). */
 button.pt-remove,
-button.pt-remove label { color: #5c646f; font-size: 16px; }
+button.pt-remove label { color: var(--pt-text-faint); font-size: var(--pt-fs-icon); }
 button.pt-remove { padding: 2px 10px; opacity: 0; }
 button.pt-remove:hover,
-button.pt-remove:hover label { color: #f2777a; }
+button.pt-remove:hover label { color: var(--pt-err); }
 /* The × and the count share one overlay slot at the row's end: swap them on
  * row hover instead of showing both side by side. */
 .pt-project-row:hover button.pt-remove { opacity: 1; }
 .pt-project-row:hover .pt-shell-count,
 .pt-project-row:hover .pt-run-count { opacity: 0; }
-.pt-sidebar-footer-sep { background-color: rgba(255,255,255,.06); min-height: 1px; }
+.pt-sidebar-footer-sep { background-color: var(--pt-border); min-height: 1px; }
 button.pt-add-project {
-  color: #8a9199; min-height: 28px; padding: 0 14px;
-  font-family: "IBM Plex Sans", sans-serif; font-size: 12.5px;
+  color: var(--pt-text-muted); min-height: 28px; padding: 0 14px;
+  font-family: var(--pt-font-sans); font-size: var(--pt-fs-base);
 }
-button.pt-add-project:hover { background-color: rgba(255,255,255,.045); color: #e6e8ea; }
-.pt-add-hint { color: #3f4650; font-family: "JetBrains Mono", monospace; font-size: 10.5px; }
+button.pt-add-project:hover { background-color: var(--pt-hover); color: var(--pt-text); }
+.pt-add-hint { color: var(--pt-text-ghost); font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); }
 
 /* ---- project bar (46px) ---- */
 .pt-projectbar {
-  background-color: #0e1013;
-  border-bottom: 1px solid rgba(255,255,255,.06);
+  background-color: var(--pt-background);
+  border-bottom: 1px solid var(--pt-border);
   min-height: 28px;
   padding: 0 14px;
 }
 .pt-proj-name {
-  font-family: "IBM Plex Sans", sans-serif; font-weight: 600; font-size: 12.5px;
-  color: #e6e8ea;
+  font-family: var(--pt-font-sans); font-weight: 600; font-size: var(--pt-fs-base);
+  color: var(--pt-text);
 }
 .pt-proj-path {
-  font-family: "JetBrains Mono", monospace; font-size: 11.5px; color: #5c646f;
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm2); color: var(--pt-text-faint);
 }
 .pt-chip {
-  font-family: "JetBrains Mono", monospace; font-weight: 500; font-size: 11px;
+  font-family: var(--pt-font-mono); font-weight: 500; font-size: var(--pt-fs-sm);
   padding: 4px 8px;
 }
 .pt-hint-pill {
   background-color: rgba(255,255,255,.04);
-  color: #4e5661; font-family: "JetBrains Mono", monospace; font-size: 10.5px;
+  color: var(--pt-text-dim); font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
   padding: 3px 7px;
 }
 
 /* ---- tab strip (28px) ---- */
 .pt-tabstrip {
-  background-color: #101317;
-  border-bottom: 1px solid rgba(255,255,255,.06);
+  background-color: var(--pt-surface-alt);
+  border-bottom: 1px solid var(--pt-border);
   min-height: 28px;
   padding: 0 8px;
 }
@@ -152,77 +152,77 @@ button.pt-add-project:hover { background-color: rgba(255,255,255,.045); color: #
  * button.pt-tab (those match nothing since the close-button refactor). */
 .pt-tab {
   min-height: 28px; padding: 0 8px; margin-right: 4px;
-  color: #8a9199;
+  color: var(--pt-text-muted);
 }
-.pt-tab:hover { background-color: rgba(255,255,255,.045); }
+.pt-tab:hover { background-color: var(--pt-hover); }
 .pt-tab.active {
-  background-color: rgba(255,255,255,.08);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+  background-color: var(--pt-active-strong);
+  box-shadow: inset 0 0 0 1px var(--pt-border);
 }
-.pt-tab-label { font-family: "JetBrains Mono", monospace; font-size: 12px; color: #8a9199; }
-.pt-tab.active .pt-tab-label { color: #e6e8ea; }
+.pt-tab-label { font-family: var(--pt-font-mono); font-size: var(--pt-fs-md); color: var(--pt-text-muted); }
+.pt-tab.active .pt-tab-label { color: var(--pt-text); }
 /* Revealed on tab hover only, like the sidebar's ×. Sized so it cannot grow
  * the tab: no min box, glyph-height only, padding on the sides alone. */
 .pt-tab button.pt-tab-close,
 .pt-tab button.pt-tab-close label {
-  color: #5c646f; font-size: 16px;
+  color: var(--pt-text-faint); font-size: var(--pt-fs-icon);
 }
 .pt-tab button.pt-tab-close { padding: 0 3px; opacity: 0; }
 .pt-tab button.pt-tab-close:hover,
-.pt-tab button.pt-tab-close:hover label { color: #f2777a; }
+.pt-tab button.pt-tab-close:hover label { color: var(--pt-err); }
 .pt-tab:hover button.pt-tab-close { opacity: 1; }
 /* padding: 0 is load-bearing — GTK min-height is the content box, and without
  * this Adwaita's default button padding inflates the + to 38px, which every
  * tab then stretches to match. */
-button.pt-tab-new { min-width: 24px; min-height: 24px; padding: 0; color: #5c646f; font-size: 14px; }
-button.pt-tab-new:hover { background-color: rgba(255,255,255,.045); color: #e6e8ea; }
+button.pt-tab-new { min-width: 24px; min-height: 24px; padding: 0; color: var(--pt-text-faint); font-size: var(--pt-fs-plus); }
+button.pt-tab-new:hover { background-color: var(--pt-hover); color: var(--pt-text); }
 
 /* ---- status bar (34px) ---- */
 .pt-statusbar {
-  background-color: #12151a;
-  border-top: 1px solid rgba(255,255,255,.06);
+  background-color: var(--pt-surface);
+  border-top: 1px solid var(--pt-border);
   min-height: 28px;
   padding: 0 14px;
 }
-.pt-run-state { font-family: "JetBrains Mono", monospace; font-weight: 500; font-size: 10.5px; }
-.pt-run-state.run { color: #6ee7a0; }
-.pt-run-state.ok  { color: #6b747f; }
-.pt-run-state.err { color: #f2777a; }
+.pt-run-state { font-family: var(--pt-font-mono); font-weight: 500; font-size: var(--pt-fs-xs); }
+.pt-run-state.run { color: var(--pt-ok); }
+.pt-run-state.ok  { color: var(--pt-ok-muted); }
+.pt-run-state.err { color: var(--pt-err); }
 .pt-progress-track {
-  background-color: rgba(255,255,255,.09);
+  background-color: var(--pt-track);
   min-width: 120px; min-height: 3px; border-radius: 0;
 }
 .pt-progress-fill { min-height: 3px; border-radius: 0; }
-.pt-task-label { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: #727a85; }
-.pt-status-hint { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: #3f4650; }
+.pt-task-label { font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-mid); }
+.pt-status-hint { font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-ghost); }
 
 /* ---- command palette ---- */
-.pt-palette-scrim { background-color: rgba(6,8,10,.62); }
+.pt-palette-scrim { background-color: var(--pt-scrim); }
 .pt-palette {
-  background-color: #15181d;
-  border: 1px solid rgba(255,255,255,.1);
+  background-color: var(--pt-panel);
+  border: 1px solid var(--pt-border-strong);
   border-radius: 3px;
 }
-.pt-palette-query { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,.06); }
+.pt-palette-query { padding: 10px 12px; border-bottom: 1px solid var(--pt-border); }
 .pt-palette-query text {
   background: none; border: none; box-shadow: none;
-  color: #e6e8ea; font-family: "JetBrains Mono", monospace; font-size: 12.5px;
-  caret-color: #e6e8ea;
+  color: var(--pt-text); font-family: var(--pt-font-mono); font-size: var(--pt-fs-base);
+  caret-color: var(--pt-text);
 }
-.pt-palette-scope { color: #4e5661; font-family: "JetBrains Mono", monospace; font-size: 10.5px; }
+.pt-palette-scope { color: var(--pt-text-dim); font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); }
 .pt-palette-row { min-height: 36px; padding: 0 12px; }
-.pt-palette-row.selected { background-color: rgba(255,255,255,.07); }
-.pt-palette-name { font-family: "IBM Plex Sans", sans-serif; font-weight: 500; font-size: 12.5px; color: #e6e8ea; }
-.pt-palette-detail { font-family: "JetBrains Mono", monospace; font-size: 11px; color: #5c646f; }
+.pt-palette-row.selected { background-color: var(--pt-active); }
+.pt-palette-name { font-family: var(--pt-font-sans); font-weight: 500; font-size: var(--pt-fs-base); color: var(--pt-text); }
+.pt-palette-detail { font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm); color: var(--pt-text-faint); }
 .pt-palette-kind {
-  font-family: "JetBrains Mono", monospace; font-size: 9.5px; color: #8a9199;
-  background-color: rgba(255,255,255,.05); padding: 2px 5px;
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-2xs); color: var(--pt-text-muted);
+  background-color: var(--pt-tag-bg); padding: 2px 5px;
 }
-.pt-palette-shortcut { font-family: "JetBrains Mono", monospace; font-size: 10.5px; color: #4e5661; }
+.pt-palette-shortcut { font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-dim); }
 
 /* ---- empty state ---- */
-.pt-empty { color: #5c646f; font-family: "JetBrains Mono", monospace; font-size: 12px; }
-.pt-empty-hint { color: #3f4650; font-family: "JetBrains Mono", monospace; font-size: 11px; }
+.pt-empty { color: var(--pt-text-faint); font-family: var(--pt-font-mono); font-size: var(--pt-fs-md); }
+.pt-empty-hint { color: var(--pt-text-ghost); font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm); }
 
 /* ---- scrollbars (sidebar project list) ----
  * Adwaita's slider uses a 4px transparent border inside a 6px min-width, which
@@ -231,58 +231,58 @@ button.pt-tab-new:hover { background-color: rgba(255,255,255,.045); color: #e6e8
 .pt-sidebar scrollbar { background: none; border: none; }
 .pt-sidebar scrollbar slider,
 .pt-sidebar scrollbar.overlay-indicator:not(.dragging):not(.hovering) slider {
-  background-color: rgba(255,255,255,.12);
+  background-color: var(--pt-slider);
   border: none; margin: 2px;
   min-width: 5px; min-height: 24px;
 }
-.pt-sidebar scrollbar slider:hover { background-color: rgba(255,255,255,.22); }
+.pt-sidebar scrollbar slider:hover { background-color: var(--pt-slider-hover); }
 
 /* ---- paned separators ---- */
 paned > separator {
-  background-color: rgba(255,255,255,.06);
+  background-color: var(--pt-border);
   min-width: 1px; min-height: 1px; border-radius: 0;
 }
-paned > separator:hover { background-color: #6ee7a0; }
+paned > separator:hover { background-color: var(--pt-ok); }
 
 /* ---- accents: #6ee7a0 #8ab4f8 #f2b25c #c99bf0 #5ed3c4 #e0849b ---- */
-.pt-dot.pt-a0 { background-color: #6ee7a0; }
-.pt-dot.pt-a1 { background-color: #8ab4f8; }
-.pt-dot.pt-a2 { background-color: #f2b25c; }
-.pt-dot.pt-a3 { background-color: #c99bf0; }
-.pt-dot.pt-a4 { background-color: #5ed3c4; }
-.pt-dot.pt-a5 { background-color: #e0849b; }
+.pt-dot.pt-a0 { background-color: var(--pt-accent-0); }
+.pt-dot.pt-a1 { background-color: var(--pt-accent-1); }
+.pt-dot.pt-a2 { background-color: var(--pt-accent-2); }
+.pt-dot.pt-a3 { background-color: var(--pt-accent-3); }
+.pt-dot.pt-a4 { background-color: var(--pt-accent-4); }
+.pt-dot.pt-a5 { background-color: var(--pt-accent-5); }
 
-.pt-project-row.active .pt-dot.pt-a0 { box-shadow: 0 0 0 3px rgba(110,231,160,.13); }
-.pt-project-row.active .pt-dot.pt-a1 { box-shadow: 0 0 0 3px rgba(138,180,248,.13); }
-.pt-project-row.active .pt-dot.pt-a2 { box-shadow: 0 0 0 3px rgba(242,178,92,.13); }
-.pt-project-row.active .pt-dot.pt-a3 { box-shadow: 0 0 0 3px rgba(201,155,240,.13); }
-.pt-project-row.active .pt-dot.pt-a4 { box-shadow: 0 0 0 3px rgba(94,211,196,.13); }
-.pt-project-row.active .pt-dot.pt-a5 { box-shadow: 0 0 0 3px rgba(224,132,155,.13); }
+.pt-project-row.active .pt-dot.pt-a0 { box-shadow: 0 0 0 3px var(--pt-accent-0-glow); }
+.pt-project-row.active .pt-dot.pt-a1 { box-shadow: 0 0 0 3px var(--pt-accent-1-glow); }
+.pt-project-row.active .pt-dot.pt-a2 { box-shadow: 0 0 0 3px var(--pt-accent-2-glow); }
+.pt-project-row.active .pt-dot.pt-a3 { box-shadow: 0 0 0 3px var(--pt-accent-3-glow); }
+.pt-project-row.active .pt-dot.pt-a4 { box-shadow: 0 0 0 3px var(--pt-accent-4-glow); }
+.pt-project-row.active .pt-dot.pt-a5 { box-shadow: 0 0 0 3px var(--pt-accent-5-glow); }
 
-.pt-project-row.active.pt-a0 { box-shadow: inset 2px 0 0 #6ee7a0; }
-.pt-project-row.active.pt-a1 { box-shadow: inset 2px 0 0 #8ab4f8; }
-.pt-project-row.active.pt-a2 { box-shadow: inset 2px 0 0 #f2b25c; }
-.pt-project-row.active.pt-a3 { box-shadow: inset 2px 0 0 #c99bf0; }
-.pt-project-row.active.pt-a4 { box-shadow: inset 2px 0 0 #5ed3c4; }
-.pt-project-row.active.pt-a5 { box-shadow: inset 2px 0 0 #e0849b; }
+.pt-project-row.active.pt-a0 { box-shadow: inset 2px 0 0 var(--pt-accent-0); }
+.pt-project-row.active.pt-a1 { box-shadow: inset 2px 0 0 var(--pt-accent-1); }
+.pt-project-row.active.pt-a2 { box-shadow: inset 2px 0 0 var(--pt-accent-2); }
+.pt-project-row.active.pt-a3 { box-shadow: inset 2px 0 0 var(--pt-accent-3); }
+.pt-project-row.active.pt-a4 { box-shadow: inset 2px 0 0 var(--pt-accent-4); }
+.pt-project-row.active.pt-a5 { box-shadow: inset 2px 0 0 var(--pt-accent-5); }
 
-.pt-chip.pt-a0 { color: #6ee7a0; background-color: rgba(110,231,160,.10); }
-.pt-chip.pt-a1 { color: #8ab4f8; background-color: rgba(138,180,248,.10); }
-.pt-chip.pt-a2 { color: #f2b25c; background-color: rgba(242,178,92,.10); }
-.pt-chip.pt-a3 { color: #c99bf0; background-color: rgba(201,155,240,.10); }
-.pt-chip.pt-a4 { color: #5ed3c4; background-color: rgba(94,211,196,.10); }
-.pt-chip.pt-a5 { color: #e0849b; background-color: rgba(224,132,155,.10); }
+.pt-chip.pt-a0 { color: var(--pt-accent-0); background-color: var(--pt-accent-0-chip); }
+.pt-chip.pt-a1 { color: var(--pt-accent-1); background-color: var(--pt-accent-1-chip); }
+.pt-chip.pt-a2 { color: var(--pt-accent-2); background-color: var(--pt-accent-2-chip); }
+.pt-chip.pt-a3 { color: var(--pt-accent-3); background-color: var(--pt-accent-3-chip); }
+.pt-chip.pt-a4 { color: var(--pt-accent-4); background-color: var(--pt-accent-4-chip); }
+.pt-chip.pt-a5 { color: var(--pt-accent-5); background-color: var(--pt-accent-5-chip); }
 
-.pt-badge.pt-a0, .pt-progress-fill.pt-a0 { background-color: #6ee7a0; }
-.pt-badge.pt-a1, .pt-progress-fill.pt-a1 { background-color: #8ab4f8; }
-.pt-badge.pt-a2, .pt-progress-fill.pt-a2 { background-color: #f2b25c; }
-.pt-badge.pt-a3, .pt-progress-fill.pt-a3 { background-color: #c99bf0; }
-.pt-badge.pt-a4, .pt-progress-fill.pt-a4 { background-color: #5ed3c4; }
-.pt-badge.pt-a5, .pt-progress-fill.pt-a5 { background-color: #e0849b; }
+.pt-badge.pt-a0, .pt-progress-fill.pt-a0 { background-color: var(--pt-accent-0); }
+.pt-badge.pt-a1, .pt-progress-fill.pt-a1 { background-color: var(--pt-accent-1); }
+.pt-badge.pt-a2, .pt-progress-fill.pt-a2 { background-color: var(--pt-accent-2); }
+.pt-badge.pt-a3, .pt-progress-fill.pt-a3 { background-color: var(--pt-accent-3); }
+.pt-badge.pt-a4, .pt-progress-fill.pt-a4 { background-color: var(--pt-accent-4); }
+.pt-badge.pt-a5, .pt-progress-fill.pt-a5 { background-color: var(--pt-accent-5); }
 
-.pt-run-count.pt-a0 { color: #6ee7a0; }
-.pt-run-count.pt-a1 { color: #8ab4f8; }
-.pt-run-count.pt-a2 { color: #f2b25c; }
-.pt-run-count.pt-a3 { color: #c99bf0; }
-.pt-run-count.pt-a4 { color: #5ed3c4; }
-.pt-run-count.pt-a5 { color: #e0849b; }
+.pt-run-count.pt-a0 { color: var(--pt-accent-0); }
+.pt-run-count.pt-a1 { color: var(--pt-accent-1); }
+.pt-run-count.pt-a2 { color: var(--pt-accent-2); }
+.pt-run-count.pt-a3 { color: var(--pt-accent-3); }
+.pt-run-count.pt-a4 { color: var(--pt-accent-4); }
+.pt-run-count.pt-a5 { color: var(--pt-accent-5); }
