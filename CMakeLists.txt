@@ -45,10 +45,11 @@ add_library(ptcore STATIC
   src/pt-git-parse.c
   src/pt-status-parse.c
   src/pt-split-tree.c
+  src/pt-theme.c
   src/pt-session.c
   src/pt-term-core.c)
 target_include_directories(ptcore PUBLIC src)
-target_link_libraries(ptcore PUBLIC ghostty-vt PkgConfig::JSON PkgConfig::GLIB util)
+target_link_libraries(ptcore PUBLIC ghostty-vt PkgConfig::JSON PkgConfig::GLIB util m)
 
 enable_testing()
 
@@ -79,6 +80,10 @@ add_test(NAME term-core COMMAND test-term-core)
 add_executable(test-config tests/test-config.c)
 target_link_libraries(test-config PRIVATE ptcore)
 add_test(NAME config COMMAND test-config)
+
+add_executable(test-theme tests/test-theme.c)
+target_link_libraries(test-theme PRIVATE ptcore)
+add_test(NAME theme COMMAND test-theme)
 
 add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
 target_include_directories(test-keymap PRIVATE src)
