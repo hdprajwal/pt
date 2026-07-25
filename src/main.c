@@ -1,5 +1,4 @@
 #include <adwaita.h>
-#include "pt-style.h"
 #include "pt-window.h"
 
 static void on_activate(AdwApplication *app, gpointer user_data) {
@@ -9,15 +8,7 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
   gtk_style_context_add_provider_for_display(gdk_display_get_default(),
       GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
   g_object_unref(css);
-  pt_style_init(gdk_display_get_default());
-  /* TEMP until pt-window owns config (next tasks) */
-  PtTheme *th = pt_theme_parse(pt_theme_builtin_pt_dark());
-  PtResolvedTheme rt;
-  pt_theme_resolve(th, NULL, &rt);
-  PtConfig *cfg = pt_config_new();
-  pt_style_apply(&rt, cfg);
-  pt_config_free(cfg);
-  pt_theme_free(th);
+  /* The window owns the config and installs the theme provider itself. */
   gtk_window_present(GTK_WINDOW(pt_window_new(app)));
 }
 

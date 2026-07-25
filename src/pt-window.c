@@ -9,6 +9,9 @@
 #include "pt-session.h"
 #include "pt-git-parse.h"
 #include "pt-git-monitor.h"
+#include "pt-config.h"
+#include "pt-theme.h"
+#include "pt-style.h"
 
 typedef struct {
   char *title;
@@ -37,6 +40,11 @@ struct _PtWindow {
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
+  PtConfig *config;
+  GFileMonitor *config_monitor;
+  GFileMonitor *theme_monitor;
+  guint config_reload_source;   /* debounce */
+  guint config_save_source;     /* debounce */
 };
 
 G_DEFINE_FINAL_TYPE(PtWindow, pt_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -59,6 +67,139 @@ static PtTabUI *active_tab(PtProjectUI *p) {
 }
 
 static void mark_dirty(PtWindow *w);   /* persistence hook; body in Task 12 */
+
+/* ---------- config ---------- */
+
+/* Parse the active theme and push colors+fonts everywhere. */
+static void apply_config(PtWindow *w) {
+  char *tdir = pt_theme_dir();
+  char *text = pt_theme_load_text(tdir, w->config->theme);
+  if (text == NULL) {
+    g_warning("pt: theme '%s' not found; using pt-dark", w->config->theme);
+    text = g_strdup(pt_theme_builtin_pt_dark());
+  }
+  PtTheme *theme = pt_theme_parse(text);
+  PtResolvedTheme rt;
+  pt_theme_resolve(theme, w->config->app_overrides, &rt);
+  pt_style_apply(&rt, w->config);
+  pt_terminal_set_theme(&rt);
+  pt_terminal_set_font(w->config->font_family, w->config->font_size);
+  pt_theme_free(theme);
+  g_free(text);
+  g_free(tdir);
+}
+
+static gboolean config_save_now(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->config_save_source = 0;
+  char *path = pt_config_default_path();
+  GError *err = NULL;
+  if (!pt_config_save(w->config, path, &err)) {
+    g_warning("pt: config save failed: %s", err->message);
+    g_clear_error(&err);
+  }
+  g_free(path);
+  return G_SOURCE_REMOVE;
+}
+
+static void config_save_soon(PtWindow *w) {
+  if (w->config_save_source != 0) g_source_remove(w->config_save_source);
+  w->config_save_source = g_timeout_add(1000, config_save_now, w);
+}
+
+static gboolean config_reload_now(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->config_reload_source = 0;
+  char *path = pt_config_default_path();
+  PtConfig *fresh = pt_config_load(path);
+  g_free(path);
+  /* Self-writes and no-op saves land here too; identical config = no work.
+   * This is also the guard that stops save->monitor->reload feedback. */
+  if (pt_config_equal(fresh, w->config)) {
+    pt_config_free(fresh);
+    return G_SOURCE_REMOVE;
+  }
+  pt_config_free(w->config);
+  w->config = fresh;
+  apply_config(w);
+  return G_SOURCE_REMOVE;
+}
+
+static void on_config_changed(GFileMonitor *m, GFile *f, GFile *other,
+                              GFileMonitorEvent ev, gpointer user) {
+  (void)m; (void)f; (void)other;
+  if (ev != G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT &&
+      ev != G_FILE_MONITOR_EVENT_CHANGED &&
+      ev != G_FILE_MONITOR_EVENT_CREATED)
+    return;
+  PtWindow *w = PT_WINDOW(user);
+  if (w->config_reload_source != 0) g_source_remove(w->config_reload_source);
+  w->config_reload_source = g_timeout_add(150, config_reload_now, w);
+}
+
+/* Theme-file edits reuse the same debounce but must force a re-apply even
+ * though the config text itself is unchanged. */
+static gboolean theme_reload_now(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->config_reload_source = 0;
+  apply_config(w);
+  return G_SOURCE_REMOVE;
+}
+
+static void on_theme_file_changed(GFileMonitor *m, GFile *f, GFile *other,
+                                  GFileMonitorEvent ev, gpointer user) {
+  (void)m; (void)f; (void)other;
+  if (ev != G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT &&
+      ev != G_FILE_MONITOR_EVENT_CHANGED &&
+      ev != G_FILE_MONITOR_EVENT_CREATED)
+    return;
+  PtWindow *w = PT_WINDOW(user);
+  if (w->config_reload_source != 0) g_source_remove(w->config_reload_source);
+  w->config_reload_source = g_timeout_add(150, theme_reload_now, w);
+}
+
+static void watch_config(PtWindow *w) {
+  char *cpath = pt_config_default_path();
+  GFile *cf = g_file_new_for_path(cpath);
+  w->config_monitor = g_file_monitor_file(cf, G_FILE_MONITOR_NONE, NULL, NULL);
+  if (w->config_monitor != NULL)
+    g_signal_connect(w->config_monitor, "changed",
+                     G_CALLBACK(on_config_changed), w);
+  g_object_unref(cf);
+  g_free(cpath);
+  /* Watch the whole themes dir: covers the active theme plus new files the
+   * settings dialog should discover. */
+  char *tdir = pt_theme_dir();
+  GFile *tf = g_file_new_for_path(tdir);
+  w->theme_monitor = g_file_monitor(tf, G_FILE_MONITOR_NONE, NULL, NULL);
+  if (w->theme_monitor != NULL)
+    g_signal_connect(w->theme_monitor, "changed",
+                     G_CALLBACK(on_theme_file_changed), w);
+  g_object_unref(tf);
+  g_free(tdir);
+}
+
+/* Loads the config, applies it, and starts watching. `state` is the session
+ * this window just restored (NULL when there is none) and only ever seeds the
+ * font size, once, for users upgrading from state.json-only font handling. */
+static void init_config(PtWindow *w, PtSessionState *state) {
+  char *cfg_path = pt_config_default_path();
+  char *cfg_text = NULL;
+  gboolean had_file = g_file_get_contents(cfg_path, &cfg_text, NULL, NULL);
+  w->config = had_file ? pt_config_parse(cfg_text) : pt_config_new();
+  /* Migration: a state.json font_size seeds the default exactly once, when
+   * the config file has no font-size line of its own. */
+  gboolean has_font_line =
+      had_file && g_regex_match_simple("^\\s*font-size\\s*=", cfg_text,
+                                       G_REGEX_MULTILINE, 0);
+  if (!has_font_line && state != NULL)
+    w->config->font_size = state->font_size;
+  g_free(cfg_text);
+  g_free(cfg_path);
+  pt_style_init(gtk_widget_get_display(GTK_WIDGET(w)));
+  apply_config(w);
+  watch_config(w);
+}
 
 static void refresh_projectbar(PtWindow *w) {
   PtProjectUI *p = active_project(w);
@@ -852,6 +993,8 @@ static gboolean sc_zoom_in(GtkWidget *wg, GVariant *a, gpointer u) {
   if (palette_blocks(PT_WINDOW(u))) return FALSE;
   pt_terminal_set_font_size(pt_terminal_font_size() + 1);
   mark_dirty(PT_WINDOW(u));
+  PT_WINDOW(u)->config->font_size = pt_terminal_font_size();
+  config_save_soon(PT_WINDOW(u));
   return TRUE;
 }
 static gboolean sc_zoom_out(GtkWidget *wg, GVariant *a, gpointer u) {
@@ -859,6 +1002,8 @@ static gboolean sc_zoom_out(GtkWidget *wg, GVariant *a, gpointer u) {
   if (palette_blocks(PT_WINDOW(u))) return FALSE;
   pt_terminal_set_font_size(pt_terminal_font_size() - 1);
   mark_dirty(PT_WINDOW(u));
+  PT_WINDOW(u)->config->font_size = pt_terminal_font_size();
+  config_save_soon(PT_WINDOW(u));
   return TRUE;
 }
 static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
@@ -866,6 +1011,8 @@ static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
   if (palette_blocks(PT_WINDOW(u))) return FALSE;
   pt_terminal_set_font_size(PT_FONT_SIZE_DEFAULT);
   mark_dirty(PT_WINDOW(u));
+  PT_WINDOW(u)->config->font_size = pt_terminal_font_size();
+  config_save_soon(PT_WINDOW(u));
   return TRUE;
 }
 static gboolean sc_focus_dir(GtkWidget *wg, GVariant *a, gpointer u) {
@@ -1014,8 +1161,10 @@ static void restore_state(PtWindow *w) {
   char *path = pt_session_default_path();
   PtSessionState *s = pt_session_load(path);
   g_free(path);
+  /* Config owns fonts and colors from here on; it must be live before the
+   * first tab widget spawns a terminal. */
+  init_config(w, s);
   if (s == NULL) return;
-  pt_terminal_set_font_size(s->font_size);   /* before any terminal exists */
   for (guint i = 0; i < s->projects->len; i++) {
     PtProjectState *ps = g_ptr_array_index(s->projects, i);
     PtProjectUI *p = g_new0(PtProjectUI, 1);
@@ -1067,6 +1216,18 @@ static void pt_window_dispose(GObject *obj) {
     g_source_remove(w->status_source);
     w->status_source = 0;
   }
+  g_clear_object(&w->config_monitor);
+  g_clear_object(&w->theme_monitor);
+  if (w->config_reload_source != 0) {
+    g_source_remove(w->config_reload_source);
+    w->config_reload_source = 0;
+  }
+  if (w->config_save_source != 0) {
+    g_source_remove(w->config_save_source);
+    w->config_save_source = 0;
+    config_save_now(w);        /* flush the pending write before the free */
+  }
+  g_clear_pointer(&w->config, pt_config_free);
   g_clear_pointer(&w->projects, g_ptr_array_unref);
   G_OBJECT_CLASS(pt_window_parent_class)->dispose(obj);
 }
