@@ -314,7 +314,8 @@ static void refresh_tabstrip(PtWindow *w) {
     infos[i].last_exit = foc != NULL ? pt_terminal_last_exit(foc) : -1;
   }
   pt_tab_strip_set_tabs(PT_TAB_STRIP(w->tabstrip), infos, n,
-                        p != NULL ? p->active_tab : -1);
+                        p != NULL ? p->active_tab : -1,
+                        p != NULL ? p->accent : 0);
   g_free(infos);
 }
 

@@ -5,8 +5,12 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
   (void)user_data;
   GtkCssProvider *css = gtk_css_provider_new();
   gtk_css_provider_load_from_resource(css, "/dev/hdprajwal/pt/style.css");
+  /* Above USER, not APPLICATION: ~/.config/gtk-4.0/gtk.css loads at USER
+   * priority and priority beats specificity in GTK's cascade, so desktop
+   * themes with a `* { padding: 0 }` reset (e.g. Breeze) would strip every
+   * padding in the app's own stylesheet. pt owns its design entirely. */
   gtk_style_context_add_provider_for_display(gdk_display_get_default(),
-      GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+      GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_USER + 1);
   g_object_unref(css);
   /* The window owns the config and installs the theme provider itself. */
   gtk_window_present(GTK_WINDOW(pt_window_new(app)));

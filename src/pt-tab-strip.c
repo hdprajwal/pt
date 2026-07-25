@@ -1,4 +1,5 @@
 #include "pt-tab-strip.h"
+#include "pt-accent.h"
 
 enum { SIG_SELECTED, SIG_NEW, SIG_CLOSE, N_SIGNALS };
 static guint signals[N_SIGNALS];
@@ -10,7 +11,7 @@ struct _PtTabStrip {
    * and a button destroyed between press and release cancels its gesture — the
    * click is silently swallowed. So re-render only when something changed. */
   PtTabInfo *last;         /* owned; last[i].title is g_strdup'd */
-  int last_n, last_active;
+  int last_n, last_active, last_accent;
   gboolean rendered;
 };
 
@@ -62,8 +63,10 @@ static void free_snapshot(PtTabStrip *s) {
 }
 
 static gboolean same_as_rendered(PtTabStrip *s, const PtTabInfo *tabs, int n,
-                                 int active) {
-  if (!s->rendered || n != s->last_n || active != s->last_active) return FALSE;
+                                 int active, int accent) {
+  if (!s->rendered || n != s->last_n || active != s->last_active ||
+      accent != s->last_accent)
+    return FALSE;
   for (int i = 0; i < n; i++) {
     const PtTabInfo *a = &s->last[i], *b = &tabs[i];
     if (a->running != b->running || a->last_exit != b->last_exit ||
@@ -74,7 +77,7 @@ static gboolean same_as_rendered(PtTabStrip *s, const PtTabInfo *tabs, int n,
 }
 
 static void take_snapshot(PtTabStrip *s, const PtTabInfo *tabs, int n,
-                          int active) {
+                          int active, int accent) {
   free_snapshot(s);
   if (n > 0) {
     s->last = g_new0(PtTabInfo, n);
@@ -85,6 +88,7 @@ static void take_snapshot(PtTabStrip *s, const PtTabInfo *tabs, int n,
     }
   }
   s->last_active = active;
+  s->last_accent = accent;
   s->rendered = TRUE;
 }
 
@@ -92,9 +96,9 @@ static void take_snapshot(PtTabStrip *s, const PtTabInfo *tabs, int n,
  * tracking per-child widgets, and the strip already rebuilt on every tab
  * switch. Identical state is a no-op (see the snapshot rationale above). */
 void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
-                           int active) {
-  if (same_as_rendered(s, tabs, n, active)) return;
-  take_snapshot(s, tabs, n, active);
+                           int active, int accent) {
+  if (same_as_rendered(s, tabs, n, active, accent)) return;
+  take_snapshot(s, tabs, n, active, accent);
 
   clear_box(s->box);
   for (int i = 0; i < n; i++) {
@@ -103,7 +107,10 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
 
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
     gtk_widget_add_css_class(row, "pt-tab");
-    if (is_active) gtk_widget_add_css_class(row, "active");
+    if (is_active) {
+      gtk_widget_add_css_class(row, "active");
+      pt_accent_set_class(row, accent);  /* accent top edge, see style.css */
+    }
     g_object_set_data(G_OBJECT(row), "pt-index", GINT_TO_POINTER(i));
 
     GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -136,7 +143,18 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
     g_signal_connect(click, "pressed", G_CALLBACK(on_tab_pressed), s);
     gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
     gtk_box_append(GTK_BOX(s->box), row);
+
+    /* Zed-style tab bar: a full-height 1px border after every tab, the
+     * active one included (see .pt-tab-sep). */
+    GtkWidget *sep = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(sep, "pt-tab-sep");
+    gtk_box_append(GTK_BOX(s->box), sep);
   }
+
+  /* Empty expanding box so the + sits at the strip's right edge, like Zed. */
+  GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand(spacer, TRUE);
+  gtk_box_append(GTK_BOX(s->box), spacer);
 
   GtkWidget *plus = gtk_button_new_with_label("+");
   gtk_widget_add_css_class(plus, "flat");

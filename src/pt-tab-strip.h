@@ -13,7 +13,9 @@ typedef struct {
 #define PT_TYPE_TAB_STRIP (pt_tab_strip_get_type())
 G_DECLARE_FINAL_TYPE(PtTabStrip, pt_tab_strip, PT, TAB_STRIP, GtkWidget)
 GtkWidget *pt_tab_strip_new(void);
+/* `accent` is the owning project's 0..5 accent index; it colours the active
+ * tab's top edge. */
 void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
-                           int active);
+                           int active, int accent);
 /* Signals: "tab-selected" (int index), "tab-new" (void),
  *          "tab-close" (int index) — the × on a tab; closes the whole tab */

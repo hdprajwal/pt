@@ -5,9 +5,11 @@ static GtkCssProvider *var_provider;
 void pt_style_init(GdkDisplay *display) {
   if (var_provider != NULL) return;
   var_provider = gtk_css_provider_new();
+  /* One above the base stylesheet (USER + 1 in main.c), keeping the token
+   * provider on top and both out of reach of user gtk.css themes. */
   gtk_style_context_add_provider_for_display(
       display, GTK_STYLE_PROVIDER(var_provider),
-      GTK_STYLE_PROVIDER_PRIORITY_USER);
+      GTK_STYLE_PROVIDER_PRIORITY_USER + 2);
 }
 
 /* Font size roles, as ratios of ui-font-size (base 12.5 in the shipped
