@@ -6,6 +6,7 @@
 #include <pty.h>
 #include <pwd.h>
 #include <signal.h>
+#include <stdlib.h>       /* setenv / putenv in the forked child */
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
