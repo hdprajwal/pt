@@ -134,21 +134,35 @@ static void test_precedence(void) {
 }
 
 static void test_missing_keys_fall_back(void) {
-  /* An empty theme is exactly pt-dark. */
-  PtTheme *empty = pt_theme_parse("");
-  PtTheme *dark = pt_theme_parse(pt_theme_builtin_pt_dark());
-  PtResolvedTheme a, b;
-  pt_theme_resolve(empty, NULL, &a);
-  pt_theme_resolve(dark, NULL, &b);
-  for (int i = 0; i < PT_TOK_COUNT; i++) {
-    char *ca = pt_color_to_css(&a.tokens[i]);
-    char *cb = pt_color_to_css(&b.tokens[i]);
-    g_assert_cmpstr(ca, ==, cb);
-    g_free(ca);
-    g_free(cb);
-  }
-  pt_theme_free(empty);
-  pt_theme_free(dark);
+  /* Anything missing falls back to pt-dark's value for terminal keys, and to
+   * derivation for chrome keys. An empty theme is pt-dark's terminal colors
+   * with derived chrome — NOT pt-dark's pinned chrome. */
+  PtTheme *t = pt_theme_parse("");
+  PtResolvedTheme rt;
+  pt_theme_resolve(t, NULL, &rt);
+  /* terminal keys <- pt-dark */
+  char *bg = pt_color_to_css(&rt.term.background);
+  char *fg = pt_color_to_css(&rt.term.foreground);
+  char *sel = pt_color_to_css(&rt.term.selection_bg);
+  g_assert_cmpstr(bg, ==, "#0b0d10");
+  g_assert_cmpstr(fg, ==, "#d6dae0");
+  g_assert_cmpstr(sel, ==, "#264f38");
+  g_free(bg);
+  g_free(fg);
+  g_free(sel);
+  /* chrome keys <- derivation: text is the fallback foreground, not the
+   * builtin's pinned app-text (#e6e8ea). */
+  char *text = pt_color_to_css(&rt.tokens[PT_TOK_TEXT]);
+  g_assert_cmpstr(text, ==, "#d6dae0");
+  g_free(text);
+  int bg_sum = rt.tokens[PT_TOK_BACKGROUND].r + rt.tokens[PT_TOK_BACKGROUND].g
+             + rt.tokens[PT_TOK_BACKGROUND].b;
+  g_assert_cmpint(bg_sum, >, 0x0b + 0x0d + 0x10);
+  /* no palette slot 4, so accent-1 is the derivation default */
+  char *accent1 = pt_color_to_css(&rt.tokens[PT_TOK_ACCENT_1]);
+  g_assert_cmpstr(accent1, ==, "#8ab4f8");
+  g_free(accent1);
+  pt_theme_free(t);
 }
 
 int main(void) {

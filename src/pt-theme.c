@@ -109,31 +109,24 @@ const char *pt_theme_builtin_pt_dark(void) {
 }
 
 /* ---- parse ---- */
-typedef struct {
-  PtTheme *t;
-  gboolean base_set;      /* theme declared terminal colors of its own */
-  gboolean keep_existing; /* fill pass: never clobber what the theme set */
-} ParseCtx;
+typedef struct { PtTheme *t; } ParseCtx;
 
 static void theme_kv(const char *key, const char *value, int lineno,
                      gpointer user) {
-  ParseCtx *ctx = user;
-  PtTheme *t = ctx->t;
+  PtTheme *t = ((ParseCtx *)user)->t;
   if (value == NULL) {
     g_warning("pt: theme line %d: no '=' — skipped", lineno);
     return;
   }
   PtColor c;
   if (g_strcmp0(key, "background") == 0) {
-    if (pt_color_parse(value, &c)) { t->background = c; ctx->base_set = TRUE; }
+    if (pt_color_parse(value, &c)) t->background = c;
   } else if (g_strcmp0(key, "foreground") == 0) {
-    if (pt_color_parse(value, &c)) { t->foreground = c; ctx->base_set = TRUE; }
+    if (pt_color_parse(value, &c)) t->foreground = c;
   } else if (g_strcmp0(key, "cursor-color") == 0) {
-    if (pt_color_parse(value, &c)) {
-      t->cursor = c; t->cursor_set = TRUE; ctx->base_set = TRUE;
-    }
+    if (pt_color_parse(value, &c)) { t->cursor = c; t->cursor_set = TRUE; }
   } else if (g_strcmp0(key, "selection-background") == 0) {
-    if (pt_color_parse(value, &c)) { t->selection_bg = c; ctx->base_set = TRUE; }
+    if (pt_color_parse(value, &c)) t->selection_bg = c;
   } else if (g_strcmp0(key, "palette") == 0) {
     /* "N=#rrggbb" */
     char *eq = strchr(value, '=');
@@ -145,14 +138,11 @@ static void theme_kv(const char *key, const char *value, int lineno,
     if (n >= 0 && n < 16 && pt_color_parse(cstr, &c)) {
       t->palette[n] = c;
       t->palette_set[n] = TRUE;
-      ctx->base_set = TRUE;
     } else {
       g_warning("pt: theme line %d: bad palette entry '%s'", lineno, value);
     }
     g_free(cstr);
   } else if (g_str_has_prefix(key, "app-") && key[4] != '\0') {
-    if (ctx->keep_existing && g_hash_table_contains(t->app_overrides, key + 4))
-      return;
     g_hash_table_insert(t->app_overrides, g_strdup(key + 4), g_strdup(value));
   }
 }
@@ -165,17 +155,8 @@ PtTheme *pt_theme_parse(const char *text) {
   t->background   = (PtColor){0x0b, 0x0d, 0x10, 1.0};
   t->foreground   = (PtColor){0xd6, 0xda, 0xe0, 1.0};
   t->selection_bg = (PtColor){0x26, 0x4f, 0x38, 1.0};
-  ParseCtx ctx = { t, FALSE, FALSE };
+  ParseCtx ctx = { t };
   pt_kv_parse(text, theme_kv, &ctx);
-  /* pt-dark's chrome pins are hand-tuned for its own base and no formula
-   * reproduces them (its app-text is not its terminal foreground), so a theme
-   * that never declares a terminal base *is* pt-dark: fill in every key it
-   * left out, pins included. A theme with its own base derives chrome instead
-   * — pins tuned for pt-dark's base would be wrong against a different one. */
-  if (!ctx.base_set) {
-    ParseCtx fill = { t, FALSE, TRUE };
-    pt_kv_parse(pt_theme_builtin_pt_dark(), theme_kv, &fill);
-  }
   if (!t->cursor_set) t->cursor = t->foreground;
   return t;
 }
