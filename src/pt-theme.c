@@ -255,8 +255,10 @@ void pt_theme_resolve(const PtTheme *t, GHashTable *config_overrides,
   tok[PT_TOK_OK_MUTED] = mix(&fg, &bg, 0.50);
   tok[PT_TOK_ERR]      = pal_or(t, 1, def_err);
   tok[PT_TOK_WARN]     = pal_or(t, 3, def_warn);
-  PtColor okc = tok[PT_TOK_OK];
-  tok[PT_TOK_FOCUS_RING] = mix(&okc, &bg, 0.55);
+  /* The cursor color is the closest thing a terminal theme has to a brand
+   * accent (it falls back to the foreground when unset), so the focus ring
+   * follows it instead of hard-wiring ANSI green. */
+  tok[PT_TOK_FOCUS_RING] = mix(&t->cursor, &bg, 0.55);
   tok[PT_TOK_ACCENT_0] = pal_or(t, 2, def_ok);
   tok[PT_TOK_ACCENT_1] = pal_or(t, 4, def_a1);
   tok[PT_TOK_ACCENT_2] = pal_or(t, 3, def_warn);
