@@ -91,7 +91,10 @@ static void refresh_sidebar(PtWindow *w) {
   PtProjectUI *ap = active_project(w);
   char *top = ap != NULL ? g_strdup_printf("pt :: %s", ap->name)
                          : g_strdup("pt");
-  gtk_window_set_title(GTK_WINDOW(w), top);
+  /* GTK4 does not dedupe this; each call is a Wayland round-trip, and this
+   * runs on every foreground-command change. */
+  if (g_strcmp0(gtk_window_get_title(GTK_WINDOW(w)), top) != 0)
+    gtk_window_set_title(GTK_WINDOW(w), top);
   g_free(top);
   /* cheap enough to redo unconditionally, and never drifts out of sync */
   refresh_projectbar(w);

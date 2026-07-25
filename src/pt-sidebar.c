@@ -17,6 +17,7 @@ struct _PtSidebar {
   PtSidebarRow *rows;      /* owned deep copy; name/path are g_strdup'd */
   int n_rows;
   int active;
+  gboolean rendered;       /* rows_box reflects `rows` (see set_projects) */
   char *query;             /* owned; NULL or "" means "show everything" */
 };
 
@@ -201,8 +202,33 @@ void pt_sidebar_focus_search(PtSidebar *sb) {
 }
 
 /* ---------- public API ---------- */
+static gboolean row_equal(const PtSidebarRow *a, const PtSidebarRow *b) {
+  return a->changed == b->changed && a->is_repo == b->is_repo &&
+         a->missing == b->missing && a->accent == b->accent &&
+         a->shell_count == b->shell_count && a->running == b->running &&
+         g_strcmp0(a->branch, b->branch) == 0 &&
+         g_strcmp0(a->name, b->name) == 0 &&
+         g_strcmp0(a->path, b->path) == 0;
+}
+
+static gboolean same_as_rendered(PtSidebar *sb, const PtSidebarRow *rows,
+                                 int n_rows, int active) {
+  if (!sb->rendered || n_rows != sb->n_rows || active != sb->active)
+    return FALSE;
+  for (int i = 0; i < n_rows; i++)
+    if (!row_equal(&sb->rows[i], &rows[i])) return FALSE;
+  return TRUE;
+}
+
+/* Callers refresh on every foreground-command change, which for a chatty pane
+ * means a couple of times a second while the underlying data sits still.
+ * Rebuilding rows_box that often would destroy buttons mid-click (a widget
+ * destroyed between press and release never emits "clicked") and would reset
+ * nothing useful, so an unchanged update is a no-op — it also leaves the
+ * current filter view exactly as the user left it. */
 void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
                              int n_rows, int active) {
+  if (same_as_rendered(sb, rows, n_rows, active)) return;
   clear_rows(sb);
   if (n_rows > 0) {
     sb->rows = g_new0(PtSidebarRow, n_rows);
@@ -214,6 +240,7 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
     }
   }
   sb->active = active;
+  sb->rendered = TRUE;
   rebuild_rows(sb);
 }
 
