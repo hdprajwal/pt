@@ -40,6 +40,7 @@ add_executable(pt src/main.c src/pt-window.c src/pt-sidebar.c src/pt-tab-strip.c
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
+  src/pt-config.c
   src/pt-fuzzy.c
   src/pt-git-parse.c
   src/pt-status-parse.c
@@ -74,6 +75,10 @@ add_test(NAME session COMMAND test-session)
 add_executable(test-term-core tests/test-term-core.c)
 target_link_libraries(test-term-core PRIVATE ptcore)
 add_test(NAME term-core COMMAND test-term-core)
+
+add_executable(test-config tests/test-config.c)
+target_link_libraries(test-config PRIVATE ptcore)
+add_test(NAME config COMMAND test-config)
 
 add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
 target_include_directories(test-keymap PRIVATE src)
