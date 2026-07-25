@@ -126,6 +126,13 @@ static void config_save_soon(PtWindow *w) {
 static gboolean config_reload_now(gpointer user) {
   PtWindow *w = PT_WINDOW(user);
   w->config_reload_source = 0;
+  /* Never re-render underneath an open settings dialog: the window shows the
+   * dialog's candidate, and re-applying w->config here would snap it back
+   * mid-preview. An external edit made during those few seconds is simply not
+   * adopted: the file keeps it, and the next config-file event (or the next
+   * launch) picks it up. */
+  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)))
+    return G_SOURCE_REMOVE;
   /* A save of ours is still queued, so memory is newer than disk: reloading
    * here would resurrect the pre-edit file. Closes the 150ms hole where a
    * zoom at t=1100 gets reverted by the reload our own t=1000 write triggers
@@ -164,6 +171,11 @@ static void on_config_changed(GFileMonitor *m, GFile *f, GFile *other,
 static gboolean theme_reload_now(gpointer user) {
   PtWindow *w = PT_WINDOW(user);
   w->theme_reload_source = 0;
+  /* Same as config_reload_now: the candidate on screen wins while the dialog
+   * is open. Notably the mkdir in action_open_settings makes the themes dir
+   * fire a CREATED event on the first-ever ⌃,. */
+  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)))
+    return G_SOURCE_REMOVE;
   apply_config(w);
   return G_SOURCE_REMOVE;
 }
@@ -1232,7 +1244,11 @@ static void install_shortcuts(PtWindow *w) {
 static PtSessionState *capture_state(PtWindow *w) {
   PtSessionState *s = pt_session_state_new();
   s->active_project = w->active_project;
-  s->font_size = pt_terminal_font_size();
+  /* The committed config, not the live terminal size: a settings preview moves
+   * the terminals while w->config deliberately stays put, and a save armed
+   * mid-preview would otherwise persist a size the user never accepted (and
+   * the next launch's migration would seed it into the config file). */
+  s->font_size = w->config != NULL ? w->config->font_size : pt_terminal_font_size();
   for (guint i = 0; i < w->projects->len; i++) {
     PtProjectUI *p = g_ptr_array_index(w->projects, i);
     PtProjectState *ps = pt_project_state_new(p->name, p->path);
