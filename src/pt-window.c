@@ -215,16 +215,24 @@ static void show_active_grid(PtWindow *w) {
 }
 
 /* ---------- tab/grid plumbing ---------- */
+/* Every grid handler below opens with this. A grid outlives the window in the
+ * shutdown window: pt-pane-grid's close idle holds its own ref, so a shell that
+ * exits in the same main-loop frame as the window close emits into a window
+ * whose dispose already dropped w->projects. NULL there means "gone" — bail
+ * before touching the array (or re-arming a save through mark_dirty). */
 static void on_grid_structure(PtPaneGrid *g, gpointer user) {
   (void)g;
   PtWindow *w = PT_WINDOW(user);
+  if (w->projects == NULL) return;
   refresh_statusline(w);
   mark_dirty(w);
 }
 
 static void on_grid_focus(PtPaneGrid *g, gpointer user) {
   (void)g;
-  refresh_statusline(PT_WINDOW(user));
+  PtWindow *w = PT_WINDOW(user);
+  if (w->projects == NULL) return;
+  refresh_statusline(w);
 }
 
 /* Output on an unwatched tab bumps its unread counter. Background projects
@@ -234,6 +242,7 @@ static void on_grid_focus(PtPaneGrid *g, gpointer user) {
  * rather than hundreds. */
 static void on_grid_activity(PtPaneGrid *g, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
+  if (w->projects == NULL) return;
   for (guint pi = 0; pi < w->projects->len; pi++) {
     PtProjectUI *p = g_ptr_array_index(w->projects, pi);
     gboolean p_active = ((int)pi == w->active_project);
@@ -258,6 +267,7 @@ static void on_grid_activity(PtPaneGrid *g, gpointer user) {
  * pt-pane-grid holds its own ref) even though tab removal unrefs it here. */
 static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
+  if (w->projects == NULL) return;
   for (guint pi = 0; pi < w->projects->len; pi++) {
     PtProjectUI *p = g_ptr_array_index(w->projects, pi);
     for (guint ti = 0; ti < p->tabs->len; ti++) {
@@ -282,6 +292,7 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
  * title is captured on the next structural save anyway. */
 static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
+  if (w->projects == NULL) return;
   for (guint pi = 0; pi < w->projects->len; pi++) {
     PtProjectUI *p = g_ptr_array_index(w->projects, pi);
     for (guint ti = 0; ti < p->tabs->len; ti++) {
@@ -310,6 +321,7 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
 static void on_grid_title(PtPaneGrid *g, const char *title, gpointer user) {
   (void)title;
   PtWindow *w = PT_WINDOW(user);
+  if (w->projects == NULL) return;
   PtTabUI *t = active_tab(active_project(w));
   if (t == NULL || t->grid != GTK_WIDGET(g)) return;
   refresh_statusline(w);
