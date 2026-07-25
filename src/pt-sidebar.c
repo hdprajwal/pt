@@ -76,15 +76,6 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
     gtk_widget_set_hexpand(spacer, TRUE);
     gtk_box_append(GTK_BOX(row), spacer);
 
-    if (i < 9) {
-      char khint[8];
-      g_snprintf(khint, sizeof(khint), "^%d", i + 1);
-      GtkWidget *kbd = gtk_label_new(khint);
-      gtk_widget_add_css_class(kbd, "pt-kbd-hint");
-      gtk_widget_set_valign(kbd, GTK_ALIGN_CENTER);
-      gtk_box_append(GTK_BOX(row), kbd);
-    }
-
     GtkWidget *rm = gtk_button_new_with_label("×");
     gtk_widget_add_css_class(rm, "flat");
     gtk_widget_add_css_class(rm, "pt-remove");
