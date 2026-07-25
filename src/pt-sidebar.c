@@ -2,6 +2,9 @@
 #include "pt-fuzzy.h"
 #include "pt-session.h"   /* PT_ACCENT_COUNT */
 
+/* The sidebar is a fixed-width rail, not a min-width one. */
+#define PT_SIDEBAR_WIDTH 266
+
 enum { SIG_SELECTED, SIG_ADD, SIG_REMOVE, SIG_SEARCH_ESCAPE, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
@@ -223,10 +226,40 @@ static void pt_sidebar_dispose(GObject *obj) {
   G_OBJECT_CLASS(pt_sidebar_parent_class)->dispose(obj);
 }
 
+/* A size request only raises the MINIMUM: GtkBoxLayout would still hand the
+ * sidebar its natural width, and an ellipsizing label reports its full text
+ * width as natural. A long project name therefore used to widen the rail (531px
+ * measured with a 41-char name) and steal that width from the terminal.
+ * Reporting minimum == natural == PT_SIDEBAR_WIDTH pins it for good, so this
+ * measure/allocate pair replaces GTK_TYPE_BIN_LAYOUT. */
+static void pt_sidebar_measure(GtkWidget *widget, GtkOrientation orientation,
+                               int for_size, int *minimum, int *natural,
+                               int *minimum_baseline, int *natural_baseline) {
+  (void)for_size;
+  PtSidebar *sb = PT_SIDEBAR(widget);
+  *minimum_baseline = *natural_baseline = -1;
+  if (orientation == GTK_ORIENTATION_HORIZONTAL) {
+    *minimum = *natural = PT_SIDEBAR_WIDTH;
+    return;
+  }
+  if (sb->box == NULL) { *minimum = *natural = 0; return; }
+  /* Height-for-width: the width is always PT_SIDEBAR_WIDTH. */
+  gtk_widget_measure(sb->box, orientation, PT_SIDEBAR_WIDTH,
+                     minimum, natural, minimum_baseline, natural_baseline);
+}
+
+static void pt_sidebar_size_allocate(GtkWidget *widget, int width, int height,
+                                     int baseline) {
+  PtSidebar *sb = PT_SIDEBAR(widget);
+  if (sb->box != NULL)
+    gtk_widget_allocate(sb->box, width, height, baseline, NULL);
+}
+
 static void pt_sidebar_class_init(PtSidebarClass *klass) {
   G_OBJECT_CLASS(klass)->dispose = pt_sidebar_dispose;
-  gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(klass),
-                                           GTK_TYPE_BIN_LAYOUT);
+  GtkWidgetClass *wc = GTK_WIDGET_CLASS(klass);
+  wc->measure = pt_sidebar_measure;
+  wc->size_allocate = pt_sidebar_size_allocate;
   signals[SIG_SELECTED] = g_signal_new("project-selected", PT_TYPE_SIDEBAR,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
   signals[SIG_ADD] = g_signal_new("project-add", PT_TYPE_SIDEBAR,
@@ -239,7 +272,7 @@ static void pt_sidebar_class_init(PtSidebarClass *klass) {
 
 static void pt_sidebar_init(PtSidebar *sb) {
   gtk_widget_add_css_class(GTK_WIDGET(sb), "pt-sidebar");
-  gtk_widget_set_size_request(GTK_WIDGET(sb), 266, -1);
+  gtk_widget_set_size_request(GTK_WIDGET(sb), PT_SIDEBAR_WIDTH, -1);
   sb->active = -1;
   sb->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_parent(sb->box, GTK_WIDGET(sb));
@@ -276,9 +309,17 @@ static void pt_sidebar_init(PtSidebar *sb) {
   gtk_box_append(GTK_BOX(search_box), sb->search);
   gtk_box_append(GTK_BOX(sb->box), search_box);
 
+  /* Scroll the rows, not the whole rail: the footer button stays put no matter
+   * how many projects there are. EXTERNAL horizontally means no h-scrollbar and
+   * no horizontal contribution to the sidebar's size request; vertical uses
+   * GTK's overlay scrollbar, which fades out when idle. */
+  GtkWidget *scroller = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
+                                 GTK_POLICY_EXTERNAL, GTK_POLICY_AUTOMATIC);
+  gtk_widget_set_vexpand(scroller, TRUE);
   sb->rows_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_widget_set_vexpand(sb->rows_box, TRUE);
-  gtk_box_append(GTK_BOX(sb->box), sb->rows_box);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), sb->rows_box);
+  gtk_box_append(GTK_BOX(sb->box), scroller);
 
   GtkWidget *sep = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_add_css_class(sep, "pt-sidebar-footer-sep");

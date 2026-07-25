@@ -201,6 +201,19 @@ button.pt-tab-new:hover { background-color: rgba(255,255,255,.045); color: #e6e8
 .pt-empty { color: #5c646f; font-family: "JetBrains Mono", monospace; font-size: 12px; }
 .pt-empty-hint { color: #3f4650; font-family: "JetBrains Mono", monospace; font-size: 11px; }
 
+/* ---- scrollbars (sidebar project list) ----
+ * Adwaita's slider uses a 4px transparent border inside a 6px min-width, which
+ * makes GTK measure a -2px content width and warn. Restating the slider box
+ * both silences that and keeps the bar unobtrusive. */
+.pt-sidebar scrollbar { background: none; border: none; }
+.pt-sidebar scrollbar slider,
+.pt-sidebar scrollbar.overlay-indicator:not(.dragging):not(.hovering) slider {
+  background-color: rgba(255,255,255,.12);
+  border: none; margin: 2px;
+  min-width: 5px; min-height: 24px;
+}
+.pt-sidebar scrollbar slider:hover { background-color: rgba(255,255,255,.22); }
+
 /* ---- paned separators ---- */
 paned > separator {
   background-color: rgba(255,255,255,.06);
