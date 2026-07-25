@@ -100,6 +100,19 @@ windowcontrols button.titlebutton.close:hover image {
   font-size: 10px;
   font-family: "JetBrains Mono", monospace;
 }
+.pt-project-row .pt-branch {
+  color: #5c5c5c;
+  font-size: 10.5px;
+}
+.pt-project-row .pt-branch.dirty {
+  color: #e5c07b;
+}
+.pt-project-row.active .pt-branch {
+  color: #888888;
+}
+.pt-project-row.active .pt-branch.dirty {
+  color: #e5c07b;
+}
 button.pt-remove {
   color: #6a6a6a;
   padding: 0 4px;

@@ -29,8 +29,7 @@ static void clear_box(GtkWidget *box) {
 void pt_tab_strip_set_tabs(PtTabStrip *s, GPtrArray *titles, int active) {
   clear_box(s->box);
   for (guint i = 0; i < titles->len; i++) {
-    char *label = g_strdup_printf("%u:%s", i + 1,
-                                  (const char *)g_ptr_array_index(titles, i));
+    char *label = g_strdup((const char *)g_ptr_array_index(titles, i));
     GtkWidget *btn = gtk_button_new_with_label(label);
     /* Stash the base label so the activity dot can be toggled without
      * corrupting the title text. */

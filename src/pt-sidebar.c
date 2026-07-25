@@ -44,43 +44,51 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
     if (i == active) gtk_widget_add_css_class(row, "active");
     g_object_set_data(G_OBJECT(row), "pt-index", GINT_TO_POINTER(i));
 
+    /* Two-line column: project name on top, branch (+ dirty state) below. */
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
     GtkWidget *name = gtk_label_new(rows[i].name);
     gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
     gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_MIDDLE);
-    gtk_box_append(GTK_BOX(row), name);
-
-    /* spacer keeps the name left and right-aligns badge + hint + remove */
-    GtkWidget *spacer = gtk_label_new(NULL);
-    gtk_widget_set_hexpand(spacer, TRUE);
-    gtk_box_append(GTK_BOX(row), spacer);
+    gtk_box_append(GTK_BOX(col), name);
 
     if (rows[i].missing) {
-      GtkWidget *badge = gtk_label_new("[missing]");
-      gtk_widget_add_css_class(badge, "pt-badge-dirty");
-      gtk_box_append(GTK_BOX(row), badge);
+      GtkWidget *branch = gtk_label_new("[missing]");
+      gtk_label_set_xalign(GTK_LABEL(branch), 0.0f);
+      gtk_widget_add_css_class(branch, "pt-branch");
+      gtk_widget_add_css_class(branch, "pt-badge-dirty");
+      gtk_box_append(GTK_BOX(col), branch);
     } else if (rows[i].is_repo) {
       char *btxt = rows[i].changed > 0
           ? g_strdup_printf("%s ●%d", rows[i].branch, rows[i].changed)
-          : g_strdup_printf("%s ✓", rows[i].branch);
-      GtkWidget *badge = gtk_label_new(btxt);
+          : g_strdup(rows[i].branch);
+      GtkWidget *branch = gtk_label_new(btxt);
       g_free(btxt);
-      gtk_widget_add_css_class(badge, rows[i].changed > 0
-                                          ? "pt-badge-dirty"
-                                          : "pt-badge-clean");
-      gtk_box_append(GTK_BOX(row), badge);
+      gtk_label_set_xalign(GTK_LABEL(branch), 0.0f);
+      gtk_label_set_ellipsize(GTK_LABEL(branch), PANGO_ELLIPSIZE_MIDDLE);
+      gtk_widget_add_css_class(branch, "pt-branch");
+      if (rows[i].changed > 0) gtk_widget_add_css_class(branch, "dirty");
+      gtk_box_append(GTK_BOX(col), branch);
     }
+    gtk_box_append(GTK_BOX(row), col);
+
+    /* spacer keeps the column left and right-aligns hint + remove */
+    GtkWidget *spacer = gtk_label_new(NULL);
+    gtk_widget_set_hexpand(spacer, TRUE);
+    gtk_box_append(GTK_BOX(row), spacer);
 
     if (i < 9) {
       char khint[8];
       g_snprintf(khint, sizeof(khint), "^%d", i + 1);
       GtkWidget *kbd = gtk_label_new(khint);
       gtk_widget_add_css_class(kbd, "pt-kbd-hint");
+      gtk_widget_set_valign(kbd, GTK_ALIGN_CENTER);
       gtk_box_append(GTK_BOX(row), kbd);
     }
 
     GtkWidget *rm = gtk_button_new_with_label("×");
     gtk_widget_add_css_class(rm, "flat");
     gtk_widget_add_css_class(rm, "pt-remove");
+    gtk_widget_set_valign(rm, GTK_ALIGN_CENTER);
     g_object_set_data(G_OBJECT(rm), "pt-index", GINT_TO_POINTER(i));
     g_signal_connect(rm, "clicked", G_CALLBACK(on_remove_clicked), sb);
     gtk_box_append(GTK_BOX(row), rm);

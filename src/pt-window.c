@@ -66,8 +66,11 @@ static void refresh_sidebar(PtWindow *w) {
   }
   pt_sidebar_set_projects(PT_SIDEBAR(w->sidebar), rows, n, w->active_project);
   g_free(rows);
-  char *top = g_strdup_printf("pt :: %d project%s", n, n == 1 ? "" : "s");
+  PtProjectUI *ap = active_project(w);
+  char *top = ap != NULL ? g_strdup_printf("pt :: %s", ap->name)
+                         : g_strdup("pt");
   gtk_label_set_text(GTK_LABEL(w->topbar_label), top);
+  gtk_window_set_title(GTK_WINDOW(w), top);
   g_free(top);
 }
 
@@ -659,14 +662,12 @@ static void pt_window_init(PtWindow *w) {
 
   GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 
-  /* top bar: label left, window controls right, draggable */
+  /* top bar: "pt :: <project>" left, no window controls, draggable */
   GtkWidget *handle = gtk_window_handle_new();
   GtkWidget *topbar = gtk_center_box_new();
   gtk_widget_add_css_class(topbar, "pt-topbar");
-  w->topbar_label = gtk_label_new("pt :: 0 projects");
+  w->topbar_label = gtk_label_new("pt");
   gtk_center_box_set_start_widget(GTK_CENTER_BOX(topbar), w->topbar_label);
-  GtkWidget *controls = gtk_window_controls_new(GTK_PACK_END);
-  gtk_center_box_set_end_widget(GTK_CENTER_BOX(topbar), controls);
   gtk_window_handle_set_child(GTK_WINDOW_HANDLE(handle), topbar);
   gtk_box_append(GTK_BOX(outer), handle);
 
