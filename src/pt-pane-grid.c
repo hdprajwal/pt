@@ -254,6 +254,20 @@ void pt_pane_grid_focus_next(PtPaneGrid *g) {
   emit_focused_command(g);
 }
 
+void pt_pane_grid_focus_prev(PtPaneGrid *g) {
+  if (g->focused == NULL) return;
+  /* Cyclic list only walks forward; the previous leaf is the one whose
+   * successor is the focused leaf. */
+  PtSplitNode *leaf = g->focused;
+  while (pt_split_next_leaf(g->tree, leaf) != g->focused)
+    leaf = pt_split_next_leaf(g->tree, leaf);
+  if (leaf == g->focused) return;
+  g->focused = leaf;
+  pt_pane_grid_focus_terminal(g);
+  g_signal_emit(g, signals[SIG_FOCUS], 0);
+  emit_focused_command(g);
+}
+
 /* Center of a leaf's terminal in grid coordinates; FALSE if not computable. */
 static gboolean leaf_center(PtPaneGrid *g, PtSplitNode *leaf,
                             double *cx, double *cy) {

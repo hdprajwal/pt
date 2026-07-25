@@ -13,6 +13,7 @@ void pt_pane_grid_split(PtPaneGrid *g, PtSplitKind kind);
 /* Close focused pane. Returns FALSE when the grid is now empty (close the tab). */
 gboolean pt_pane_grid_close_focused(PtPaneGrid *g);
 void pt_pane_grid_focus_next(PtPaneGrid *g);
+void pt_pane_grid_focus_prev(PtPaneGrid *g);
 typedef enum {
   PT_PANE_DIR_LEFT,
   PT_PANE_DIR_RIGHT,
