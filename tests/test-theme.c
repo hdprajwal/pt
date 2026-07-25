@@ -1,4 +1,5 @@
 #include "pt-theme.h"
+#include <string.h>
 
 static void test_color_parse(void) {
   PtColor c;
@@ -188,6 +189,30 @@ static void test_missing_keys_fall_back(void) {
   pt_theme_free(t);
 }
 
+static void test_discovery(void) {
+  char *dir = g_dir_make_tmp("pt-themes-XXXXXX", NULL);
+  char *f = g_build_filename(dir, "mytheme", NULL);
+  g_file_set_contents(f, "background = #123456\n", -1, NULL);
+  char **names = pt_theme_list_names(dir);
+  gboolean saw_builtin = FALSE, saw_mine = FALSE;
+  for (int i = 0; names[i] != NULL; i++) {
+    if (g_strcmp0(names[i], "pt-dark") == 0) saw_builtin = TRUE;
+    if (g_strcmp0(names[i], "mytheme") == 0) saw_mine = TRUE;
+  }
+  g_assert_true(saw_builtin);
+  g_assert_true(saw_mine);
+  g_strfreev(names);
+  char *text = pt_theme_load_text(dir, "mytheme");
+  g_assert_nonnull(strstr(text, "#123456"));
+  g_free(text);
+  text = pt_theme_load_text(dir, "pt-dark");
+  g_assert_nonnull(strstr(text, "app-background"));
+  g_free(text);
+  g_assert_null(pt_theme_load_text(dir, "no-such-theme"));
+  g_free(f);
+  g_free(dir);
+}
+
 int main(void) {
   test_color_parse();
   test_pt_dark_identity();
@@ -196,6 +221,7 @@ int main(void) {
   test_derivation_light();
   test_precedence();
   test_missing_keys_fall_back();
+  test_discovery();
   g_print("test-theme: OK\n");
   return 0;
 }

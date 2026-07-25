@@ -115,6 +115,24 @@ static void test_rewrite_roundtrip(void) {
   pt_config_free(back);
 }
 
+static void test_load_save(void) {
+  char *dir = g_dir_make_tmp("pt-config-XXXXXX", NULL);
+  char *path = g_build_filename(dir, "sub", "config", NULL);
+  /* missing file -> defaults */
+  PtConfig *c = pt_config_load(path);
+  g_assert_cmpstr(c->theme, ==, "pt-dark");
+  c->font_size = 15;
+  GError *err = NULL;
+  g_assert_true(pt_config_save(c, path, &err));  /* creates sub/ */
+  g_assert_no_error(err);
+  PtConfig *back = pt_config_load(path);
+  g_assert_cmpint(back->font_size, ==, 15);
+  pt_config_free(c);
+  pt_config_free(back);
+  g_free(path);
+  g_free(dir);
+}
+
 int main(void) {
   test_defaults();
   test_parse();
@@ -123,6 +141,7 @@ int main(void) {
   test_copy_equal();
   test_rewrite_preserves();
   test_rewrite_roundtrip();
+  test_load_save();
   g_print("test-config: OK\n");
   return 0;
 }

@@ -275,3 +275,41 @@ void pt_theme_resolve(const PtTheme *t, GHashTable *config_overrides,
     }
   }
 }
+
+/* ---- discovery ---- */
+char *pt_theme_dir(void) {
+  return g_build_filename(g_get_user_config_dir(), "pt", "themes", NULL);
+}
+
+static const char *builtin_names[] = { "pt-dark", NULL };
+
+char **pt_theme_list_names(const char *dir) {
+  GPtrArray *arr = g_ptr_array_new_with_free_func(g_free);
+  for (int i = 0; builtin_names[i] != NULL; i++)
+    g_ptr_array_add(arr, g_strdup(builtin_names[i]));
+  GDir *d = g_dir_open(dir, 0, NULL);
+  if (d != NULL) {
+    const char *name;
+    while ((name = g_dir_read_name(d)) != NULL) {
+      gboolean dup = FALSE;
+      for (guint j = 0; j < arr->len && !dup; j++)
+        dup = g_strcmp0(g_ptr_array_index(arr, j), name) == 0;
+      if (!dup) g_ptr_array_add(arr, g_strdup(name));
+    }
+    g_dir_close(d);
+  }
+  g_ptr_array_sort_values(arr, (GCompareFunc)g_strcmp0);
+  g_ptr_array_add(arr, NULL);
+  return (char **)g_ptr_array_free(arr, FALSE);
+}
+
+char *pt_theme_load_text(const char *dir, const char *name) {
+  char *path = g_build_filename(dir, name, NULL);
+  char *text = NULL;
+  gboolean ok = g_file_get_contents(path, &text, NULL, NULL);
+  g_free(path);
+  if (ok) return text;
+  if (g_strcmp0(name, "pt-dark") == 0)
+    return g_strdup(pt_theme_builtin_pt_dark());
+  return NULL;
+}

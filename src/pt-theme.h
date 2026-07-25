@@ -40,3 +40,9 @@ void        pt_theme_free(PtTheme *t);
 /* config_overrides may be NULL. Result is fully resolved. */
 void        pt_theme_resolve(const PtTheme *t, GHashTable *config_overrides,
                              PtResolvedTheme *out);
+
+char       *pt_theme_dir(void);                  /* ~/.config/pt/themes */
+/* Sorted, unique theme names: builtins plus every file in dir. g_strfreev. */
+char      **pt_theme_list_names(const char *dir);
+/* A file in dir wins over the builtin of the same name. NULL when unknown. */
+char       *pt_theme_load_text(const char *dir, const char *name);

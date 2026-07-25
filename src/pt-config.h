@@ -37,3 +37,8 @@ char     *pt_config_default_path(void);           /* ~/.config/pt/config */
  * Managed keys not present in old_text are appended at the end. app-*
  * overrides are NOT written (hand-managed). Returns new file text. */
 char     *pt_config_rewrite(const char *old_text, const PtConfig *c);
+/* Missing or unreadable file yields defaults. Never NULL. */
+PtConfig *pt_config_load(const char *path);
+/* Rewrites managed keys into the file's existing text (absent is fine) and
+ * writes it back, creating the parent directory. */
+gboolean  pt_config_save(const PtConfig *c, const char *path, GError **err);

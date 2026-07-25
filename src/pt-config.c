@@ -1,4 +1,5 @@
 #include "pt-config.h"
+#include <glib/gstdio.h>   /* g_mkdir_with_parents */
 #include <stdlib.h>
 #include <string.h>
 
@@ -188,4 +189,27 @@ char *pt_config_rewrite(const char *old_text, const PtConfig *c) {
     g_free(keys[k].value);
   }
   return g_string_free(out, FALSE);
+}
+
+/* ---- disk ---- */
+PtConfig *pt_config_load(const char *path) {
+  char *text = NULL;
+  if (!g_file_get_contents(path, &text, NULL, NULL))
+    return pt_config_new();
+  PtConfig *c = pt_config_parse(text);
+  g_free(text);
+  return c;
+}
+
+gboolean pt_config_save(const PtConfig *c, const char *path, GError **err) {
+  char *dir = g_path_get_dirname(path);
+  g_mkdir_with_parents(dir, 0700);
+  g_free(dir);
+  char *old = NULL;
+  g_file_get_contents(path, &old, NULL, NULL);  /* absent is fine */
+  char *text = pt_config_rewrite(old != NULL ? old : "", c);
+  gboolean ok = g_file_set_contents(path, text, -1, err);
+  g_free(old);
+  g_free(text);
+  return ok;
 }
