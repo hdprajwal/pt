@@ -42,7 +42,9 @@ G_DEFINE_FINAL_TYPE(PtWindow, pt_window, ADW_TYPE_APPLICATION_WINDOW)
 
 /* ---------- helpers ---------- */
 static PtProjectUI *active_project(PtWindow *w) {
-  if (w->active_project < 0 ||
+  /* NULL after dispose: a dialog response or a queued grid signal can still
+   * land on the window after its projects are gone. */
+  if (w->projects == NULL || w->active_project < 0 ||
       (guint)w->active_project >= w->projects->len)
     return NULL;
   return g_ptr_array_index(w->projects, w->active_project);
