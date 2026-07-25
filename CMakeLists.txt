@@ -40,6 +40,7 @@ add_executable(pt src/main.c src/pt-window.c src/pt-sidebar.c src/pt-tab-strip.c
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
+  src/pt-fuzzy.c
   src/pt-git-parse.c
   src/pt-status-parse.c
   src/pt-split-tree.c
@@ -57,6 +58,10 @@ add_test(NAME git-parse COMMAND test-git-parse)
 add_executable(test-status-parse tests/test-status-parse.c)
 target_link_libraries(test-status-parse PRIVATE ptcore)
 add_test(NAME status-parse COMMAND test-status-parse)
+
+add_executable(test-fuzzy tests/test-fuzzy.c)
+target_link_libraries(test-fuzzy PRIVATE ptcore)
+add_test(NAME fuzzy COMMAND test-fuzzy)
 
 add_executable(test-split-tree tests/test-split-tree.c)
 target_link_libraries(test-split-tree PRIVATE ptcore)
