@@ -204,8 +204,8 @@ static void show_active_grid(PtWindow *w) {
     gtk_box_append(GTK_BOX(empty), hint);
     GtkWidget *keys = gtk_label_new(
         (ap != NULL && ap->missing)
-            ? "^⇧W remove · ^1..9 switch project"
-            : "[+ project] to add · ^1..9 switch · ^⇧T new tab");
+            ? "^⇧W remove · ^1…9 switch project"
+            : "[+ project] to add · ^1…9 switch · ^⇧T new tab");
     gtk_widget_add_css_class(keys, "pt-empty-hint");
     gtk_box_append(GTK_BOX(empty), keys);
     gtk_box_append(GTK_BOX(w->content), empty);
@@ -302,6 +302,20 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
   }
 }
 
+/* The prompt smuggles the last exit code out through the terminal title, so a
+ * title change is the earliest moment the "✓ / ✗ exit N" marker can settle —
+ * a failing builtin (`false`) never moves the foreground comm, so waiting for
+ * "command-changed" would leave the bar stale until the next poll. Both
+ * renderers dedupe internally, so refreshing on every title is cheap. */
+static void on_grid_title(PtPaneGrid *g, const char *title, gpointer user) {
+  (void)title;
+  PtWindow *w = PT_WINDOW(user);
+  PtTabUI *t = active_tab(active_project(w));
+  if (t == NULL || t->grid != GTK_WIDGET(g)) return;
+  refresh_statusline(w);
+  refresh_tabstrip(w);
+}
+
 /* PT_BRANCH has to be right for a project's *first* shells, but the git
  * monitor's first poll is async and lands long after they spawn — without this
  * every restored shell (i.e. every shell at app start) got PT_BRANCH="".
@@ -354,6 +368,7 @@ static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
                    G_CALLBACK(on_grid_structure), w);
   g_signal_connect(t->grid, "focus-changed", G_CALLBACK(on_grid_focus), w);
   g_signal_connect(t->grid, "command-changed", G_CALLBACK(on_grid_command), w);
+  g_signal_connect(t->grid, "title-changed", G_CALLBACK(on_grid_title), w);
   g_signal_connect(t->grid, "activity", G_CALLBACK(on_grid_activity), w);
   g_signal_connect(t->grid, "emptied", G_CALLBACK(on_grid_emptied), w);
   return t;
@@ -668,15 +683,19 @@ static void action_open_palette(PtWindow *w) {
   GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtPaletteItem));
   for (guint i = 0; i < w->projects->len; i++) {
     PtProjectUI *p = g_ptr_array_index(w->projects, i);
+    /* Same spelling as the project bar: home-abbreviated path, plain branch
+     * text. The ⑂ glyph is reserved for the terminal's own identity line. */
+    char *shown_path = pt_path_home_abbrev(p->path);
     PtPaletteItem it = {
       .name = g_strdup(p->name),
       .detail = p->is_repo
-          ? g_strdup_printf("%s · ⑂ %s", p->path, p->git.branch)
-          : g_strdup(p->path),
+          ? g_strdup_printf("%s · %s", shown_path, p->git.branch)
+          : g_strdup(shown_path),
       .shortcut = i < 9 ? g_strdup_printf("^%u", i + 1) : NULL,
       .accent = p->accent, .is_shell = FALSE,
       .project_idx = (int)i, .tab_idx = -1,
     };
+    g_free(shown_path);
     g_array_append_val(arr, it);
     for (guint j = 0; j < p->tabs->len; j++) {
       PtTabUI *t = g_ptr_array_index(p->tabs, j);

@@ -35,4 +35,7 @@ void pt_pane_grid_focus_terminal(PtPaneGrid *g); /* grab focus on focused pane *
  *          "focus-changed" (void) — focused pane changed;
  *          "command-changed" (const char*) — focused pane's foreground program
  *              changed (or a focus move landed on a pane with a known command);
+ *          "title-changed" (const char*) — focused pane's title changed (the
+ *              prompt reports the last exit code through it, so this is the
+ *              instant edge for the status bar's exit marker);
  *          "emptied" (void) — last pane closed via clean shell exit (close tab). */

@@ -196,6 +196,7 @@ static int spawn_pty(const char *cwd, const char *const *argv,
   if (child == 0) {
     if (cwd != NULL) { if (chdir(cwd) != 0) { /* fall through to $HOME */ chdir(g_get_home_dir()); } }
     setenv("TERM", "xterm-256color", 1);
+    setenv("COLORTERM", "truecolor", 1);
     /* env_pairs was copied before the fork, so putenv'ing its strings keeps
      * them alive for the (immediately following) exec without allocating. */
     for (int i = 0; env_pairs != NULL && env_pairs[i] != NULL; i++)

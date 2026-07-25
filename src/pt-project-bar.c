@@ -28,9 +28,9 @@ static void set_accent_class(GtkWidget *wdg, int accent) {
   gtk_widget_add_css_class(wdg, c);
 }
 
-/* "/home/me/dev/foo" → "~/dev/foo". Only a whole leading path component
- * matches, so "/home/metoo" is left alone. Caller frees. */
-static char *home_abbrev(const char *path) {
+/* Only a whole leading path component matches, so "/home/metoo" is left
+ * alone. See the header for the contract. */
+char *pt_path_home_abbrev(const char *path) {
   const char *home = g_get_home_dir();
   if (path == NULL) return g_strdup("");
   if (home == NULL || home[0] == '\0') return g_strdup(path);
@@ -48,7 +48,7 @@ void pt_project_bar_update(PtProjectBar *b, const char *name, const char *path,
 
   gtk_label_set_text(GTK_LABEL(b->name), name != NULL ? name : "pt");
 
-  char *shown = home_abbrev(path);
+  char *shown = pt_path_home_abbrev(path);
   gtk_label_set_text(GTK_LABEL(b->path), shown);
   g_free(shown);
 

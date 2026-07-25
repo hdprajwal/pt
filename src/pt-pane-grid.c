@@ -1,7 +1,7 @@
 #include "pt-pane-grid.h"
 
-enum { SIG_STRUCTURE, SIG_ACTIVITY, SIG_FOCUS, SIG_COMMAND, SIG_EMPTIED,
-       N_SIGNALS };
+enum { SIG_STRUCTURE, SIG_ACTIVITY, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
+       SIG_EMPTIED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtPaneGrid {
@@ -42,6 +42,16 @@ static void on_term_command(PtTerminal *t, const char *comm, gpointer user) {
   PtPaneGrid *g = PT_PANE_GRID(user);
   if (g->focused != NULL && g->focused->user == (gpointer)t)
     g_signal_emit(g, signals[SIG_COMMAND], 0, comm);
+}
+
+/* The prompt reports the previous command's exit code through the terminal
+ * title, which lands the instant the prompt is redrawn — well before the 700ms
+ * comm poll notices the foreground program went back to the shell. Re-emitting
+ * it lets the window repaint "✗ exit 1" (and the tab dot) with no lag. */
+static void on_term_title(PtTerminal *t, const char *title, gpointer user) {
+  PtPaneGrid *g = PT_PANE_GRID(user);
+  if (g->focused != NULL && g->focused->user == (gpointer)t)
+    g_signal_emit(g, signals[SIG_TITLE], 0, title);
 }
 
 /* Is `leaf` still a live leaf of `n`? Compares by pointer identity only, so a
@@ -94,6 +104,7 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   g_signal_connect(term, "activity", G_CALLBACK(on_term_activity), g);
   g_signal_connect(term, "exited", G_CALLBACK(on_term_exited), g);
   g_signal_connect(term, "command-changed", G_CALLBACK(on_term_command), g);
+  g_signal_connect(term, "title-changed", G_CALLBACK(on_term_title), g);
   GtkEventController *focus = gtk_event_controller_focus_new();
   g_signal_connect(focus, "enter", G_CALLBACK(on_term_focus_enter), g);
   gtk_widget_add_controller(term, focus);
@@ -417,6 +428,8 @@ static void pt_pane_grid_class_init(PtPaneGridClass *klass) {
   signals[SIG_FOCUS] = g_signal_new("focus-changed", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_COMMAND] = g_signal_new("command-changed", PT_TYPE_PANE_GRID,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_TITLE] = g_signal_new("title-changed", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_EMPTIED] = g_signal_new("emptied", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
