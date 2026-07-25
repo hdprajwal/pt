@@ -45,6 +45,29 @@ static void test_parse_bad_values(void) {
   pt_config_free(c);
 }
 
+static void test_parse_out_of_range_font_size(void) {
+  /* Out-of-range font sizes are rejected, not silently accepted or wrapped. */
+  const char *bad[] = {
+    "font-size = 0\n",
+    "font-size = -5\n",
+    "font-size = 99999999999999\n",   /* overflows int when narrowed */
+    "font-size = 257\n",              /* just past the accepted range */
+    "font-size = 999999999999999999999999\n", /* overflows long too */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
+    PtConfig *c = pt_config_parse(bad[i]);
+    g_assert_cmpint(c->font_size, ==, 11);
+    pt_config_free(c);
+  }
+  /* The edges of the accepted range still parse. */
+  PtConfig *lo = pt_config_parse("font-size = 1\n");
+  g_assert_cmpint(lo->font_size, ==, 1);
+  pt_config_free(lo);
+  PtConfig *hi = pt_config_parse("font-size = 256\n");
+  g_assert_cmpint(hi->font_size, ==, 256);
+  pt_config_free(hi);
+}
+
 static void test_copy_equal(void) {
   PtConfig *a = pt_config_parse("theme = x\napp-ok = #00ff00\n");
   PtConfig *b = pt_config_copy(a);
@@ -96,6 +119,7 @@ int main(void) {
   test_defaults();
   test_parse();
   test_parse_bad_values();
+  test_parse_out_of_range_font_size();
   test_copy_equal();
   test_rewrite_preserves();
   test_rewrite_roundtrip();

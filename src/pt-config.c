@@ -91,7 +91,12 @@ static void on_kv(const char *key, const char *value, int lineno,
   } else if (g_strcmp0(key, "font-size") == 0) {
     char *end = NULL;
     long v = strtol(value, &end, 10);
-    if (end != value && *end == '\0') c->font_size = (int)v;
+    /* Stay permissive but sane: reject <= 0 and absurd values so the int
+     * narrowing below can never wrap. The UI clamps to its own tighter
+     * range later. */
+    if (end != value && *end == '\0' && v >= PT_CONFIG_FONT_SIZE_MIN &&
+        v <= PT_CONFIG_FONT_SIZE_MAX)
+      c->font_size = (int)v;
     else g_warning("pt: config line %d: bad font-size '%s'", lineno, value);
   } else if (g_strcmp0(key, "font-family") == 0 && value[0] != '\0') {
     g_free(c->font_family);

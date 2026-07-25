@@ -2,6 +2,10 @@
 #include <glib.h>
 
 #define PT_CONFIG_FONT_SIZE_DEFAULT 11
+/* Range the parser accepts for font-size; out-of-range values warn and keep
+ * the default. Callers may clamp to a tighter range for display. */
+#define PT_CONFIG_FONT_SIZE_MIN 1
+#define PT_CONFIG_FONT_SIZE_MAX 256
 #define PT_CONFIG_UI_FONT_SIZE_DEFAULT 12.5
 #define PT_CONFIG_FONT_FAMILY_DEFAULT "JetBrains Mono"
 #define PT_CONFIG_UI_FONT_FAMILY_DEFAULT "IBM Plex Sans"
