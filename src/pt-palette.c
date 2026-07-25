@@ -186,26 +186,37 @@ static void on_query_changed(GtkEditable *ed, gpointer user) {
   rebuild(p);
 }
 
+static void move_selection(PtPalette *p, int delta) {
+  if (p->n_shown == 0) return;
+  int next = p->selected + delta;
+  p->selected = CLAMP(next, 0, p->n_shown - 1);
+  apply_selection(p);
+}
+
 static gboolean on_key(GtkEventControllerKey *ctl, guint keyval, guint keycode,
                        GdkModifierType state, gpointer user) {
-  (void)ctl; (void)keycode; (void)state;
+  (void)ctl; (void)keycode;
   PtPalette *p = user;
   if (!p->open) return FALSE;
 
   switch (keyval) {
     case GDK_KEY_Down:
     case GDK_KEY_KP_Down:
-      if (p->n_shown > 0 && p->selected < p->n_shown - 1) {
-        p->selected++;
-        apply_selection(p);
-      }
+      move_selection(p, 1);
       return TRUE;
     case GDK_KEY_Up:
     case GDK_KEY_KP_Up:
-      if (p->selected > 0) {
-        p->selected--;
-        apply_selection(p);
-      }
+      move_selection(p, -1);
+      return TRUE;
+    /* Tab must never fall through: the query entry is the only focusable
+     * widget in the palette, so GTK would hand focus to the terminal
+     * underneath and every later keystroke would land there instead. */
+    case GDK_KEY_Tab:
+    case GDK_KEY_KP_Tab:
+      move_selection(p, (state & GDK_SHIFT_MASK) != 0 ? -1 : 1);
+      return TRUE;
+    case GDK_KEY_ISO_Left_Tab:
+      move_selection(p, -1);
       return TRUE;
     case GDK_KEY_Return:
     case GDK_KEY_KP_Enter:
@@ -276,6 +287,8 @@ gboolean pt_palette_is_open(PtPalette *p) {
 }
 
 /* ---------- GObject ---------- */
+/* No "closed" here on purpose: the window is on its way out too, and its
+ * handler would reach for panes that dispose has already dropped. */
 static void pt_palette_dispose(GObject *obj) {
   PtPalette *p = PT_PALETTE(obj);
   p->open = FALSE;
