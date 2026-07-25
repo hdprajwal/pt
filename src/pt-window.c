@@ -278,6 +278,7 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
         p->active_tab = (int)p->tabs->len - 1;
       if ((int)pi == w->active_project)
         show_active_grid(w);
+      refresh_sidebar(w);   /* shell count dropped; do not wait for the poll */
       mark_dirty(w);
       return;
     }
@@ -479,6 +480,8 @@ static void action_new_tab(PtWindow *w) {
   g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(p->path)));
   p->active_tab = (int)p->tabs->len - 1;
   show_active_grid(w);
+  /* the row's shell count just moved; without this it waits for the comm poll */
+  refresh_sidebar(w);
   mark_dirty(w);
 }
 
@@ -516,6 +519,10 @@ static void do_close_pane(PtWindow *w, PtPaneGrid *g) {
       p->active_tab = (int)p->tabs->len - 1;
     if ((int)pi == w->active_project) show_active_grid(w);
   }
+  /* Both branches move a sidebar number — the shell count when the tab went,
+   * the running count when only a pane did — so refresh either way rather than
+   * leaving the row stale until the next comm poll. */
+  refresh_sidebar(w);
   mark_dirty(w);
 }
 
