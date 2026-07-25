@@ -1,4 +1,7 @@
 #include "pt-window.h"
+
+#include <glib/gstdio.h>   /* g_mkdir_with_parents */
+
 #include "pt-terminal.h"
 #include "pt-sidebar.h"
 #include "pt-tab-strip.h"
@@ -6,6 +9,7 @@
 #include "pt-project-bar.h"
 #include "pt-pane-grid.h"
 #include "pt-palette.h"
+#include "pt-settings.h"
 #include "pt-session.h"
 #include "pt-git-parse.h"
 #include "pt-git-monitor.h"
@@ -37,6 +41,7 @@ struct _PtWindow {
   int active_project;
   GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
   GtkWidget *palette;   /* overlay child; hidden unless ⌃K is up */
+  GtkWidget *settings;  /* overlay child, same stack as the palette; ⌃, */
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
@@ -73,23 +78,31 @@ static void mark_dirty(PtWindow *w);   /* persistence hook; body in Task 12 */
 
 /* ---------- config ---------- */
 
-/* Parse the active theme and push colors+fonts everywhere. */
-static void apply_config(PtWindow *w) {
+/* Parse `cfg`'s theme and push colors+fonts everywhere. Deliberately takes the
+ * config rather than reading w->config: the settings dialog previews a
+ * candidate it still owns, and nothing about rendering it may put that
+ * candidate anywhere the debounced save could later find it. */
+static void render_config(const PtConfig *cfg) {
   char *tdir = pt_theme_dir();
-  char *text = pt_theme_load_text(tdir, w->config->theme);
+  char *text = pt_theme_load_text(tdir, cfg->theme);
   if (text == NULL) {
-    g_warning("pt: theme '%s' not found; using pt-dark", w->config->theme);
+    g_warning("pt: theme '%s' not found; using pt-dark", cfg->theme);
     text = g_strdup(pt_theme_builtin_pt_dark());
   }
   PtTheme *theme = pt_theme_parse(text);
   PtResolvedTheme rt;
-  pt_theme_resolve(theme, w->config->app_overrides, &rt);
-  pt_style_apply(&rt, w->config);
+  pt_theme_resolve(theme, cfg->app_overrides, &rt);
+  pt_style_apply(&rt, cfg);
   pt_terminal_set_theme(&rt);
-  pt_terminal_set_font(w->config->font_family, w->config->font_size);
+  pt_terminal_set_font(cfg->font_family, cfg->font_size);
   pt_theme_free(theme);
   g_free(text);
   g_free(tdir);
+}
+
+/* NULL config = disposed window, same guard convention as active_project(). */
+static void apply_config(PtWindow *w) {
+  if (w->config != NULL) render_config(w->config);
 }
 
 static gboolean config_save_now(gpointer user) {
@@ -914,6 +927,56 @@ static void on_palette_closed(PtPalette *pal, gpointer user) {
   focus_active_terminal(PT_WINDOW(user));
 }
 
+/* ---------- settings ---------- */
+/* Live preview: render the dialog's candidate and nothing else. w->config is
+ * never assigned here, so the debounced save (which only ever writes
+ * w->config) cannot pick the candidate up, and a cancel costs one re-render
+ * and no file write at all. The candidate stays owned by the dialog. */
+static void on_settings_changed(PtSettings *s, gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  if (w->config == NULL) return;   /* disposed window */
+  const PtConfig *cand = pt_settings_config(s);
+  if (cand != NULL) render_config(cand);
+}
+
+/* Enter: the candidate becomes the config, and only now does it hit disk. */
+static void on_settings_committed(PtSettings *s, gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  if (w->config == NULL) return;
+  const PtConfig *cand = pt_settings_config(s);
+  if (cand == NULL) return;
+  pt_config_free(w->config);
+  w->config = pt_config_copy(cand);
+  apply_config(w);
+  config_save_soon(w);
+}
+
+/* Esc/scrim: w->config was never touched during the preview, so re-applying it
+ * is the whole undo. */
+static void on_settings_reverted(PtSettings *s, gpointer user) {
+  (void)s;
+  PtWindow *w = PT_WINDOW(user);
+  if (w->config == NULL) return;
+  apply_config(w);
+}
+
+static void on_settings_closed(PtSettings *s, gpointer user) {
+  (void)s;
+  focus_active_terminal(PT_WINDOW(user));
+}
+
+static void action_open_settings(PtWindow *w) {
+  char *tdir = pt_theme_dir();
+  /* The themes dir is created lazily: without it the GFileMonitor watches
+   * nothing and a user's first theme file goes unnoticed. */
+  g_mkdir_with_parents(tdir, 0700);
+  char **names = pt_theme_list_names(tdir);
+  pt_settings_open(PT_SETTINGS(w->settings), w->config,
+                   (const char *const *)names);
+  g_strfreev(names);
+  g_free(tdir);
+}
+
 /* ---------- shortcuts ---------- */
 
 typedef struct { PtWindow *w; int arg; } ShortcutCtx;
@@ -925,9 +988,16 @@ typedef struct { PtWindow *w; int arg; } ShortcutCtx;
  * a sibling subtree, the palette would drop out of the key propagation path
  * entirely, and the overlay would sit there visible with Escape dead. So while
  * the palette is open every accelerator reports "not handled" and falls through
- * to it — ⌃K alone still acts, as a toggle. */
+ * to it — ⌃K alone still acts, as a toggle.
+ *
+ * The settings dialog is the same story with the same overlay stack and the
+ * same CAPTURE-phase problem, so it blocks here too; ⌃, is its toggle. */
 static gboolean palette_blocks(PtWindow *w) {
-  return w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette));
+  if (w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette)))
+    return TRUE;
+  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)))
+    return TRUE;
+  return FALSE;
 }
 
 static gboolean sc_project(GtkWidget *widget, GVariant *args, gpointer user) {
@@ -949,12 +1019,34 @@ static gboolean sc_new_tab(GtkWidget *wg, GVariant *a, gpointer u) {
   if (palette_blocks(PT_WINDOW(u))) return FALSE;
   action_new_tab(PT_WINDOW(u)); return TRUE;
 }
-/* The one accelerator that stays live: ⌃K opens the palette and ⌃K closes it. */
+/* Two accelerators stay live, each a toggle for its own overlay. Both test
+ * their own widget first — otherwise palette_blocks(), which now covers the
+ * other overlay too, would eat the toggle — and only then defer to whatever
+ * else is up. */
 static gboolean sc_palette(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
   PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) pt_palette_close(PT_PALETTE(w->palette));
-  else action_open_palette(w);
+  if (w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette))) {
+    pt_palette_close(PT_PALETTE(w->palette));
+    return TRUE;
+  }
+  if (palette_blocks(w)) return FALSE;   /* settings dialog is up */
+  action_open_palette(w);
+  return TRUE;
+}
+static gboolean sc_settings(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a;
+  PtWindow *w = PT_WINDOW(u);
+  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings))) {
+    pt_settings_close(PT_SETTINGS(w->settings));
+    /* pt_settings_close() emits "closed" only, so the live preview would stay
+     * on screen with nothing behind it. A ⌃, dismissal is a cancel, exactly
+     * like Escape, so put the real config back by hand. */
+    if (w->config != NULL) apply_config(w);
+    return TRUE;
+  }
+  if (palette_blocks(w)) return FALSE;   /* palette is up */
+  action_open_settings(w);
   return TRUE;
 }
 static gboolean sc_add_project(GtkWidget *wg, GVariant *a, gpointer u) {
@@ -1087,6 +1179,7 @@ static void install_shortcuts(PtWindow *w) {
     add_shortcut(ctl, accel, sc_tab, tc, g_free);
   }
   add_shortcut(ctl, "<Control>k", sc_palette, w, NULL);
+  add_shortcut(ctl, "<Control>comma", sc_settings, w, NULL);
   add_shortcut(ctl, "<Control>n", sc_add_project, w, NULL);
   add_shortcut(ctl, "<Control>t", sc_new_tab, w, NULL);
   add_shortcut(ctl, "<Control><Shift>t", sc_new_tab, w, NULL);
@@ -1295,12 +1388,24 @@ static void pt_window_init(PtWindow *w) {
   w->palette = pt_palette_new();
   gtk_widget_set_visible(w->palette, FALSE);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), w->palette);
+  /* Same treatment, same stack: the settings dialog has to be a sibling of the
+   * palette or its grab_focus would pull focus out of the overlay entirely. */
+  w->settings = pt_settings_new();
+  gtk_widget_set_visible(w->settings, FALSE);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), w->settings);
 
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(w), overlay);
 
   g_signal_connect(w->palette, "activated",
                    G_CALLBACK(on_palette_activated), w);
   g_signal_connect(w->palette, "closed", G_CALLBACK(on_palette_closed), w);
+  g_signal_connect(w->settings, "changed",
+                   G_CALLBACK(on_settings_changed), w);
+  g_signal_connect(w->settings, "committed",
+                   G_CALLBACK(on_settings_committed), w);
+  g_signal_connect(w->settings, "reverted",
+                   G_CALLBACK(on_settings_reverted), w);
+  g_signal_connect(w->settings, "closed", G_CALLBACK(on_settings_closed), w);
   g_signal_connect(w->sidebar, "project-selected",
                    G_CALLBACK(on_project_selected), w);
   g_signal_connect(w->sidebar, "project-add", G_CALLBACK(on_project_add), w);
