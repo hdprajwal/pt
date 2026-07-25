@@ -1,5 +1,4 @@
 #include "pt-tab-strip.h"
-#include "pt-accent.h"
 
 enum { SIG_SELECTED, SIG_NEW, SIG_CLOSE, N_SIGNALS };
 static guint signals[N_SIGNALS];
@@ -68,7 +67,6 @@ static gboolean same_as_rendered(PtTabStrip *s, const PtTabInfo *tabs, int n,
   for (int i = 0; i < n; i++) {
     const PtTabInfo *a = &s->last[i], *b = &tabs[i];
     if (a->running != b->running || a->last_exit != b->last_exit ||
-        a->unread != b->unread || a->accent != b->accent ||
         g_strcmp0(a->title, b->title) != 0)
       return FALSE;
   }
@@ -122,17 +120,6 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
     gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_MIDDLE);
     gtk_label_set_max_width_chars(GTK_LABEL(lbl), 24);
     gtk_box_append(GTK_BOX(row), lbl);
-
-    /* The active tab is being watched, so its unread count is meaningless. */
-    if (info->unread > 0 && !is_active) {
-      char txt[16];
-      g_snprintf(txt, sizeof(txt), "%d", info->unread);
-      GtkWidget *badge = gtk_label_new(txt);
-      gtk_widget_add_css_class(badge, "pt-badge");
-      pt_accent_set_class(badge, info->accent);
-      gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
-      gtk_box_append(GTK_BOX(row), badge);
-    }
 
     /* Hidden (opacity 0) until the tab is hovered — see .pt-tab-close in
      * style.css. It closes the whole tab, panes and all. */

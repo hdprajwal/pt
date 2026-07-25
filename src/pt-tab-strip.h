@@ -8,8 +8,6 @@ typedef struct {
   const char *title;
   gboolean running;   /* any pane has a foreground process */
   int last_exit;      /* -1 unknown/ok-so-far, 0 ok, >0 error */
-  int unread;         /* 0 → no badge */
-  int accent;         /* project accent for the badge */
 } PtTabInfo;
 
 #define PT_TYPE_TAB_STRIP (pt_tab_strip_get_type())

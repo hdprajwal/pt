@@ -139,17 +139,26 @@ static void rebuild_rows(PtSidebar *sb) {
       count = gtk_label_new(ctxt);
       gtk_widget_add_css_class(count, "pt-shell-count");
     }
-    gtk_widget_set_halign(count, GTK_ALIGN_END);
+    gtk_widget_set_halign(count, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(count, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(row), count);
 
     GtkWidget *rm = gtk_button_new_with_label("×");
     gtk_widget_add_css_class(rm, "flat");
     gtk_widget_add_css_class(rm, "pt-remove");
+    gtk_widget_set_halign(rm, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(rm, GTK_ALIGN_CENTER);
     g_object_set_data(G_OBJECT(rm), "pt-index", GINT_TO_POINTER(i));
     g_signal_connect(rm, "clicked", G_CALLBACK(on_remove_clicked), sb);
-    gtk_box_append(GTK_BOX(row), rm);
+
+    /* The × sits ON TOP of the count in one end-of-row slot: the count shows
+     * at rest, and on row hover the × fades in over it (the count fades out
+     * via .pt-project-row:hover — see style.css). No side-by-side gap. */
+    GtkWidget *slot = gtk_overlay_new();
+    gtk_overlay_set_child(GTK_OVERLAY(slot), count);
+    gtk_overlay_add_overlay(GTK_OVERLAY(slot), rm);
+    gtk_widget_set_halign(slot, GTK_ALIGN_END);
+    gtk_widget_set_valign(slot, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(row), slot);
 
     GtkGesture *click = gtk_gesture_click_new();
     g_signal_connect(click, "pressed", G_CALLBACK(on_row_clicked), sb);

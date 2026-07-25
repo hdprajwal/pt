@@ -13,8 +13,6 @@
 typedef struct {
   char *title;
   GtkWidget *grid;      /* PtPaneGrid, owned ref */
-  int unread;           /* output bursts seen while this tab was unwatched */
-  gint64 unread_stamp;  /* monotonic time of the last counted burst */
 } PtTabUI;
 
 typedef struct {
@@ -119,8 +117,6 @@ static void refresh_tabstrip(PtWindow *w) {
     infos[i].title = t->title;
     infos[i].running = pt_pane_grid_any_running(grid);
     infos[i].last_exit = foc != NULL ? pt_terminal_last_exit(foc) : -1;
-    infos[i].unread = t->unread;
-    infos[i].accent = p->accent;
   }
   pt_tab_strip_set_tabs(PT_TAB_STRIP(w->tabstrip), infos, n,
                         p != NULL ? p->active_tab : -1);
@@ -186,7 +182,6 @@ static void show_active_grid(PtWindow *w) {
     gtk_box_remove(GTK_BOX(w->content), child);
   PtTabUI *t = active_tab(active_project(w));
   if (t != NULL) {
-    t->unread = 0;
     gtk_box_append(GTK_BOX(w->content), t->grid);
     pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
   } else {
@@ -233,32 +228,6 @@ static void on_grid_focus(PtPaneGrid *g, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
   if (w->projects == NULL) return;
   refresh_statusline(w);
-}
-
-/* Output on an unwatched tab bumps its unread counter. Background projects
- * count too, so scan every project; only the tab the user is actually looking
- * at (active project AND active tab) is exempt. Bursts are coalesced to at
- * most one bump per 300ms so a chatty command reads as a few units of news
- * rather than hundreds. */
-static void on_grid_activity(PtPaneGrid *g, gpointer user) {
-  PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
-  for (guint pi = 0; pi < w->projects->len; pi++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-    gboolean p_active = ((int)pi == w->active_project);
-    for (guint ti = 0; ti < p->tabs->len; ti++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (t->grid != GTK_WIDGET(g)) continue;
-      if (p_active && (int)ti == p->active_tab) return;   /* being watched */
-      gint64 now = g_get_monotonic_time();
-      if (now - t->unread_stamp > 300 * G_TIME_SPAN_MILLISECOND) {
-        t->unread++;
-        t->unread_stamp = now;
-        if (p_active) refresh_tabstrip(w);
-      }
-      return;
-    }
-  }
 }
 
 /* Drop tab ti of project pi and everything under it — the array's free func
@@ -392,7 +361,6 @@ static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
   g_signal_connect(t->grid, "focus-changed", G_CALLBACK(on_grid_focus), w);
   g_signal_connect(t->grid, "command-changed", G_CALLBACK(on_grid_command), w);
   g_signal_connect(t->grid, "title-changed", G_CALLBACK(on_grid_title), w);
-  g_signal_connect(t->grid, "activity", G_CALLBACK(on_grid_activity), w);
   g_signal_connect(t->grid, "emptied", G_CALLBACK(on_grid_emptied), w);
   return t;
 }
