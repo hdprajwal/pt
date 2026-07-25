@@ -1,5 +1,5 @@
 #include "pt-project-bar.h"
-#include "pt-session.h"   /* PT_ACCENT_COUNT */
+#include "pt-accent.h"
 #include <string.h>
 
 struct _PtProjectBar {
@@ -12,21 +12,6 @@ struct _PtProjectBar {
 };
 
 G_DEFINE_FINAL_TYPE(PtProjectBar, pt_project_bar, GTK_TYPE_WIDGET)
-
-/* Exactly one pt-aN class survives on `wdg`. Accents outside 0..5 are folded
- * back into range rather than dropped, so a bad index still colours something.*/
-static void set_accent_class(GtkWidget *wdg, int accent) {
-  int a = accent % PT_ACCENT_COUNT;
-  if (a < 0) a += PT_ACCENT_COUNT;
-  for (int i = 0; i < PT_ACCENT_COUNT; i++) {
-    char c[8];
-    g_snprintf(c, sizeof(c), "pt-a%d", i);
-    gtk_widget_remove_css_class(wdg, c);
-  }
-  char c[8];
-  g_snprintf(c, sizeof(c), "pt-a%d", a);
-  gtk_widget_add_css_class(wdg, c);
-}
 
 /* Only a whole leading path component matches, so "/home/metoo" is left
  * alone. See the header for the contract. */
@@ -61,8 +46,8 @@ void pt_project_bar_update(PtProjectBar *b, const char *name, const char *path,
   }
   gtk_widget_set_visible(b->chip, has_branch);
 
-  set_accent_class(b->dot, accent);
-  set_accent_class(b->chip, accent);
+  pt_accent_set_class(b->dot, accent);
+  pt_accent_set_class(b->chip, accent);
 }
 
 static void pt_project_bar_dispose(GObject *obj) {

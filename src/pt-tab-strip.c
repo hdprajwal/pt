@@ -1,5 +1,5 @@
 #include "pt-tab-strip.h"
-#include "pt-session.h"   /* PT_ACCENT_COUNT */
+#include "pt-accent.h"
 
 enum { SIG_SELECTED, SIG_NEW, N_SIGNALS };
 static guint signals[N_SIGNALS];
@@ -31,14 +31,6 @@ static void clear_box(GtkWidget *box) {
   GtkWidget *child;
   while ((child = gtk_widget_get_first_child(box)) != NULL)
     gtk_box_remove(GTK_BOX(box), child);
-}
-
-static void add_accent_class(GtkWidget *wdg, int accent) {
-  int a = accent % PT_ACCENT_COUNT;
-  if (a < 0) a += PT_ACCENT_COUNT;
-  char cls[8];
-  g_snprintf(cls, sizeof(cls), "pt-a%d", a);
-  gtk_widget_add_css_class(wdg, cls);
 }
 
 static void free_snapshot(PtTabStrip *s) {
@@ -118,7 +110,7 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
       g_snprintf(txt, sizeof(txt), "%d", info->unread);
       GtkWidget *badge = gtk_label_new(txt);
       gtk_widget_add_css_class(badge, "pt-badge");
-      add_accent_class(badge, info->accent);
+      pt_accent_set_class(badge, info->accent);
       gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
       gtk_box_append(GTK_BOX(row), badge);
     }

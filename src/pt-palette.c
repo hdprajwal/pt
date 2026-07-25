@@ -1,6 +1,6 @@
 #include "pt-palette.h"
 #include "pt-fuzzy.h"
-#include "pt-session.h"   /* PT_ACCENT_COUNT */
+#include "pt-accent.h"
 
 /* The palette never scrolls: it shows the six best matches and nothing else. */
 #define PT_PALETTE_ROWS  6
@@ -39,14 +39,6 @@ static void free_items(PtPalette *p) {
 }
 
 /* ---------- helpers ---------- */
-static void add_accent_class(GtkWidget *wdg, int accent) {
-  int a = accent % PT_ACCENT_COUNT;
-  if (a < 0) a += PT_ACCENT_COUNT;
-  char cls[8];
-  g_snprintf(cls, sizeof(cls), "pt-a%d", a);
-  gtk_widget_add_css_class(wdg, cls);
-}
-
 static void clear_list(PtPalette *p) {
   GtkWidget *child;
   while ((child = gtk_widget_get_first_child(p->list)) != NULL)
@@ -117,7 +109,7 @@ static void rebuild(PtPalette *p) {
     GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_add_css_class(dot, "pt-dot");
     gtk_widget_add_css_class(dot, "pt-dot-6");
-    add_accent_class(dot, it->accent);
+    pt_accent_set_class(dot, it->accent);
     gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(row), dot);
 

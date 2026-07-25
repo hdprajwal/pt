@@ -1,5 +1,5 @@
 #include "pt-statusline.h"
-#include "pt-session.h"   /* PT_ACCENT_COUNT */
+#include "pt-accent.h"
 
 /* Track width in px. The fill is sized as a fraction of this, so the constant
  * has to agree with `.pt-progress-track { min-width }` in style.css. */
@@ -22,21 +22,6 @@ struct _PtStatusline {
 };
 
 G_DEFINE_FINAL_TYPE(PtStatusline, pt_statusline, GTK_TYPE_WIDGET)
-
-/* Exactly one pt-aN class survives on `wdg`. Accents outside 0..5 are folded
- * back into range rather than dropped, so a bad index still colours something.*/
-static void set_accent_class(GtkWidget *wdg, int accent) {
-  int a = accent % PT_ACCENT_COUNT;
-  if (a < 0) a += PT_ACCENT_COUNT;
-  for (int i = 0; i < PT_ACCENT_COUNT; i++) {
-    char c[8];
-    g_snprintf(c, sizeof(c), "pt-a%d", i);
-    gtk_widget_remove_css_class(wdg, c);
-  }
-  char c[8];
-  g_snprintf(c, sizeof(c), "pt-a%d", a);
-  gtk_widget_add_css_class(wdg, c);
-}
 
 /* Exactly one of run/ok/err survives on the state label. */
 static void set_state_class(GtkWidget *wdg, const char *keep) {
@@ -95,7 +80,7 @@ void pt_statusline_update(PtStatusline *sl, gboolean running, int last_exit,
      * its completed share of it. */
     gtk_widget_set_size_request(sl->fill, (int)(fraction * PT_PROGRESS_W),
                                 PT_PROGRESS_H);
-    set_accent_class(sl->fill, accent);
+    pt_accent_set_class(sl->fill, accent);
     gtk_label_set_text(GTK_LABEL(sl->task), task_txt);
   }
   g_free(task_txt);

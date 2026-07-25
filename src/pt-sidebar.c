@@ -1,6 +1,6 @@
 #include "pt-sidebar.h"
 #include "pt-fuzzy.h"
-#include "pt-session.h"   /* PT_ACCENT_COUNT */
+#include "pt-accent.h"
 
 /* The sidebar is a fixed-width rail, not a min-width one. */
 #define PT_SIDEBAR_WIDTH 266
@@ -34,14 +34,6 @@ static void clear_rows(PtSidebar *sb) {
 }
 
 /* ---------- helpers ---------- */
-static void add_accent_class(GtkWidget *wdg, int accent) {
-  int a = accent % PT_ACCENT_COUNT;
-  if (a < 0) a += PT_ACCENT_COUNT;
-  char cls[8];
-  g_snprintf(cls, sizeof(cls), "pt-a%d", a);
-  gtk_widget_add_css_class(wdg, cls);
-}
-
 static gboolean row_matches(PtSidebar *sb, int i) {
   if (sb->query == NULL || sb->query[0] == '\0') return TRUE;
   return pt_fuzzy_score(sb->query, sb->rows[i].name) != 0 ||
@@ -92,7 +84,7 @@ static void rebuild_rows(PtSidebar *sb) {
 
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(row, "pt-project-row");
-    add_accent_class(row, r->accent);
+    pt_accent_set_class(row, r->accent);
     if (i == sb->active) gtk_widget_add_css_class(row, "active");
     /* Original project index — the window never sees filtered positions. */
     g_object_set_data(G_OBJECT(row), "pt-index", GINT_TO_POINTER(i));
@@ -100,7 +92,7 @@ static void rebuild_rows(PtSidebar *sb) {
     GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_add_css_class(dot, "pt-dot");
     gtk_widget_add_css_class(dot, "pt-dot-7");
-    add_accent_class(dot, r->accent);
+    pt_accent_set_class(dot, r->accent);
     gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(row), dot);
 
@@ -141,7 +133,7 @@ static void rebuild_rows(PtSidebar *sb) {
       g_snprintf(ctxt, sizeof(ctxt), "%d ⏵", r->running);
       count = gtk_label_new(ctxt);
       gtk_widget_add_css_class(count, "pt-run-count");
-      add_accent_class(count, r->accent);
+      pt_accent_set_class(count, r->accent);
     } else {
       g_snprintf(ctxt, sizeof(ctxt), "%d", r->shell_count);
       count = gtk_label_new(ctxt);
