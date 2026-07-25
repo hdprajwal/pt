@@ -3,5 +3,7 @@
 #include "pt-config.h"
 #include "pt-theme.h"
 
-void pt_style_init(GdkDisplay *display);  /* idempotent; adds both providers */
+/* Idempotent. Adds the provider that carries the theme's CSS variables, at
+ * USER priority; the static stylesheet's provider is installed in main.c. */
+void pt_style_init(GdkDisplay *display);
 void pt_style_apply(const PtResolvedTheme *rt, const PtConfig *cfg);

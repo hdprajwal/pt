@@ -19,7 +19,9 @@ FetchContent_Declare(ghostty
 FetchContent_MakeAvailable(ghostty)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GTK  REQUIRED IMPORTED_TARGET gtk4)
+# 4.16 is the first release with CSS custom properties (:root / var()), which
+# src/style.css depends on entirely — older GTK parses it into an unstyled app.
+pkg_check_modules(GTK  REQUIRED IMPORTED_TARGET gtk4>=4.16)
 pkg_check_modules(ADW  REQUIRED IMPORTED_TARGET libadwaita-1)
 pkg_check_modules(JSON REQUIRED IMPORTED_TARGET json-glib-1.0)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0 gio-2.0)
