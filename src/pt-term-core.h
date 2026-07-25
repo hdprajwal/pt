@@ -12,8 +12,11 @@ typedef struct {
   void (*command)(PtTermCore *core, const char *comm, gpointer user);
 } PtTermCoreCallbacks;
 
-/* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh). */
+/* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh).
+ * env_pairs: NULL-terminated "KEY=VALUE" strings set in the child before
+ * exec (after TERM). NULL → none. Copied; caller keeps ownership. */
 PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
+                             const char *const *env_pairs,
                              guint16 cols, guint16 rows,
                              int cell_w, int cell_h, GError **error);
 void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
@@ -28,7 +31,7 @@ gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
                                const char *utf8, gsize utf8_len);
 void pt_term_core_scroll_delta(PtTermCore *c, int rows);
 
-/* ---- mouse selection (viewport-relative pixels; PT_PAD-padded) ---- */
+/* ---- mouse selection (viewport-relative pixels; PT_PAD_X/PT_PAD_Y-inset) ---- */
 void pt_term_core_selection_press(PtTermCore *c, double px, double py,
                                   guint64 time_ns);
 void pt_term_core_selection_drag(PtTermCore *c, double px, double py);
@@ -46,4 +49,9 @@ GhosttyRenderStateRowCells pt_term_core_row_cells(PtTermCore *c);
 char *pt_term_core_grid_text(PtTermCore *c);        /* visible grid, caller frees */
 gboolean pt_term_core_exited(PtTermCore *c, int *status);
 pid_t pt_term_core_shell_pid(PtTermCore *c);
+/* TRUE when a foreground process other than the shell owns the tty. */
+gboolean pt_term_core_running(PtTermCore *c);
+/* Last exit code reported via the "pt-exit:<n>;" title marker; -1 before
+ * the prompt snippet ever reports. */
+int pt_term_core_last_exit(PtTermCore *c);
 void pt_term_core_free(PtTermCore *c);

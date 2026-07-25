@@ -1,4 +1,5 @@
 #include "pt-term-core.h"
+#include "pt-status-parse.h"
 #include <glib-unix.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -24,12 +25,14 @@ struct PtTermCore {
   guint child_source;
   guint cmd_timer;
   char last_comm[64];
+  char **env_pairs;         /* extra "KEY=VALUE" set in the child, or NULL */
   guint16 cols, rows;
   int cell_w, cell_h;
 
   gboolean eof;
   gboolean child_exited;
   int exit_status;
+  int last_exit;            /* from the "pt-exit:<n>;" title marker; -1 = none */
 
   /* mouse selection (see pt_term_core_selection_*) */
   gboolean sel_active;      /* a selection is installed on the terminal */
@@ -44,8 +47,9 @@ struct PtTermCore {
   gpointer cbs_user;
 };
 
-/* Cell padding around the grid; mirrors PT_PAD in pt-terminal.c. */
-#define PT_CORE_PAD 4
+/* Inset around the grid; mirrors PT_PAD_X / PT_PAD_Y in pt-terminal.c. */
+#define PT_CORE_PAD_X 20
+#define PT_CORE_PAD_Y 18
 
 /* ---- pty write (non-blocking best effort, as in ghostling) ---- */
 static void pty_write_raw(int fd, const char *buf, size_t len) {
@@ -97,7 +101,6 @@ static GhosttyString effect_xtversion(GhosttyTerminal t, void *ud) {
 
 static void effect_title_changed(GhosttyTerminal t, void *ud) {
   PtTermCore *c = ud;
-  if (c->cbs.title == NULL) return;
   GhosttyString title = {0};
   if (ghostty_terminal_get(t, GHOSTTY_TERMINAL_DATA_TITLE, &title) !=
       GHOSTTY_SUCCESS)
@@ -106,7 +109,16 @@ static void effect_title_changed(GhosttyTerminal t, void *ud) {
   size_t len = title.len < sizeof(buf) - 1 ? title.len : sizeof(buf) - 1;
   if (len > 0) memcpy(buf, title.ptr, len);
   buf[len] = '\0';
-  c->cbs.title(c, buf, c->cbs_user);
+  /* The prompt snippet prefixes the title with the last command's status:
+   * "pt-exit:<code>;<real title>". Record it and hand on the real title.
+   * Done before the callback check so the state is tracked either way. */
+  int code = 0;
+  const char *rest = NULL;
+  if (pt_exit_marker_parse(buf, &code, &rest)) {
+    c->last_exit = code;
+    memmove(buf, rest, strlen(rest) + 1);
+  }
+  if (c->cbs.title != NULL) c->cbs.title(c, buf, c->cbs_user);
 }
 
 /* ---- foreground-command watcher ----
@@ -169,6 +181,7 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
 
 /* ---- spawn ---- */
 static int spawn_pty(const char *cwd, const char *const *argv,
+                     char *const *env_pairs,
                      guint16 cols, guint16 rows, int cell_w, int cell_h,
                      pid_t *child_out) {
   struct winsize ws = {
@@ -182,6 +195,10 @@ static int spawn_pty(const char *cwd, const char *const *argv,
   if (child == 0) {
     if (cwd != NULL) { if (chdir(cwd) != 0) { /* fall through to $HOME */ chdir(g_get_home_dir()); } }
     setenv("TERM", "xterm-256color", 1);
+    /* env_pairs was copied before the fork, so putenv'ing its strings keeps
+     * them alive for the (immediately following) exec without allocating. */
+    for (int i = 0; env_pairs != NULL && env_pairs[i] != NULL; i++)
+      putenv(env_pairs[i]);
     if (argv != NULL) {
       execvp(argv[0], (char *const *)argv);
     } else {
@@ -204,11 +221,14 @@ static int spawn_pty(const char *cwd, const char *const *argv,
 }
 
 PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
+                             const char *const *env_pairs,
                              guint16 cols, guint16 rows,
                              int cell_w, int cell_h, GError **error) {
   PtTermCore *c = g_new0(PtTermCore, 1);
   c->cols = cols; c->rows = rows; c->cell_w = cell_w; c->cell_h = cell_h;
   c->pty_fd = -1;
+  c->last_exit = -1;
+  if (env_pairs != NULL) c->env_pairs = g_strdupv((char **)env_pairs);
 
   GhosttyTerminalOptions opts = { .cols = cols, .rows = rows,
                                   .max_scrollback = 10000 };
@@ -226,7 +246,8 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   ghostty_terminal_resize(c->terminal, cols, rows,
                           (uint32_t)cell_w, (uint32_t)cell_h);
 
-  c->pty_fd = spawn_pty(cwd, argv, cols, rows, cell_w, cell_h, &c->child);
+  c->pty_fd = spawn_pty(cwd, argv, c->env_pairs, cols, rows, cell_w, cell_h,
+                        &c->child);
   if (c->pty_fd < 0) {
     g_set_error(error, g_quark_from_static_string("pt-term-core"), 2,
                 "forkpty failed: %s", g_strerror(errno));
@@ -334,8 +355,8 @@ void pt_term_core_scroll_delta(PtTermCore *c, int rows) {
 
 static void sel_pixel_to_cell(PtTermCore *c, double px, double py,
                               uint16_t *col, uint16_t *row) {
-  double cx = (px - PT_CORE_PAD) / (double)c->cell_w;
-  double cy = (py - PT_CORE_PAD) / (double)c->cell_h;
+  double cx = (px - PT_CORE_PAD_X) / (double)c->cell_w;
+  double cy = (py - PT_CORE_PAD_Y) / (double)c->cell_h;
   int ic = cx < 0 ? 0 : (int)cx;
   int ir = cy < 0 ? 0 : (int)cy;
   if (ic > c->cols - 1) ic = c->cols - 1;
@@ -550,6 +571,14 @@ gboolean pt_term_core_exited(PtTermCore *c, int *status) {
 
 pid_t pt_term_core_shell_pid(PtTermCore *c) { return c->child; }
 
+gboolean pt_term_core_running(PtTermCore *c) {
+  if (c->pty_fd < 0 || c->child_exited) return FALSE;
+  pid_t fg = tcgetpgrp(c->pty_fd);
+  return fg > 0 && fg != c->child;
+}
+
+int pt_term_core_last_exit(PtTermCore *c) { return c->last_exit; }
+
 void pt_term_core_free(PtTermCore *c) {
   if (c == NULL) return;
   if (c->fd_source != 0) g_source_remove(c->fd_source);
@@ -566,5 +595,6 @@ void pt_term_core_free(PtTermCore *c) {
   if (c->row_iter != NULL) ghostty_render_state_row_iterator_free(c->row_iter);
   if (c->render_state != NULL) ghostty_render_state_free(c->render_state);
   if (c->terminal != NULL) ghostty_terminal_free(c->terminal);
+  g_strfreev(c->env_pairs);
   g_free(c);
 }
