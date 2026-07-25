@@ -1,6 +1,7 @@
 #pragma once
 #include <gtk/gtk.h>
 #include "pt-term-core.h"
+#include "pt-theme.h"
 
 #define PT_TYPE_TERMINAL (pt_terminal_get_type())
 G_DECLARE_FINAL_TYPE(PtTerminal, pt_terminal, PT, TERMINAL, GtkWidget)
@@ -21,5 +22,10 @@ void pt_terminal_copy(PtTerminal *t);           /* copy selection to clipboard *
 const char *pt_terminal_last_command(PtTerminal *t);  /* fg comm; NULL before first poll */
 int pt_terminal_font_size(void);            /* shared across all terminals */
 void pt_terminal_set_font_size(int pts);    /* clamped; re-measures all panes */
+/* Module-level terminal colors; re-applies to every live terminal and
+ * redraws. Call before the first terminal exists and on every change. */
+void pt_terminal_set_theme(const PtResolvedTheme *rt);
+/* Family+size together; NULL family keeps the current one. */
+void pt_terminal_set_font(const char *family, int pts);
 /* GObject signals: "exited" (int), "title-changed" (const char*), "activity" (void),
  *                  "command-changed" (const char*) — fg program of the pane changed */

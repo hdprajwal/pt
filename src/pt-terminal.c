@@ -3,7 +3,7 @@
 #include "pt-session.h"      /* PT_FONT_SIZE_DEFAULT, shared with persistence */
 #include <math.h>
 
-#define PT_FONT_FAMILY "JetBrains Mono, monospace"
+#define PT_FONT_FAMILY_DEFAULT "JetBrains Mono"
 #define PT_FONT_SIZE_MIN 6
 #define PT_FONT_SIZE_MAX 32
 /* Inset between the pane edge and the character grid (mirrored by
@@ -15,6 +15,23 @@
  * widgets register here so a size change can re-measure them all. */
 static int font_size_pts = PT_FONT_SIZE_DEFAULT;
 static GSList *live_terminals;
+
+/* Terminal colors from the active theme. Defaults mirror pt-dark so a
+ * terminal created before the first set_theme call renders correctly. */
+static PtColor th_bg  = {0x0b, 0x0d, 0x10, 1.0};
+static PtColor th_fg  = {0xd6, 0xda, 0xe0, 1.0};
+static PtColor th_sel = {0x26, 0x4f, 0x38, 1.0};
+static PtColor th_ring = {0x2f, 0x4f, 0x3a, 1.0};
+static PtColor th_pal[16] = {
+  [1]  = {0xf2, 0x77, 0x7a, 1.0}, [2]  = {0x6e, 0xe7, 0xa0, 1.0},
+  [3]  = {0xf2, 0xb2, 0x5c, 1.0}, [9]  = {0xf2, 0x77, 0x7a, 1.0},
+  [10] = {0x6e, 0xe7, 0xa0, 1.0}, [11] = {0xf2, 0xb2, 0x5c, 1.0},
+};
+static gboolean th_pal_set[16] = {
+  [1] = TRUE, [2] = TRUE, [3] = TRUE,
+  [9] = TRUE, [10] = TRUE, [11] = TRUE,
+};
+static char *font_family;   /* NULL -> PT_FONT_FAMILY_DEFAULT */
 
 /* Env applied by pt_terminal_new when the caller has no project context
  * (pane grids build terminals straight from split-tree leaves). */
@@ -83,21 +100,26 @@ static void measure_font(PtTerminal *t) {
   if (t->cell_h < 1) t->cell_h = 16;
 }
 
-/* Design palette: the ANSI slots pt overrides so status output matches the
- * app chrome. Everything else keeps libghostty's built-in defaults. */
+/* Theme colors pushed into libghostty: the ANSI slots the theme pins (so
+ * status output matches the app chrome) plus the default bg/fg. Slots the
+ * theme leaves alone keep libghostty's built-in defaults. */
 static void apply_palette(PtTermCore *core) {
   GhosttyTerminal term = pt_term_core_terminal(core);
   GhosttyColorRgb palette[256];
   if (ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
                            palette) != GHOSTTY_SUCCESS)
     return;
-  const GhosttyColorRgb red = { 0xf2, 0x77, 0x7a };
-  const GhosttyColorRgb green = { 0x6e, 0xe7, 0xa0 };
-  const GhosttyColorRgb yellow = { 0xf2, 0xb2, 0x5c };
-  palette[1] = palette[9] = red;
-  palette[2] = palette[10] = green;
-  palette[3] = palette[11] = yellow;
+  for (int i = 0; i < 16; i++)
+    if (th_pal_set[i])
+      palette[i] = (GhosttyColorRgb){ th_pal[i].r, th_pal[i].g, th_pal[i].b };
   ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, palette);
+
+  /* Without these the render state reports libghostty's unset defaults
+   * (black on white) and the theme's bg/fg would never reach the screen. */
+  GhosttyColorRgb bg = { th_bg.r, th_bg.g, th_bg.b };
+  GhosttyColorRgb fg = { th_fg.r, th_fg.g, th_fg.b };
+  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg);
+  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg);
 }
 
 static void ensure_core(PtTerminal *t) {
@@ -144,7 +166,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   ensure_core(t);
   if (t->core == NULL) {
     gtk_snapshot_append_color(snapshot,
-        &(GdkRGBA){0x0b / 255.0f, 0x0d / 255.0f, 0x10 / 255.0f, 1},
+        &(GdkRGBA){th_bg.r / 255.0f, th_bg.g / 255.0f, th_bg.b / 255.0f, 1},
         &GRAPHENE_RECT_INIT(0, 0, w, h));
     return;
   }
@@ -153,8 +175,8 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
 
   /* Default/effective colors: libghostty-vt exposes these as individual
    * render-state queries (no aggregate colors struct in this ABI). */
-  GhosttyColorRgb bg_default = { 0x0b, 0x0d, 0x10 };
-  GhosttyColorRgb fg_default = { 0xd6, 0xda, 0xe0 };
+  GhosttyColorRgb bg_default = { th_bg.r, th_bg.g, th_bg.b };
+  GhosttyColorRgb fg_default = { th_fg.r, th_fg.g, th_fg.b };
   ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_BACKGROUND,
                            &bg_default);
   ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
@@ -193,8 +215,9 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
       bool selected = false;
       ghostty_render_state_row_cells_get(cells,
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED, &selected);
-      /* selection highlight (#264f38) takes over the cell background */
-      GdkRGBA sel_rgba = { 0x26 / 255.0f, 0x4f / 255.0f, 0x38 / 255.0f, 1.0f };
+      /* the theme's selection background takes over the cell background */
+      GdkRGBA sel_rgba = { th_sel.r / 255.0f, th_sel.g / 255.0f,
+                           th_sel.b / 255.0f, 1.0f };
 
       GhosttyColorRgb fg = fg_default;
       GhosttyColorRgb bg = bg_default;
@@ -283,10 +306,12 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
                             t->cell_w, t->cell_h));
   }
 
-  /* focused-pane ring: an inset 1px dark-green border drawn on top of the
-   * content (the CSS box-shadow would be painted over by our bg fill). */
+  /* focused-pane ring: an inset 1px border in the theme's focus-ring color,
+   * drawn on top of the content (the CSS box-shadow would be painted over
+   * by our bg fill). */
   if (t->focused) {
-    GdkRGBA ring = { 0x2f / 255.0f, 0x4f / 255.0f, 0x3a / 255.0f, 1.0f };
+    GdkRGBA ring = { th_ring.r / 255.0f, th_ring.g / 255.0f,
+                     th_ring.b / 255.0f, 1.0f };
     GskRoundedRect rr;
     gsk_rounded_rect_init_from_rect(&rr, &GRAPHENE_RECT_INIT(0, 0, w, h), 0);
     gtk_snapshot_append_border(snapshot, &rr,
@@ -470,15 +495,47 @@ int pt_terminal_last_exit(PtTerminal *t) {
   return t->core != NULL ? pt_term_core_last_exit(t->core) : -1;
 }
 
+/* ---- theme ---- */
+void pt_terminal_set_theme(const PtResolvedTheme *rt) {
+  th_bg  = rt->term.background;
+  th_fg  = rt->term.foreground;
+  th_sel = rt->term.selection_bg;
+  th_ring = rt->tokens[PT_TOK_FOCUS_RING];
+  for (int i = 0; i < 16; i++) {
+    th_pal[i] = rt->term.palette[i];
+    th_pal_set[i] = rt->term.palette_set[i];
+  }
+  for (GSList *l = live_terminals; l != NULL; l = l->next) {
+    PtTerminal *t = l->data;
+    if (t->core != NULL) apply_palette(t->core);
+    gtk_widget_queue_draw(GTK_WIDGET(t));
+  }
+}
+
 /* ---- global font zoom ---- */
 int pt_terminal_font_size(void) { return font_size_pts; }
 
-void pt_terminal_set_font_size(int pts) {
+void pt_terminal_set_font_size(int pts) { pt_terminal_set_font(NULL, pts); }
+
+void pt_terminal_set_font(const char *family, int pts) {
   pts = CLAMP(pts, PT_FONT_SIZE_MIN, PT_FONT_SIZE_MAX);
-  if (pts == font_size_pts) return;
+  gboolean family_changed =
+      family != NULL &&
+      g_strcmp0(family, font_family != NULL ? font_family : "") != 0;
+  if (!family_changed && pts == font_size_pts) return;
+  if (family_changed) {
+    g_free(font_family);
+    font_family = g_strdup(family);
+  }
   font_size_pts = pts;
   for (GSList *l = live_terminals; l != NULL; l = l->next) {
     PtTerminal *t = l->data;
+    if (family_changed) {
+      pango_font_description_free(t->font_desc);
+      char *spec = g_strdup_printf("%s, monospace", font_family);
+      t->font_desc = pango_font_description_from_string(spec);
+      g_free(spec);
+    }
     pango_font_description_set_size(t->font_desc, pts * PANGO_SCALE);
     pango_layout_set_font_description(t->layout, t->font_desc);
     measure_font(t);
@@ -523,7 +580,10 @@ static void pt_terminal_init(PtTerminal *t) {
   gtk_widget_set_focusable(GTK_WIDGET(t), TRUE);
   gtk_widget_set_hexpand(GTK_WIDGET(t), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(t), TRUE);
-  t->font_desc = pango_font_description_from_string(PT_FONT_FAMILY);
+  char *spec = g_strdup_printf("%s, monospace",
+      font_family != NULL ? font_family : PT_FONT_FAMILY_DEFAULT);
+  t->font_desc = pango_font_description_from_string(spec);
+  g_free(spec);
   pango_font_description_set_size(t->font_desc, font_size_pts * PANGO_SCALE);
   t->layout = gtk_widget_create_pango_layout(GTK_WIDGET(t), NULL);
   pango_layout_set_font_description(t->layout, t->font_desc);
