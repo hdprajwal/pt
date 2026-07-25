@@ -220,6 +220,29 @@ button.pt-tab-new:hover { background-color: var(--pt-hover); color: var(--pt-tex
 }
 .pt-palette-shortcut { font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-dim); }
 
+/* ---- settings dialog (reuses .pt-palette-scrim) ---- */
+.pt-settings {
+  background-color: var(--pt-panel);
+  border: 1px solid var(--pt-border-strong);
+  border-radius: 3px;
+}
+.pt-settings-title {
+  color: var(--pt-text-muted); font-family: var(--pt-font-sans);
+  font-weight: 600; font-size: var(--pt-fs-md);
+  padding: 10px 12px; border-bottom: 1px solid var(--pt-border);
+}
+.pt-settings-row { min-height: 34px; padding: 0 12px; }
+.pt-settings-row.selected { background-color: var(--pt-active); }
+.pt-settings-name { font-family: var(--pt-font-sans); font-size: var(--pt-fs-base); color: var(--pt-text); }
+.pt-settings-value { font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm); color: var(--pt-text-muted); }
+.pt-settings-row.selected .pt-settings-value { color: var(--pt-text); }
+.pt-settings-arrow { font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm); color: var(--pt-text-dim); }
+.pt-settings-hint {
+  color: var(--pt-text-ghost); font-family: var(--pt-font-mono);
+  font-size: var(--pt-fs-xs); padding: 8px 12px;
+  border-top: 1px solid var(--pt-border);
+}
+
 /* ---- empty state ---- */
 .pt-empty { color: var(--pt-text-faint); font-family: var(--pt-font-mono); font-size: var(--pt-fs-md); }
 .pt-empty-hint { color: var(--pt-text-ghost); font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm); }
