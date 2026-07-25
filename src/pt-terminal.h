@@ -11,5 +11,7 @@ char *pt_terminal_current_cwd(PtTerminal *t);  /* /proc/<pid>/cwd, caller frees 
 void pt_terminal_paste(PtTerminal *t);          /* async clipboard paste */
 void pt_terminal_copy(PtTerminal *t);           /* copy selection to clipboard */
 const char *pt_terminal_last_command(PtTerminal *t);  /* fg comm; NULL before first poll */
+int pt_terminal_font_size(void);            /* shared across all terminals */
+void pt_terminal_set_font_size(int pts);    /* clamped; re-measures all panes */
 /* GObject signals: "exited" (int), "title-changed" (const char*), "activity" (void),
  *                  "command-changed" (const char*) — fg program of the pane changed */

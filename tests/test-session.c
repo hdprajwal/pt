@@ -11,6 +11,7 @@ static PtSessionState *sample_state(void) {
   p->active_tab = 1;
   g_ptr_array_add(s->projects, p);
   s->active_project = 0;
+  s->font_size = 14;
   return s;
 }
 
@@ -29,8 +30,16 @@ static void test_roundtrip(void) {
   PtTabState *t0 = g_ptr_array_index(p->tabs, 0);
   g_assert_cmpstr(t0->title, ==, "build");
   g_assert_cmpint(pt_split_count_leaves(t0->tree), ==, 2);
+  g_assert_cmpint(back->font_size, ==, 14);
   pt_session_state_free(s);
   pt_session_state_free(back);
+
+  /* Older state files without the field fall back to the default size. */
+  PtSessionState *legacy = pt_session_from_json_text(
+      "{\"version\":1,\"active_project\":0,\"projects\":[]}");
+  g_assert_nonnull(legacy);
+  g_assert_cmpint(legacy->font_size, ==, 11);
+  pt_session_state_free(legacy);
 }
 
 static void test_save_load(void) {

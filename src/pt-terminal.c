@@ -2,8 +2,16 @@
 #include "pt-keymap.h"
 #include <math.h>
 
-#define PT_FONT "JetBrains Mono, monospace 11"
+#define PT_FONT_FAMILY "JetBrains Mono, monospace"
+#define PT_FONT_SIZE_DEFAULT 11
+#define PT_FONT_SIZE_MIN 6
+#define PT_FONT_SIZE_MAX 32
 #define PT_PAD 4
+
+/* One font size shared by every terminal (kero-less global zoom). Live
+ * widgets register here so a size change can re-measure them all. */
+static int font_size_pts = PT_FONT_SIZE_DEFAULT;
+static GSList *live_terminals;
 
 enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_ACTIVITY, SIG_COMMAND_CHANGED,
        N_SIGNALS };
@@ -424,9 +432,29 @@ PtTermCore *pt_terminal_core(PtTerminal *t) { return t->core; }
 
 const char *pt_terminal_last_command(PtTerminal *t) { return t->last_command; }
 
+/* ---- global font zoom ---- */
+int pt_terminal_font_size(void) { return font_size_pts; }
+
+void pt_terminal_set_font_size(int pts) {
+  pts = CLAMP(pts, PT_FONT_SIZE_MIN, PT_FONT_SIZE_MAX);
+  if (pts == font_size_pts) return;
+  font_size_pts = pts;
+  for (GSList *l = live_terminals; l != NULL; l = l->next) {
+    PtTerminal *t = l->data;
+    pango_font_description_set_size(t->font_desc, pts * PANGO_SCALE);
+    pango_layout_set_font_description(t->layout, t->font_desc);
+    measure_font(t);
+    /* size_allocate re-derives cols/rows from the new cell metrics and
+     * resizes the PTY + vt (reflow). */
+    gtk_widget_queue_resize(GTK_WIDGET(t));
+    gtk_widget_queue_draw(GTK_WIDGET(t));
+  }
+}
+
 /* ---- boilerplate ---- */
 static void pt_terminal_dispose(GObject *obj) {
   PtTerminal *t = PT_TERMINAL(obj);
+  live_terminals = g_slist_remove(live_terminals, t);
   g_clear_pointer(&t->core, pt_term_core_free);
   g_clear_object(&t->layout);
   g_clear_pointer(&t->font_desc, pango_font_description_free);
@@ -456,9 +484,11 @@ static void pt_terminal_init(PtTerminal *t) {
   gtk_widget_set_focusable(GTK_WIDGET(t), TRUE);
   gtk_widget_set_hexpand(GTK_WIDGET(t), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(t), TRUE);
-  t->font_desc = pango_font_description_from_string(PT_FONT);
+  t->font_desc = pango_font_description_from_string(PT_FONT_FAMILY);
+  pango_font_description_set_size(t->font_desc, font_size_pts * PANGO_SCALE);
   t->layout = gtk_widget_create_pango_layout(GTK_WIDGET(t), NULL);
   pango_layout_set_font_description(t->layout, t->font_desc);
+  live_terminals = g_slist_prepend(live_terminals, t);
 
   GtkEventController *key = gtk_event_controller_key_new();
   g_signal_connect(key, "key-pressed", G_CALLBACK(on_key_pressed), t);

@@ -1,4 +1,5 @@
 #include "pt-window.h"
+#include "pt-terminal.h"
 #include "pt-sidebar.h"
 #include "pt-tab-strip.h"
 #include "pt-statusline.h"
@@ -439,6 +440,24 @@ static gboolean sc_paste(GtkWidget *wg, GVariant *a, gpointer u) {
 static gboolean sc_copy(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a; action_copy(PT_WINDOW(u)); return TRUE;
 }
+static gboolean sc_zoom_in(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a;
+  pt_terminal_set_font_size(pt_terminal_font_size() + 1);
+  mark_dirty(PT_WINDOW(u));
+  return TRUE;
+}
+static gboolean sc_zoom_out(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a;
+  pt_terminal_set_font_size(pt_terminal_font_size() - 1);
+  mark_dirty(PT_WINDOW(u));
+  return TRUE;
+}
+static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a;
+  pt_terminal_set_font_size(11);
+  mark_dirty(PT_WINDOW(u));
+  return TRUE;
+}
 
 static void add_shortcut(GtkShortcutController *ctl, const char *accel,
                          GtkShortcutFunc fn, gpointer data,
@@ -486,6 +505,16 @@ static void install_shortcuts(PtWindow *w) {
   add_shortcut(ctl, "<Control><Shift>o", sc_focus_next, w, NULL);
   add_shortcut(ctl, "<Control><Shift>v", sc_paste, w, NULL);
   add_shortcut(ctl, "<Control><Shift>c", sc_copy, w, NULL);
+  /* Font zoom: cover =, shifted + (both plain and explicit-shift forms),
+   * and the keypad. */
+  add_shortcut(ctl, "<Control>equal", sc_zoom_in, w, NULL);
+  add_shortcut(ctl, "<Control>plus", sc_zoom_in, w, NULL);
+  add_shortcut(ctl, "<Control><Shift>plus", sc_zoom_in, w, NULL);
+  add_shortcut(ctl, "<Control>KP_Add", sc_zoom_in, w, NULL);
+  add_shortcut(ctl, "<Control>minus", sc_zoom_out, w, NULL);
+  add_shortcut(ctl, "<Control>underscore", sc_zoom_out, w, NULL);
+  add_shortcut(ctl, "<Control>KP_Subtract", sc_zoom_out, w, NULL);
+  add_shortcut(ctl, "<Control>0", sc_zoom_reset, w, NULL);
   gtk_widget_add_controller(GTK_WIDGET(w), GTK_EVENT_CONTROLLER(ctl));
 }
 
@@ -493,6 +522,7 @@ static void install_shortcuts(PtWindow *w) {
 static PtSessionState *capture_state(PtWindow *w) {
   PtSessionState *s = pt_session_state_new();
   s->active_project = w->active_project;
+  s->font_size = pt_terminal_font_size();
   for (guint i = 0; i < w->projects->len; i++) {
     PtProjectUI *p = g_ptr_array_index(w->projects, i);
     PtProjectState *ps = pt_project_state_new(p->name, p->path);
@@ -537,6 +567,7 @@ static void restore_state(PtWindow *w) {
   PtSessionState *s = pt_session_load(path);
   g_free(path);
   if (s == NULL) return;
+  pt_terminal_set_font_size(s->font_size);   /* before any terminal exists */
   for (guint i = 0; i < s->projects->len; i++) {
     PtProjectState *ps = g_ptr_array_index(s->projects, i);
     PtProjectUI *p = g_new0(PtProjectUI, 1);

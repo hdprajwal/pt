@@ -12,6 +12,7 @@ typedef struct {
 typedef struct {
   GPtrArray *projects;    /* PtProjectState*, element free fn set */
   int active_project;
+  int font_size;          /* terminal font size in points */
 } PtSessionState;
 
 PtSessionState *pt_session_state_new(void);
