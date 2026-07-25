@@ -20,6 +20,7 @@ static GSList *live_terminals;
  * terminal created before the first set_theme call renders correctly. */
 static PtColor th_bg  = {0x0b, 0x0d, 0x10, 1.0};
 static PtColor th_fg  = {0xd6, 0xda, 0xe0, 1.0};
+static PtColor th_cursor = {0xd6, 0xda, 0xe0, 1.0};
 static PtColor th_sel = {0x26, 0x4f, 0x38, 1.0};
 static PtColor th_ring = {0x2f, 0x4f, 0x3a, 1.0};
 static PtColor th_pal[16] = {
@@ -105,6 +106,25 @@ static void measure_font(PtTerminal *t) {
  * theme leaves alone keep libghostty's built-in defaults. */
 static void apply_palette(PtTermCore *core) {
   GhosttyTerminal term = pt_term_core_terminal(core);
+
+  /* Without these the render state reports libghostty's unset defaults
+   * (black on white) and the theme's bg/fg would never reach the screen.
+   * Set first: they must land even if the palette read below fails. */
+  GhosttyColorRgb bg = { th_bg.r, th_bg.g, th_bg.b };
+  GhosttyColorRgb fg = { th_fg.r, th_fg.g, th_fg.b };
+  GhosttyColorRgb cursor = { th_cursor.r, th_cursor.g, th_cursor.b };
+  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg);
+  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg);
+  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, &cursor);
+
+  /* Reset to libghostty's stock palette before reading it: on a theme
+   * switch DATA_COLOR_PALETTE_DEFAULT would otherwise still report the
+   * *previous* theme's pins (our own last OPT_COLOR_PALETTE write became
+   * the new default), so slots the incoming theme leaves alone would keep
+   * the old theme's colors and diverge from a freshly created pane.
+   * set(COLOR_PALETTE, NULL) restores the stock defaults while preserving
+   * any OSC 4 overrides the program set, which the dirty mask tracks. */
+  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, NULL);
   GhosttyColorRgb palette[256];
   if (ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
                            palette) != GHOSTTY_SUCCESS)
@@ -113,13 +133,6 @@ static void apply_palette(PtTermCore *core) {
     if (th_pal_set[i])
       palette[i] = (GhosttyColorRgb){ th_pal[i].r, th_pal[i].g, th_pal[i].b };
   ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, palette);
-
-  /* Without these the render state reports libghostty's unset defaults
-   * (black on white) and the theme's bg/fg would never reach the screen. */
-  GhosttyColorRgb bg = { th_bg.r, th_bg.g, th_bg.b };
-  GhosttyColorRgb fg = { th_fg.r, th_fg.g, th_fg.b };
-  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg);
-  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg);
 }
 
 static void ensure_core(PtTerminal *t) {
@@ -217,7 +230,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED, &selected);
       /* the theme's selection background takes over the cell background */
       GdkRGBA sel_rgba = { th_sel.r / 255.0f, th_sel.g / 255.0f,
-                           th_sel.b / 255.0f, 1.0f };
+                           th_sel.b / 255.0f, (float)th_sel.a };
 
       GhosttyColorRgb fg = fg_default;
       GhosttyColorRgb bg = bg_default;
@@ -311,7 +324,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
    * by our bg fill). */
   if (t->focused) {
     GdkRGBA ring = { th_ring.r / 255.0f, th_ring.g / 255.0f,
-                     th_ring.b / 255.0f, 1.0f };
+                     th_ring.b / 255.0f, (float)th_ring.a };
     GskRoundedRect rr;
     gsk_rounded_rect_init_from_rect(&rr, &GRAPHENE_RECT_INIT(0, 0, w, h), 0);
     gtk_snapshot_append_border(snapshot, &rr,
@@ -499,6 +512,7 @@ int pt_terminal_last_exit(PtTerminal *t) {
 void pt_terminal_set_theme(const PtResolvedTheme *rt) {
   th_bg  = rt->term.background;
   th_fg  = rt->term.foreground;
+  th_cursor = rt->term.cursor;
   th_sel = rt->term.selection_bg;
   th_ring = rt->tokens[PT_TOK_FOCUS_RING];
   for (int i = 0; i < 16; i++) {
