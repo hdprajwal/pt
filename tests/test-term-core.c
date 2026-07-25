@@ -1,4 +1,5 @@
 #include "pt-term-core.h"
+#include <stdio.h>
 #include <string.h>
 
 typedef struct { GMainLoop *loop; PtTermCore *core;
@@ -219,17 +220,74 @@ static void test_foreground_command(void) {
 }
 
 /* ---- run state ---- */
-static void test_running_state(void) {
-  /* The spawned program is itself the pty's foreground process-group leader
-     (forkpty/login_tty), so it counts as "the shell", not a foreground job. */
+
+/* Field 8 of /proc/<pid>/stat is tpgid: the foreground process group of the
+   process's controlling terminal. Reading it from the child gives the tests an
+   oracle for the pty's fg pgrp that is independent of pt_term_core_running, so
+   the assertions below cannot pass by accident (e.g. an inverted comparison,
+   or a not-yet-settled tty where tcgetpgrp still returns 0). */
+static pid_t child_tpgid(pid_t pid) {
+  char path[64];
+  g_snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+  char *buf = NULL;
+  if (!g_file_get_contents(path, &buf, NULL, NULL)) return -1;
+  /* comm (field 2) may contain spaces and parens; scan after the LAST ')'. */
+  char *close = strrchr(buf, ')');
+  int ppid, pgrp, sess, tty, tpgid = -1;
+  if (close != NULL)
+    sscanf(close + 2, "%*c %d %d %d %d %d",
+           &ppid, &pgrp, &sess, &tty, &tpgid);
+  g_free(buf);
+  return (pid_t)tpgid;
+}
+
+/* Pump the main loop until pred() holds or the deadline passes. */
+static gboolean wait_until(gboolean (*pred)(PtTermCore *), PtTermCore *core) {
+  gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+  while (g_get_monotonic_time() < deadline) {
+    g_main_context_iteration(NULL, FALSE);
+    if (pred(core)) return TRUE;
+    g_usleep(5000);
+  }
+  return pred(core);
+}
+
+static gboolean fg_is_child(PtTermCore *c) {
+  return child_tpgid(pt_term_core_shell_pid(c)) == pt_term_core_shell_pid(c);
+}
+
+static gboolean fg_is_not_child(PtTermCore *c) {
+  pid_t tp = child_tpgid(pt_term_core_shell_pid(c));
+  return tp > 0 && tp != pt_term_core_shell_pid(c);
+}
+
+static void test_running_state_idle(void) {
+  /* Negative case: the spawned program is itself the pty's foreground
+     process-group leader (forkpty/login_tty), so nothing is "running" on top
+     of it. Wait for the tty to actually settle on the child first, otherwise
+     the assertion would only exercise the `fg > 0` guard. */
   const char *argv[] = {"/bin/cat", NULL};
   GError *err = NULL;
   PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
   g_assert_no_error(err);
   g_assert_nonnull(core);
+  g_assert_true(wait_until(fg_is_child, core));       /* tty settled on cat */
   g_assert_false(pt_term_core_running(core));
   /* No prompt snippet has reported an exit code yet. */
   g_assert_cmpint(pt_term_core_last_exit(core), ==, -1);
+  pt_term_core_free(core);
+}
+
+static void test_running_state_foreground_job(void) {
+  /* Positive case: -m turns on job control, so the shell puts `sleep` in its
+     own process group and hands it the tty. fg pgrp != shell pid → running. */
+  const char *argv[] = {"/bin/sh", "-mc", "sleep 30; true", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_nonnull(core);
+  g_assert_true(wait_until(fg_is_not_child, core));   /* sleep owns the tty */
+  g_assert_true(pt_term_core_running(core));
   pt_term_core_free(core);
 }
 
@@ -303,7 +361,9 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/long-grapheme", test_long_grapheme_cluster);
   g_test_add_func("/termcore/selection", test_selection);
   g_test_add_func("/termcore/foreground-command", test_foreground_command);
-  g_test_add_func("/termcore/running-state", test_running_state);
+  g_test_add_func("/termcore/running-state-idle", test_running_state_idle);
+  g_test_add_func("/termcore/running-state-job",
+                  test_running_state_foreground_job);
   g_test_add_func("/termcore/spawn-env", test_spawn_env);
   g_test_add_func("/termcore/exit-marker", test_exit_marker_from_title);
   return g_test_run();
