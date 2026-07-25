@@ -711,65 +711,107 @@ static void on_palette_closed(PtPalette *pal, gpointer user) {
 
 typedef struct { PtWindow *w; int arg; } ShortcutCtx;
 
+/* The shortcut controller below runs in the CAPTURE phase on the window, so it
+ * sees every accelerator before the palette's own key controller does. Letting
+ * one through while the palette is up would strand it: almost all of these
+ * actions end in pt_pane_grid_focus_terminal, focus would land on a terminal in
+ * a sibling subtree, the palette would drop out of the key propagation path
+ * entirely, and the overlay would sit there visible with Escape dead. So while
+ * the palette is open every accelerator reports "not handled" and falls through
+ * to it — ⌃K alone still acts, as a toggle. */
+static gboolean palette_blocks(PtWindow *w) {
+  return w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette));
+}
+
 static gboolean sc_project(GtkWidget *widget, GVariant *args, gpointer user) {
   (void)widget; (void)args;
   ShortcutCtx *c = user;
+  if (palette_blocks(c->w)) return FALSE;
   action_switch_project(c->w, c->arg);
   return TRUE;
 }
 static gboolean sc_tab(GtkWidget *widget, GVariant *args, gpointer user) {
   (void)widget; (void)args;
   ShortcutCtx *c = user;
+  if (palette_blocks(c->w)) return FALSE;
   action_switch_tab(c->w, c->arg);
   return TRUE;
 }
 static gboolean sc_new_tab(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_new_tab(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_new_tab(PT_WINDOW(u)); return TRUE;
 }
+/* The one accelerator that stays live: ⌃K opens the palette and ⌃K closes it. */
 static gboolean sc_palette(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_open_palette(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  PtWindow *w = PT_WINDOW(u);
+  if (palette_blocks(w)) pt_palette_close(PT_PALETTE(w->palette));
+  else action_open_palette(w);
+  return TRUE;
 }
 static gboolean sc_add_project(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_add_project(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_add_project(PT_WINDOW(u)); return TRUE;
 }
 static gboolean sc_next_tab(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_next_tab(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_next_tab(PT_WINDOW(u)); return TRUE;
 }
 static gboolean sc_prev_tab(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_prev_tab(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_prev_tab(PT_WINDOW(u)); return TRUE;
 }
 static gboolean sc_split_h(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_split(PT_WINDOW(u), PT_SPLIT_H); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_split(PT_WINDOW(u), PT_SPLIT_H); return TRUE;
 }
 static gboolean sc_split_v(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_split(PT_WINDOW(u), PT_SPLIT_V); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_split(PT_WINDOW(u), PT_SPLIT_V); return TRUE;
 }
 static gboolean sc_close_pane(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_close_pane(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_close_pane(PT_WINDOW(u)); return TRUE;
 }
 static gboolean sc_focus_next(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_focus_next(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_focus_next(PT_WINDOW(u)); return TRUE;
 }
 static gboolean sc_paste(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_paste(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_paste(PT_WINDOW(u)); return TRUE;
 }
 static gboolean sc_copy(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_copy(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_copy(PT_WINDOW(u)); return TRUE;
 }
 static gboolean sc_zoom_in(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
   pt_terminal_set_font_size(pt_terminal_font_size() + 1);
   mark_dirty(PT_WINDOW(u));
   return TRUE;
 }
 static gboolean sc_zoom_out(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
   pt_terminal_set_font_size(pt_terminal_font_size() - 1);
   mark_dirty(PT_WINDOW(u));
   return TRUE;
 }
 static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
   pt_terminal_set_font_size(PT_FONT_SIZE_DEFAULT);
   mark_dirty(PT_WINDOW(u));
   return TRUE;
@@ -777,11 +819,14 @@ static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
 static gboolean sc_focus_dir(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
   ShortcutCtx *c = u;
+  if (palette_blocks(c->w)) return FALSE;
   action_focus_direction(c->w, (PtPaneDirection)c->arg);
   return TRUE;
 }
 static gboolean sc_focus_prev(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a; action_focus_prev(PT_WINDOW(u)); return TRUE;
+  (void)wg; (void)a;
+  if (palette_blocks(PT_WINDOW(u))) return FALSE;
+  action_focus_prev(PT_WINDOW(u)); return TRUE;
 }
 
 static void add_shortcut(GtkShortcutController *ctl, const char *accel,
