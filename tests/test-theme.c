@@ -65,6 +65,8 @@ static void test_pt_dark_identity(void) {
   /* alpha tokens */
   g_assert_cmpfloat(rt.tokens[PT_TOK_BORDER].a, ==, 0.06);
   g_assert_cmpint(rt.tokens[PT_TOK_BORDER].r, ==, 255);
+  g_assert_cmpfloat(rt.tokens[PT_TOK_FIELD_BG].a, ==, 0.04);
+  g_assert_cmpint(rt.tokens[PT_TOK_FIELD_BG].r, ==, 255);
   g_assert_cmpfloat(rt.tokens[PT_TOK_SCRIM].a, ==, 0.62);
   /* terminal side */
   char *sel = pt_color_to_css(&rt.term.selection_bg);

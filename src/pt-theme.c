@@ -52,7 +52,7 @@ static const char *token_names[PT_TOK_COUNT] = {
   "terminal-clear", "scrim",
   "border", "border-strong", "hover", "active",
   "active-strong", "tag-bg", "track", "slider",
-  "slider-hover",
+  "slider-hover", "field-bg",
   "text", "text-muted", "text-mid", "text-faint",
   "text-dim", "text-ghost",
   "ok", "ok-muted", "err", "warn", "focus-ring",
@@ -89,6 +89,7 @@ const char *pt_theme_builtin_pt_dark(void) {
     "app-active = rgba(255,255,255,0.07)\n"
     "app-active-strong = rgba(255,255,255,0.08)\n"
     "app-tag-bg = rgba(255,255,255,0.05)\n"
+    "app-field-bg = rgba(255,255,255,0.04)\n"
     "app-track = rgba(255,255,255,0.09)\n"
     "app-slider = rgba(255,255,255,0.12)\n"
     "app-slider-hover = rgba(255,255,255,0.22)\n"
@@ -238,6 +239,7 @@ void pt_theme_resolve(const PtTheme *t, GHashTable *config_overrides,
   tok[PT_TOK_TRACK]         = with_alpha(&edge, 0.09);
   tok[PT_TOK_SLIDER]        = with_alpha(&edge, 0.12);
   tok[PT_TOK_SLIDER_HOVER]  = with_alpha(&edge, 0.22);
+  tok[PT_TOK_FIELD_BG]      = with_alpha(&edge, 0.04);
   tok[PT_TOK_TEXT]       = fg;
   tok[PT_TOK_TEXT_MUTED] = mix(&fg, &bg, 0.38);
   tok[PT_TOK_TEXT_MID]   = mix(&fg, &bg, 0.46);
