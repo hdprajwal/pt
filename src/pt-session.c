@@ -64,6 +64,8 @@ char *pt_session_to_json_text(const PtSessionState *s) {
     json_builder_add_string_value(b, p->name);
     json_builder_set_member_name(b, "path");
     json_builder_add_string_value(b, p->path);
+    json_builder_set_member_name(b, "accent");
+    json_builder_add_int_value(b, p->accent);
     json_builder_set_member_name(b, "active_tab");
     json_builder_add_int_value(b, p->active_tab);
     json_builder_set_member_name(b, "tabs");
@@ -123,6 +125,10 @@ PtSessionState *pt_session_from_json_text(const char *text) {
         json_object_get_string_member_with_default(po, "path", "/"));
     p->active_tab =
         (int)json_object_get_int_member_with_default(po, "active_tab", 0);
+    /* Older state files predate accents: fall back to cycling by position. */
+    int accent = (int)json_object_get_int_member_with_default(
+        po, "accent", (gint64)(i % PT_ACCENT_COUNT));
+    p->accent = CLAMP(accent, 0, PT_ACCENT_COUNT - 1);
     JsonArray *tabs = json_object_has_member(po, "tabs")
                           ? json_object_get_array_member(po, "tabs") : NULL;
     for (guint j = 0; tabs != NULL && j < json_array_get_length(tabs); j++) {

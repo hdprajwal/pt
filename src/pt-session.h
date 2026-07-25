@@ -3,11 +3,15 @@
 #include <glib.h>
 #include "pt-split-tree.h"
 
+/* Number of entries in the fixed accent cycle projects are coloured from. */
+#define PT_ACCENT_COUNT 6
+
 typedef struct { char *title; PtSplitNode *tree; } PtTabState;
 typedef struct {
   char *name; char *path;
   GPtrArray *tabs;        /* PtTabState*, element free fn set */
   int active_tab;
+  int accent;             /* 0..5 index into the fixed accent cycle */
 } PtProjectState;
 typedef struct {
   GPtrArray *projects;    /* PtProjectState*, element free fn set */

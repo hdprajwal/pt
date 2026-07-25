@@ -73,11 +73,61 @@ static void test_load_missing_returns_null(void) {
   g_assert_null(pt_session_load("/nonexistent/dir/state.json"));
 }
 
+static void test_accent_roundtrip(void) {
+  PtSessionState *s = pt_session_state_new();
+  PtProjectState *p = pt_project_state_new("alpha", "/tmp/alpha");
+  p->accent = 4;
+  g_ptr_array_add(s->projects, p);
+  char *json = pt_session_to_json_text(s);
+  PtSessionState *back = pt_session_from_json_text(json);
+  g_assert_nonnull(back);
+  g_assert_cmpint(((PtProjectState *)g_ptr_array_index(back->projects, 0))->accent,
+                  ==, 4);
+  g_free(json);
+  pt_session_state_free(s);
+  pt_session_state_free(back);
+}
+
+static void test_accent_default_when_absent(void) {
+  /* Older state files have no "accent" member: default to index % 6. */
+  const char *json =
+    "{\"version\":1,\"active_project\":0,\"font_size\":11,\"projects\":["
+    "{\"name\":\"a\",\"path\":\"/tmp/a\",\"active_tab\":0,\"tabs\":[]},"
+    "{\"name\":\"b\",\"path\":\"/tmp/b\",\"active_tab\":0,\"tabs\":[]}]}";
+  PtSessionState *s = pt_session_from_json_text(json);
+  g_assert_nonnull(s);
+  g_assert_cmpint(((PtProjectState *)g_ptr_array_index(s->projects, 0))->accent,
+                  ==, 0);
+  g_assert_cmpint(((PtProjectState *)g_ptr_array_index(s->projects, 1))->accent,
+                  ==, 1);
+  pt_session_state_free(s);
+}
+
+static void test_accent_out_of_range_is_clamped(void) {
+  const char *json =
+    "{\"version\":1,\"active_project\":0,\"font_size\":11,\"projects\":["
+    "{\"name\":\"a\",\"path\":\"/tmp/a\",\"accent\":9,\"active_tab\":0,\"tabs\":[]},"
+    "{\"name\":\"b\",\"path\":\"/tmp/b\",\"accent\":-3,\"active_tab\":0,\"tabs\":[]},"
+    "{\"name\":\"c\",\"path\":\"/tmp/c\",\"accent\":5,\"active_tab\":0,\"tabs\":[]}]}";
+  PtSessionState *s = pt_session_from_json_text(json);
+  g_assert_nonnull(s);
+  g_assert_cmpint(((PtProjectState *)g_ptr_array_index(s->projects, 0))->accent,
+                  ==, 5);
+  g_assert_cmpint(((PtProjectState *)g_ptr_array_index(s->projects, 1))->accent,
+                  ==, 0);
+  g_assert_cmpint(((PtProjectState *)g_ptr_array_index(s->projects, 2))->accent,
+                  ==, 5);
+  pt_session_state_free(s);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/session/roundtrip", test_roundtrip);
   g_test_add_func("/session/save-load", test_save_load);
   g_test_add_func("/session/corrupt", test_corrupt_becomes_bak);
   g_test_add_func("/session/missing", test_load_missing_returns_null);
+  g_test_add_func("/session/accent-roundtrip", test_accent_roundtrip);
+  g_test_add_func("/session/accent-default", test_accent_default_when_absent);
+  g_test_add_func("/session/accent-clamp", test_accent_out_of_range_is_clamped);
   return g_test_run();
 }
