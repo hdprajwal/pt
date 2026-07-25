@@ -38,7 +38,7 @@ static void test_roundtrip(void) {
   PtSessionState *legacy = pt_session_from_json_text(
       "{\"version\":1,\"active_project\":0,\"projects\":[]}");
   g_assert_nonnull(legacy);
-  g_assert_cmpint(legacy->font_size, ==, 11);
+  g_assert_cmpint(legacy->font_size, ==, PT_FONT_SIZE_DEFAULT);
   pt_session_state_free(legacy);
 }
 

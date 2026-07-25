@@ -467,7 +467,7 @@ static gboolean sc_zoom_out(GtkWidget *wg, GVariant *a, gpointer u) {
 }
 static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
-  pt_terminal_set_font_size(9);
+  pt_terminal_set_font_size(PT_FONT_SIZE_DEFAULT);
   mark_dirty(PT_WINDOW(u));
   return TRUE;
 }

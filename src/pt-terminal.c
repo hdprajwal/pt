@@ -1,9 +1,9 @@
 #include "pt-terminal.h"
 #include "pt-keymap.h"
+#include "pt-session.h"      /* PT_FONT_SIZE_DEFAULT, shared with persistence */
 #include <math.h>
 
 #define PT_FONT_FAMILY "JetBrains Mono, monospace"
-#define PT_FONT_SIZE_DEFAULT 9
 #define PT_FONT_SIZE_MIN 6
 #define PT_FONT_SIZE_MAX 32
 /* Inset between the pane edge and the character grid (mirrored by

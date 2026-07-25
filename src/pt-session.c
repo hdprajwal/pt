@@ -21,7 +21,7 @@ PtSessionState *pt_session_state_new(void) {
   PtSessionState *s = g_new0(PtSessionState, 1);
   s->projects = g_ptr_array_new_with_free_func(project_state_free);
   s->active_project = 0;
-  s->font_size = 11;
+  s->font_size = PT_FONT_SIZE_DEFAULT;
   return s;
 }
 
@@ -113,7 +113,8 @@ PtSessionState *pt_session_from_json_text(const char *text) {
   s->active_project =
       (int)json_object_get_int_member_with_default(obj, "active_project", 0);
   s->font_size =
-      (int)json_object_get_int_member_with_default(obj, "font_size", 11);
+      (int)json_object_get_int_member_with_default(obj, "font_size",
+                                                  PT_FONT_SIZE_DEFAULT);
   JsonArray *projects =
       json_object_has_member(obj, "projects")
           ? json_object_get_array_member(obj, "projects") : NULL;

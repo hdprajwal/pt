@@ -6,6 +6,11 @@
 /* Number of entries in the fixed accent cycle projects are coloured from. */
 #define PT_ACCENT_COUNT 6
 
+/* Terminal font size, in points, for a fresh session and for Ctrl+0 reset.
+ * Lives here (rather than in pt-terminal.h) because pt-session.c must not
+ * pull in GTK, and the persisted default has to agree with the widget's. */
+#define PT_FONT_SIZE_DEFAULT 9
+
 typedef struct { char *title; PtSplitNode *tree; } PtTabState;
 typedef struct {
   char *name; char *path;
