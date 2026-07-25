@@ -3,6 +3,7 @@
 #include "pt-sidebar.h"
 #include "pt-tab-strip.h"
 #include "pt-statusline.h"
+#include "pt-project-bar.h"
 #include "pt-pane-grid.h"
 #include "pt-session.h"
 #include "pt-git-parse.h"
@@ -22,6 +23,7 @@ typedef struct {
   gboolean missing;
   PtGitStatus git;
   gboolean is_repo;
+  int accent;           /* 0..5 index into the fixed accent cycle */
   PtGitMonitor *monitor;
   PtWindow *window;     /* back-pointer; Task 11 wires git monitors through it */
 } PtProjectUI;
@@ -30,7 +32,7 @@ struct _PtWindow {
   AdwApplicationWindow parent_instance;
   GPtrArray *projects;  /* PtProjectUI* */
   int active_project;
-  GtkWidget *sidebar, *tabstrip, *content, *statusline, *topbar_label;
+  GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
   guint save_source;    /* debounce timer; used from Task 12 */
 };
 
@@ -53,6 +55,16 @@ static PtTabUI *active_tab(PtProjectUI *p) {
 
 static void mark_dirty(PtWindow *w);   /* persistence hook; body in Task 12 */
 
+static void refresh_projectbar(PtWindow *w) {
+  PtProjectUI *p = active_project(w);
+  pt_project_bar_update(PT_PROJECT_BAR(w->projectbar),
+      p != NULL ? p->name : "pt",
+      p != NULL ? p->path : "",
+      (p != NULL && p->is_repo) ? p->git.branch : NULL,
+      p != NULL ? p->git.changed : 0,
+      p != NULL ? p->accent : 0);
+}
+
 static void refresh_sidebar(PtWindow *w) {
   int n = (int)w->projects->len;
   PtSidebarRow *rows = g_new0(PtSidebarRow, n);
@@ -64,8 +76,7 @@ static void refresh_sidebar(PtWindow *w) {
     rows[i].is_repo = p->is_repo;
     rows[i].changed = p->git.changed;
     g_strlcpy(rows[i].branch, p->git.branch, sizeof(rows[i].branch));
-    /* accent field lands with the project bar task */
-    rows[i].accent = i % PT_ACCENT_COUNT;
+    rows[i].accent = p->accent;
     rows[i].shell_count = (int)p->tabs->len;
     int running = 0;
     for (guint j = 0; j < p->tabs->len; j++) {
@@ -79,9 +90,10 @@ static void refresh_sidebar(PtWindow *w) {
   PtProjectUI *ap = active_project(w);
   char *top = ap != NULL ? g_strdup_printf("pt :: %s", ap->name)
                          : g_strdup("pt");
-  gtk_label_set_text(GTK_LABEL(w->topbar_label), top);
   gtk_window_set_title(GTK_WINDOW(w), top);
   g_free(top);
+  /* cheap enough to redo unconditionally, and never drifts out of sync */
+  refresh_projectbar(w);
 }
 
 static void refresh_tabstrip(PtWindow *w) {
@@ -257,6 +269,8 @@ static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
   p->name = g_strdup(name);
   p->path = g_strdup(path);
   p->window = w;
+  /* called before the project joins the array, so len is its future index */
+  p->accent = (int)(w->projects->len % PT_ACCENT_COUNT);
   p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
   p->missing = !g_file_test(path, G_FILE_TEST_IS_DIR);
   if (!p->missing) {
@@ -583,6 +597,7 @@ static PtSessionState *capture_state(PtWindow *w) {
     PtProjectUI *p = g_ptr_array_index(w->projects, i);
     PtProjectState *ps = pt_project_state_new(p->name, p->path);
     ps->active_tab = p->active_tab;
+    ps->accent = p->accent;
     for (guint j = 0; j < p->tabs->len; j++) {
       PtTabUI *t = g_ptr_array_index(p->tabs, j);
       PtPaneGrid *grid = PT_PANE_GRID(t->grid);
@@ -630,6 +645,7 @@ static void restore_state(PtWindow *w) {
     p->window = w;
     p->name = g_strdup(ps->name);
     p->path = g_strdup(ps->path);
+    p->accent = ps->accent;
     p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
     p->missing = !g_file_test(ps->path, G_FILE_TEST_IS_DIR);
     if (!p->missing) {
@@ -678,17 +694,8 @@ static void pt_window_init(PtWindow *w) {
   w->projects = g_ptr_array_new_with_free_func(project_ui_free);
   w->active_project = -1;
 
-  GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-
-  /* top bar: "pt :: <project>" left, no window controls, draggable */
-  GtkWidget *handle = gtk_window_handle_new();
-  GtkWidget *topbar = gtk_center_box_new();
-  gtk_widget_add_css_class(topbar, "pt-topbar");
-  w->topbar_label = gtk_label_new("pt");
-  gtk_center_box_set_start_widget(GTK_CENTER_BOX(topbar), w->topbar_label);
-  gtk_window_handle_set_child(GTK_WINDOW_HANDLE(handle), topbar);
-  gtk_box_append(GTK_BOX(outer), handle);
-
+  /* The sidebar runs the full window height, so the project bar (which owns the
+   * window controls and the drag handle) sits atop the content column only. */
   GtkWidget *body = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_vexpand(body, TRUE);
   w->sidebar = pt_sidebar_new();
@@ -696,6 +703,8 @@ static void pt_window_init(PtWindow *w) {
 
   GtkWidget *main_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_hexpand(main_col, TRUE);
+  w->projectbar = pt_project_bar_new();
+  gtk_box_append(GTK_BOX(main_col), w->projectbar);
   w->tabstrip = pt_tab_strip_new();
   gtk_box_append(GTK_BOX(main_col), w->tabstrip);
   w->content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -704,9 +713,8 @@ static void pt_window_init(PtWindow *w) {
   w->statusline = pt_statusline_new();
   gtk_box_append(GTK_BOX(main_col), w->statusline);
   gtk_box_append(GTK_BOX(body), main_col);
-  gtk_box_append(GTK_BOX(outer), body);
 
-  adw_application_window_set_content(ADW_APPLICATION_WINDOW(w), outer);
+  adw_application_window_set_content(ADW_APPLICATION_WINDOW(w), body);
 
   g_signal_connect(w->sidebar, "project-selected",
                    G_CALLBACK(on_project_selected), w);
