@@ -5,17 +5,17 @@
 /* Largest counter value we treat as a plausible progress number. Anything
  * longer is a hash, an id or a timestamp — not a task counter — and would
  * also risk overflowing the int fields. */
-#define PT_PROGRESS_MAX 1000000000L
+#define PT_PROGRESS_MAX G_GINT64_CONSTANT(1000000000)
 
 /* Parse a plain decimal run at s (no sign, no whitespace skipping).
  * Returns FALSE when s does not start with a digit or the value is out of
  * range; *end always advances past the digit run so the caller can resume. */
-static gboolean parse_uint(const char *s, long *value, const char **end) {
+static gboolean parse_uint(const char *s, gint64 *value, const char **end) {
   const char *p = s;
-  long v = 0;
+  gint64 v = 0;
   gboolean overflow = FALSE;
   while (g_ascii_isdigit(*p)) {
-    if (v > PT_PROGRESS_MAX) overflow = TRUE;
+    if (overflow || v > PT_PROGRESS_MAX) overflow = TRUE;
     else v = v * 10 + (*p - '0');
     p++;
   }
@@ -42,7 +42,7 @@ gboolean pt_progress_parse_line(const char *line, PtProgress *out) {
       continue;
     }
 
-    long a = 0;
+    gint64 a = 0;
     const char *end = NULL;
     gboolean a_ok = parse_uint(s, &a, &end);
 
@@ -54,7 +54,7 @@ gboolean pt_progress_parse_line(const char *line, PtProgress *out) {
     }
 
     if (*end == '/' && g_ascii_isdigit(end[1])) {
-      long b = 0;
+      gint64 b = 0;
       const char *end2 = NULL;
       gboolean b_ok = parse_uint(end + 1, &b, &end2);
       /* Reject trailing junk glued to the denominator (dates, versions,
