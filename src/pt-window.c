@@ -78,6 +78,14 @@ static void mark_dirty(PtWindow *w);   /* persistence hook; body in Task 12 */
 
 /* ---------- config ---------- */
 
+/* The accent hexes handed to spawned shells as PT_ACCENT, kept module-level
+ * because set_spawn_env_for() runs per project while the theme is resolved
+ * once per config. Seeded with pt-dark's accents so any spawn that somehow
+ * beats the first render_config() still gets a sane value; render_config()
+ * overwrites it from the resolved accent tokens. */
+static char accent_env[PT_ACCENT_COUNT][8] =
+    { "#6ee7a0", "#8ab4f8", "#f2b25c", "#c99bf0", "#5ed3c4", "#e0849b" };
+
 /* Parse `cfg`'s theme and push colors+fonts everywhere. Deliberately takes the
  * config rather than reading w->config: the settings dialog previews a
  * candidate it still owns, and nothing about rendering it may put that
@@ -95,6 +103,13 @@ static void render_config(const PtConfig *cfg) {
   pt_style_apply(&rt, cfg);
   pt_terminal_set_theme(&rt);
   pt_terminal_set_font(cfg->font_family, cfg->font_size);
+  /* Prompts read PT_ACCENT, so it has to track the theme the chrome uses.
+   * Accents always resolve opaque, so the css form is "#rrggbb". */
+  for (int i = 0; i < PT_ACCENT_COUNT; i++) {
+    char *hex = pt_color_to_css(&rt.tokens[PT_TOK_ACCENT_0 + i]);
+    g_strlcpy(accent_env[i], hex, sizeof accent_env[i]);
+    g_free(hex);
+  }
   pt_theme_free(theme);
   g_free(text);
   g_free(tdir);
@@ -518,13 +533,12 @@ static void seed_git_branch(PtProjectUI *p) {
  * builds synchronously, so the default is never read for a different project
  * than the one that just set it. */
 static void set_spawn_env_for(PtProjectUI *p) {
-  /* Mirrors the accent hexes in style.css (.pt-a0 .. .pt-a5). */
-  static const char *accents[PT_ACCENT_COUNT] =
-      { "#6ee7a0", "#8ab4f8", "#f2b25c", "#c99bf0", "#5ed3c4", "#e0849b" };
+  /* Accent hexes come from the resolved theme's accent-0..5 tokens (see
+   * accent_env above), seeded with pt-dark's values. */
   char *proj = g_strdup_printf("PT_PROJECT=%s", p->name);
   char *acc  = g_strdup_printf("PT_ACCENT=%s",
-                               accents[((p->accent % PT_ACCENT_COUNT) +
-                                        PT_ACCENT_COUNT) % PT_ACCENT_COUNT]);
+                               accent_env[((p->accent % PT_ACCENT_COUNT) +
+                                           PT_ACCENT_COUNT) % PT_ACCENT_COUNT]);
   char *br   = g_strdup_printf("PT_BRANCH=%s", p->git.branch);
   const char *pairs[] = { proj, acc, br, NULL };
   pt_terminal_set_default_env(pairs);
