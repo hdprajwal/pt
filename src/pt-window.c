@@ -35,6 +35,7 @@ struct _PtWindow {
   int active_project;
   GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
   guint save_source;    /* debounce timer; used from Task 12 */
+  guint status_source;  /* 500ms progress poll for the status bar */
 };
 
 G_DEFINE_FINAL_TYPE(PtWindow, pt_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -121,18 +122,57 @@ static void refresh_tabstrip(PtWindow *w) {
   g_free(infos);
 }
 
+/* The pane the status bar speaks for: focused pane of the active tab of the
+ * active project. NULL when there is no project or no tab. */
+static PtTerminal *focused_terminal(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  return t != NULL ? pt_pane_grid_focused_terminal(PT_PANE_GRID(t->grid))
+                   : NULL;
+}
+
 static void refresh_statusline(PtWindow *w) {
   PtProjectUI *p = active_project(w);
-  PtTabUI *t = active_tab(p);
-  PtPaneGrid *grid = t != NULL ? PT_PANE_GRID(t->grid) : NULL;
-  pt_statusline_update(PT_STATUSLINE(w->statusline),
-      p != NULL ? p->name : NULL,
-      (p != NULL && p->is_repo) ? p->git.branch : NULL,
-      p != NULL ? p->git.changed : 0,
-      p != NULL ? p->active_tab : 0,
-      p != NULL ? (int)p->tabs->len : 0,
-      grid != NULL ? pt_pane_grid_focused_index(grid) : 0,
-      grid != NULL ? pt_pane_grid_pane_count(grid) : 0);
+  PtTerminal *term = focused_terminal(w);
+  gboolean running = term != NULL && pt_terminal_running(term);
+  int last_exit = term != NULL ? pt_terminal_last_exit(term) : -1;
+  PtProgress prog;
+  gboolean has_prog = FALSE;
+  const char *task = NULL;
+  /* Only a running command can have progress, and scraping the grid is not
+   * free — so this whole block is skipped while the pane sits at a prompt. */
+  if (running) {
+    task = pt_terminal_last_command(term);
+    char *grid = pt_term_core_grid_text(pt_terminal_core(term));
+    if (grid != NULL) {
+      /* Progress counters live on the last non-empty row of the visible grid;
+       * anything above it is scrollback of an older state. */
+      char **lines = g_strsplit(grid, "\n", -1);
+      for (int i = (int)g_strv_length(lines) - 1; i >= 0; i--) {
+        g_strchomp(lines[i]);
+        if (lines[i][0] != '\0') {
+          has_prog = pt_progress_parse_line(lines[i], &prog);
+          break;
+        }
+      }
+      g_strfreev(lines);
+      g_free(grid);
+    }
+  }
+  pt_statusline_update(PT_STATUSLINE(w->statusline), running, last_exit,
+                       has_prog ? &prog : NULL, task,
+                       p != NULL ? p->accent : 0);
+}
+
+/* Keeps the bar moving mid-task: a long build emits no signal per line, so the
+ * only way to see 128/214 tick over is to look. Deliberately does nothing when
+ * the focused pane is idle — the falling edge is covered by "command-changed",
+ * which fires when the foreground program goes back to the shell. */
+static gboolean tick_statusline(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  PtTerminal *term = focused_terminal(w);
+  if (term != NULL && pt_terminal_running(term))
+    refresh_statusline(w);
+  return G_SOURCE_CONTINUE;
 }
 
 static void show_active_grid(PtWindow *w) {
@@ -244,8 +284,13 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
       if (t->grid != GTK_WIDGET(g)) continue;
       g_free(t->title);
       t->title = g_strdup(comm);
-      if ((int)pi == w->active_project)
+      if ((int)pi == w->active_project) {
         refresh_tabstrip(w);
+        /* run-state just flipped for a pane of the visible project: this is the
+         * edge the 500ms poll deliberately does not cover (it only runs while
+         * something is running), so the "✓ / ✗ exit N" settle happens here. */
+        refresh_statusline(w);
+      }
       refresh_sidebar(w);
       return;
     }
@@ -283,9 +328,10 @@ static void on_git_update(const PtGitStatus *st, gboolean is_repo,
   PtProjectUI *p = user;
   p->git = *st;
   p->is_repo = is_repo;
-  PtWindow *w = p->window;
-  refresh_sidebar(w);
-  refresh_statusline(w);
+  /* No refresh_statusline here: the status bar stopped speaking for git in the
+   * rebuild (that moved to the project bar), and scraping the terminal grid on
+   * every git poll would be pure waste. */
+  refresh_sidebar(p->window);
 }
 
 static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
@@ -707,6 +753,10 @@ static gboolean on_close_request(GtkWindow *win, gpointer user) {
 static void pt_window_dispose(GObject *obj) {
   PtWindow *w = PT_WINDOW(obj);
   if (w->save_source != 0) { g_source_remove(w->save_source); w->save_source = 0; }
+  if (w->status_source != 0) {
+    g_source_remove(w->status_source);
+    w->status_source = 0;
+  }
   g_clear_pointer(&w->projects, g_ptr_array_unref);
   G_OBJECT_CLASS(pt_window_parent_class)->dispose(obj);
 }
@@ -757,6 +807,10 @@ static void pt_window_init(PtWindow *w) {
   restore_state(w);
   refresh_sidebar(w);
   show_active_grid(w);
+
+  /* Plain pointer, no ref: the source must not keep the window alive. Removed
+   * in dispose, which is the only place the window can go away from. */
+  w->status_source = g_timeout_add(500, tick_statusline, w);
 }
 
 GtkWidget *pt_window_new(AdwApplication *app) {
