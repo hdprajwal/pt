@@ -145,22 +145,23 @@ static void detach_terminals(PtSplitNode *n) {
   detach_terminals(n->b);
 }
 
-static gboolean apply_ratio_idle(gpointer data) {
-  GtkPaned *paned = GTK_PANED(data);
-  if (gtk_widget_get_parent(GTK_WIDGET(paned)) == NULL) {
-    g_object_unref(paned);
-    return G_SOURCE_REMOVE;
-  }
-  PtSplitNode *node = g_object_get_data(G_OBJECT(paned), "pt-node");
-  if (node != NULL) {
-    int total =
-        (node->kind == PT_SPLIT_H)
-            ? gtk_widget_get_width(GTK_WIDGET(paned))
-            : gtk_widget_get_height(GTK_WIDGET(paned));
-    if (total > 0)
-      gtk_paned_set_position(paned, (int)(total * node->ratio));
-  }
-  g_object_unref(paned);
+/* Restore node->ratio on a fresh paned. A tick callback, not an idle: the
+ * paned has no size until its first allocation (an idle can fire before that
+ * and would have to give up), and a hidden tab's paned only allocates when
+ * the tab is shown — the tick just waits until a frame gives it a size. */
+static gboolean apply_ratio_tick(GtkWidget *w, GdkFrameClock *clock,
+                                 gpointer data) {
+  (void)clock; (void)data;
+  PtSplitNode *node = g_object_get_data(G_OBJECT(w), "pt-node");
+  if (node == NULL) return G_SOURCE_REMOVE; /* torn down before it sized */
+  int total = (node->kind == PT_SPLIT_H) ? gtk_widget_get_width(w)
+                                         : gtk_widget_get_height(w);
+  if (total <= 0) return G_SOURCE_CONTINUE; /* not allocated yet */
+  gtk_paned_set_position(GTK_PANED(w), (int)(total * node->ratio));
+  /* Armed only now: notify::position fired by GTK's own allocation pass
+   * (natural-size split) must not write back into node->ratio, or every
+   * rebuild resets the layout to GTK's ~50% guess before this restore runs. */
+  g_object_set_data(G_OBJECT(w), "pt-ratio-applied", GINT_TO_POINTER(1));
   return G_SOURCE_REMOVE;
 }
 
@@ -170,6 +171,7 @@ static void on_paned_position(GObject *obj, GParamSpec *spec, gpointer user) {
   if (gtk_widget_get_parent(GTK_WIDGET(paned)) == NULL) return;
   PtSplitNode *node = g_object_get_data(obj, "pt-node");
   if (node == NULL) return;
+  if (g_object_get_data(obj, "pt-ratio-applied") == NULL) return;
   int total = (node->kind == PT_SPLIT_H)
                   ? gtk_widget_get_width(GTK_WIDGET(paned))
                   : gtk_widget_get_height(GTK_WIDGET(paned));
@@ -189,7 +191,7 @@ static GtkWidget *build_widgets(PtPaneGrid *g, PtSplitNode *n) {
   g_object_set_data(G_OBJECT(paned), "pt-node", n);
   g_signal_connect(paned, "notify::position",
                    G_CALLBACK(on_paned_position), g);
-  g_idle_add(apply_ratio_idle, g_object_ref(paned));
+  gtk_widget_add_tick_callback(paned, apply_ratio_tick, NULL, NULL);
   return paned;
 }
 
