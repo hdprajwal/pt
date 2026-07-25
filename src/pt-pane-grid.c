@@ -254,6 +254,59 @@ void pt_pane_grid_focus_next(PtPaneGrid *g) {
   emit_focused_command(g);
 }
 
+/* Center of a leaf's terminal in grid coordinates; FALSE if not computable. */
+static gboolean leaf_center(PtPaneGrid *g, PtSplitNode *leaf,
+                            double *cx, double *cy) {
+  if (leaf == NULL || leaf->user == NULL) return FALSE;
+  graphene_rect_t b;
+  if (!gtk_widget_compute_bounds(GTK_WIDGET(leaf->user), GTK_WIDGET(g), &b))
+    return FALSE;
+  *cx = b.origin.x + b.size.width / 2.0;
+  *cy = b.origin.y + b.size.height / 2.0;
+  return TRUE;
+}
+
+void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir) {
+  if (g->focused == NULL || g->tree == NULL) return;
+  double cx, cy;
+  if (!leaf_center(g, g->focused, &cx, &cy)) return;
+
+  PtSplitNode *first = pt_split_first_leaf(g->tree);
+  PtSplitNode *best = NULL;
+  double best_score = 0;
+  PtSplitNode *leaf = first;
+  do {
+    if (leaf != g->focused) {
+      double lx, ly;
+      if (leaf_center(g, leaf, &lx, &ly)) {
+        /* Distance along the arrow is primary; sideways misalignment is
+         * penalized so navigation prefers the visually aligned neighbor. */
+        double fwd = 0, side = 0;
+        switch (dir) {
+          case PT_PANE_DIR_LEFT:  fwd = cx - lx; side = ABS(ly - cy); break;
+          case PT_PANE_DIR_RIGHT: fwd = lx - cx; side = ABS(ly - cy); break;
+          case PT_PANE_DIR_UP:    fwd = cy - ly; side = ABS(lx - cx); break;
+          case PT_PANE_DIR_DOWN:  fwd = ly - cy; side = ABS(lx - cx); break;
+        }
+        if (fwd > 0.5) {
+          double score = fwd + 2.0 * side;
+          if (best == NULL || score < best_score) {
+            best = leaf;
+            best_score = score;
+          }
+        }
+      }
+    }
+    leaf = pt_split_next_leaf(g->tree, leaf);
+  } while (leaf != NULL && leaf != first);
+
+  if (best == NULL) return;
+  g->focused = best;
+  pt_pane_grid_focus_terminal(g);
+  g_signal_emit(g, signals[SIG_FOCUS], 0);
+  emit_focused_command(g);
+}
+
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g) {
   return g->focused != NULL ? PT_TERMINAL(g->focused->user) : NULL;
 }

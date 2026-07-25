@@ -13,6 +13,15 @@ void pt_pane_grid_split(PtPaneGrid *g, PtSplitKind kind);
 /* Close focused pane. Returns FALSE when the grid is now empty (close the tab). */
 gboolean pt_pane_grid_close_focused(PtPaneGrid *g);
 void pt_pane_grid_focus_next(PtPaneGrid *g);
+typedef enum {
+  PT_PANE_DIR_LEFT,
+  PT_PANE_DIR_RIGHT,
+  PT_PANE_DIR_UP,
+  PT_PANE_DIR_DOWN,
+} PtPaneDirection;
+/* Move focus to the nearest pane in the given direction (spatial, based on
+ * on-screen geometry). No-op when no pane lies that way. */
+void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir);
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
 int pt_pane_grid_pane_count(PtPaneGrid *g);
 int pt_pane_grid_focused_index(PtPaneGrid *g);

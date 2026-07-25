@@ -330,6 +330,11 @@ static void action_focus_next(PtWindow *w) {
   if (t != NULL) pt_pane_grid_focus_next(PT_PANE_GRID(t->grid));
 }
 
+static void action_focus_direction(PtWindow *w, PtPaneDirection dir) {
+  PtTabUI *t = active_tab(active_project(w));
+  if (t != NULL) pt_pane_grid_focus_direction(PT_PANE_GRID(t->grid), dir);
+}
+
 static void action_paste(PtWindow *w) {
   PtTabUI *t = active_tab(active_project(w));
   PtTerminal *term =
@@ -458,6 +463,12 @@ static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
   mark_dirty(PT_WINDOW(u));
   return TRUE;
 }
+static gboolean sc_focus_dir(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a;
+  ShortcutCtx *c = u;
+  action_focus_direction(c->w, (PtPaneDirection)c->arg);
+  return TRUE;
+}
 
 static void add_shortcut(GtkShortcutController *ctl, const char *accel,
                          GtkShortcutFunc fn, gpointer data,
@@ -503,6 +514,19 @@ static void install_shortcuts(PtWindow *w) {
   add_shortcut(ctl, "<Control><Shift>s", sc_split_v, w, NULL);
   add_shortcut(ctl, "<Control><Shift>w", sc_close_pane, w, NULL);
   add_shortcut(ctl, "<Control><Shift>o", sc_focus_next, w, NULL);
+  {
+    static const struct { const char *accel; PtPaneDirection dir; } dirs[] = {
+      { "<Control><Alt>Left",  PT_PANE_DIR_LEFT  },
+      { "<Control><Alt>Right", PT_PANE_DIR_RIGHT },
+      { "<Control><Alt>Up",    PT_PANE_DIR_UP    },
+      { "<Control><Alt>Down",  PT_PANE_DIR_DOWN  },
+    };
+    for (gsize i = 0; i < G_N_ELEMENTS(dirs); i++) {
+      ShortcutCtx *dc = g_new(ShortcutCtx, 1);
+      dc->w = w; dc->arg = (int)dirs[i].dir;
+      add_shortcut(ctl, dirs[i].accel, sc_focus_dir, dc, g_free);
+    }
+  }
   add_shortcut(ctl, "<Control><Shift>v", sc_paste, w, NULL);
   add_shortcut(ctl, "<Control><Shift>c", sc_copy, w, NULL);
   /* Font zoom: cover =, shifted + (both plain and explicit-shift forms),
