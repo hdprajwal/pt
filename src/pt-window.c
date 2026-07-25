@@ -297,6 +297,26 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
   }
 }
 
+/* Terminals are spawned deep inside the pane grid (leaves become terminals
+ * during rebuild), so the project context reaches the child through the
+ * module-level default env instead of a parameter. Every path that can create
+ * a terminal for project p calls this immediately before doing so; the grid
+ * builds synchronously, so the default is never read for a different project
+ * than the one that just set it. */
+static void set_spawn_env_for(PtProjectUI *p) {
+  /* Mirrors the accent hexes in style.css (.pt-a0 .. .pt-a5). */
+  static const char *accents[PT_ACCENT_COUNT] =
+      { "#6ee7a0", "#8ab4f8", "#f2b25c", "#c99bf0", "#5ed3c4", "#e0849b" };
+  char *proj = g_strdup_printf("PT_PROJECT=%s", p->name);
+  char *acc  = g_strdup_printf("PT_ACCENT=%s",
+                               accents[((p->accent % PT_ACCENT_COUNT) +
+                                        PT_ACCENT_COUNT) % PT_ACCENT_COUNT]);
+  char *br   = g_strdup_printf("PT_BRANCH=%s", p->git.branch);
+  const char *pairs[] = { proj, acc, br, NULL };
+  pt_terminal_set_default_env(pairs);
+  g_free(proj); g_free(acc); g_free(br);
+}
+
 static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
   PtTabUI *t = g_new0(PtTabUI, 1);
   t->title = g_strdup(title);
@@ -345,6 +365,9 @@ static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
   p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
   p->missing = !g_file_test(path, G_FILE_TEST_IS_DIR);
   if (!p->missing) {
+    /* branch is still "" here — the monitor has not run yet; the first shell of
+     * a brand-new project gets an empty PT_BRANCH, later ones get the real one. */
+    set_spawn_env_for(p);
     g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(path)));
     p->monitor = pt_git_monitor_new(path, on_git_update, p);
   }
@@ -398,13 +421,14 @@ static void action_prev_tab(PtWindow *w) {
 static void action_new_tab(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   if (p == NULL || p->missing) return;
+  set_spawn_env_for(p);
   g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(p->path)));
   p->active_tab = (int)p->tabs->len - 1;
   show_active_grid(w);
   mark_dirty(w);
 }
 
-static void action_close_pane(PtWindow *w) {
+static void do_close_pane(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   PtTabUI *t = active_tab(p);
   if (t == NULL) return;
@@ -418,9 +442,47 @@ static void action_close_pane(PtWindow *w) {
   mark_dirty(w);
 }
 
-static void action_split(PtWindow *w, PtSplitKind kind) {
+static void on_close_pane_response(AdwAlertDialog *dlg, const char *response,
+                                   gpointer user) {
+  (void)dlg;
+  PtWindow *w = PT_WINDOW(user);
+  if (g_strcmp0(response, "close") == 0) {
+    do_close_pane(w);
+    return;
+  }
+  /* Cancelled (or dismissed): hand the keyboard straight back to the pane. */
   PtTabUI *t = active_tab(active_project(w));
-  if (t != NULL) pt_pane_grid_split(PT_PANE_GRID(t->grid), kind);
+  if (t != NULL) pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
+}
+
+/* Closing a pane that is mid-command kills the command. Only ask when there is
+ * actually something to lose — at a bare prompt this closes silently. */
+static void action_close_pane(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  if (t == NULL) return;
+  PtTerminal *term = pt_pane_grid_focused_terminal(PT_PANE_GRID(t->grid));
+  if (term == NULL || !pt_terminal_running(term)) {
+    do_close_pane(w);
+    return;
+  }
+  AdwDialog *dlg = adw_alert_dialog_new(
+      "Close shell?", "A process is still running in this shell.");
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dlg),
+                                 "cancel", "Cancel", "close", "Close", NULL);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dlg), "close",
+                                           ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dlg), "cancel");
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dlg), "cancel");
+  g_signal_connect(dlg, "response", G_CALLBACK(on_close_pane_response), w);
+  adw_dialog_present(dlg, GTK_WIDGET(w));
+}
+
+static void action_split(PtWindow *w, PtSplitKind kind) {
+  PtProjectUI *p = active_project(w);
+  PtTabUI *t = active_tab(p);
+  if (t == NULL) return;
+  set_spawn_env_for(p);
+  pt_pane_grid_split(PT_PANE_GRID(t->grid), kind);
 }
 
 static void action_focus_next(PtWindow *w) {
@@ -470,13 +532,17 @@ static void on_folder_chosen(GObject *src, GAsyncResult *res, gpointer user) {
   mark_dirty(w);
 }
 
-static void on_project_add(PtSidebar *sb, gpointer user) {
-  (void)sb;
-  PtWindow *w = PT_WINDOW(user);
+/* Shared by the sidebar's [+ project] button and ⌃N. */
+static void action_add_project(PtWindow *w) {
   GtkFileDialog *dlg = gtk_file_dialog_new();
   gtk_file_dialog_select_folder(dlg, GTK_WINDOW(w), NULL,
                                 on_folder_chosen, w);
   g_object_unref(dlg);
+}
+
+static void on_project_add(PtSidebar *sb, gpointer user) {
+  (void)sb;
+  action_add_project(PT_WINDOW(user));
 }
 
 static void on_project_remove(PtSidebar *sb, int idx, gpointer user) {
@@ -515,6 +581,10 @@ static void on_tab_new(PtTabStrip *s, gpointer user) {
 }
 
 /* ---------- shortcuts ---------- */
+/* Command palette: stub until the palette widget lands; ⌃K is wired to it now
+ * so that change is widget-only. */
+static void action_open_palette(PtWindow *w) { (void)w; }
+
 typedef struct { PtWindow *w; int arg; } ShortcutCtx;
 
 static gboolean sc_project(GtkWidget *widget, GVariant *args, gpointer user) {
@@ -531,6 +601,12 @@ static gboolean sc_tab(GtkWidget *widget, GVariant *args, gpointer user) {
 }
 static gboolean sc_new_tab(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a; action_new_tab(PT_WINDOW(u)); return TRUE;
+}
+static gboolean sc_palette(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a; action_open_palette(PT_WINDOW(u)); return TRUE;
+}
+static gboolean sc_add_project(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a; action_add_project(PT_WINDOW(u)); return TRUE;
 }
 static gboolean sc_next_tab(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a; action_next_tab(PT_WINDOW(u)); return TRUE;
@@ -619,10 +695,19 @@ static void install_shortcuts(PtWindow *w) {
     g_snprintf(accel, sizeof(accel), "<Alt>%d", i + 1);
     add_shortcut(ctl, accel, sc_tab, tc, g_free);
   }
+  add_shortcut(ctl, "<Control>k", sc_palette, w, NULL);
+  add_shortcut(ctl, "<Control>n", sc_add_project, w, NULL);
+  add_shortcut(ctl, "<Control>t", sc_new_tab, w, NULL);
   add_shortcut(ctl, "<Control><Shift>t", sc_new_tab, w, NULL);
   add_shortcut(ctl, "<Control>Tab", sc_next_tab, w, NULL);
   add_shortcut(ctl, "<Control><Shift>Tab", sc_prev_tab, w, NULL);
   add_keyval_shortcut(ctl, GDK_KEY_ISO_Left_Tab, GDK_CONTROL_MASK,
+                      sc_prev_tab, w, NULL);
+  /* ⌥⇥ / ⌥⇧⇥ cycle tabs when the compositor does not claim them first; ⌃⇥
+   * stays the reliable fallback. No grab is attempted. */
+  add_shortcut(ctl, "<Alt>Tab", sc_next_tab, w, NULL);
+  add_shortcut(ctl, "<Alt><Shift>Tab", sc_prev_tab, w, NULL);
+  add_keyval_shortcut(ctl, GDK_KEY_ISO_Left_Tab, GDK_ALT_MASK,
                       sc_prev_tab, w, NULL);
   add_shortcut(ctl, "<Control><Shift>d", sc_split_h, w, NULL);
   add_shortcut(ctl, "<Control><Shift>s", sc_split_v, w, NULL);
@@ -720,6 +805,9 @@ static void restore_state(PtWindow *w) {
     p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
     p->missing = !g_file_test(ps->path, G_FILE_TEST_IS_DIR);
     if (!p->missing) {
+      /* per project, not once for the whole restore: each project's shells must
+       * see their own PT_PROJECT/PT_ACCENT */
+      set_spawn_env_for(p);
       for (guint j = 0; j < ps->tabs->len; j++) {
         PtTabState *ts = g_ptr_array_index(ps->tabs, j);
         /* steal the tree from the session copy */
