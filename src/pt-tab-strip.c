@@ -1,4 +1,5 @@
 #include "pt-tab-strip.h"
+#include "pt-session.h"   /* PT_ACCENT_COUNT */
 
 enum { SIG_SELECTED, SIG_NEW, N_SIGNALS };
 static guint signals[N_SIGNALS];
@@ -26,58 +27,68 @@ static void clear_box(GtkWidget *box) {
     gtk_box_remove(GTK_BOX(box), child);
 }
 
-void pt_tab_strip_set_tabs(PtTabStrip *s, GPtrArray *titles, int active) {
+static void add_accent_class(GtkWidget *wdg, int accent) {
+  int a = accent % PT_ACCENT_COUNT;
+  if (a < 0) a += PT_ACCENT_COUNT;
+  char cls[8];
+  g_snprintf(cls, sizeof(cls), "pt-a%d", a);
+  gtk_widget_add_css_class(wdg, cls);
+}
+
+/* Full rebuild on every call: at ≤ ~10 tabs this is cheaper than tracking
+ * per-child state, and the strip already rebuilt on every tab switch. */
+void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
+                           int active) {
   clear_box(s->box);
-  for (guint i = 0; i < titles->len; i++) {
-    char *label = g_strdup((const char *)g_ptr_array_index(titles, i));
-    GtkWidget *btn = gtk_button_new_with_label(label);
-    /* Stash the base label so the activity dot can be toggled without
-     * corrupting the title text. */
-    g_object_set_data_full(G_OBJECT(btn), "pt-base-label", label, g_free);
+  for (int i = 0; i < n; i++) {
+    const PtTabInfo *info = &tabs[i];
+    gboolean is_active = (i == active);
+
+    GtkWidget *btn = gtk_button_new();
     gtk_widget_add_css_class(btn, "flat");
     gtk_widget_add_css_class(btn, "pt-tab");
-    if ((int)i == active) gtk_widget_add_css_class(btn, "active");
-    g_object_set_data(G_OBJECT(btn), "pt-index", GINT_TO_POINTER((int)i));
-    GtkWidget *lbl = gtk_button_get_child(GTK_BUTTON(btn));
-    if (GTK_IS_LABEL(lbl)) {
-      gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_MIDDLE);
-      gtk_label_set_max_width_chars(GTK_LABEL(lbl), 24);
+    if (is_active) gtk_widget_add_css_class(btn, "active");
+    g_object_set_data(G_OBJECT(btn), "pt-index", GINT_TO_POINTER(i));
+
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
+
+    GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(dot, "pt-dot");
+    gtk_widget_add_css_class(dot, "pt-dot-6");
+    gtk_widget_add_css_class(dot, info->running     ? "running"
+                                  : info->last_exit > 0 ? "error"
+                                                        : "idle");
+    gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(row), dot);
+
+    GtkWidget *lbl = gtk_label_new(info->title != NULL ? info->title : "");
+    gtk_widget_add_css_class(lbl, "pt-tab-label");
+    gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_label_set_max_width_chars(GTK_LABEL(lbl), 24);
+    gtk_box_append(GTK_BOX(row), lbl);
+
+    /* The active tab is being watched, so its unread count is meaningless. */
+    if (info->unread > 0 && !is_active) {
+      char txt[16];
+      g_snprintf(txt, sizeof(txt), "%d", info->unread);
+      GtkWidget *badge = gtk_label_new(txt);
+      gtk_widget_add_css_class(badge, "pt-badge");
+      add_accent_class(badge, info->accent);
+      gtk_widget_set_valign(badge, GTK_ALIGN_CENTER);
+      gtk_box_append(GTK_BOX(row), badge);
     }
+
+    gtk_button_set_child(GTK_BUTTON(btn), row);
     g_signal_connect(btn, "clicked", G_CALLBACK(on_tab_clicked), s);
     gtk_box_append(GTK_BOX(s->box), btn);
   }
+
   GtkWidget *plus = gtk_button_new_with_label("+");
   gtk_widget_add_css_class(plus, "flat");
-  gtk_widget_add_css_class(plus, "pt-tab");
+  gtk_widget_add_css_class(plus, "pt-tab-new");
+  gtk_widget_set_valign(plus, GTK_ALIGN_CENTER);
   g_signal_connect(plus, "clicked", G_CALLBACK(on_new_clicked), s);
   gtk_box_append(GTK_BOX(s->box), plus);
-
-  /* right-aligned split-shortcut hint */
-  GtkWidget *spacer = gtk_label_new(NULL);
-  gtk_widget_set_hexpand(spacer, TRUE);
-  gtk_box_append(GTK_BOX(s->box), spacer);
-  GtkWidget *hint = gtk_label_new("[│ ^⇧D]  [─ ^⇧S]");
-  gtk_widget_add_css_class(hint, "pt-kbd-hint");
-  gtk_widget_set_margin_end(hint, 12);
-  gtk_box_append(GTK_BOX(s->box), hint);
-}
-
-void pt_tab_strip_set_activity(PtTabStrip *s, int index, gboolean on) {
-  GtkWidget *child = gtk_widget_get_first_child(s->box);
-  for (int i = 0; child != NULL && i < index; i++)
-    child = gtk_widget_get_next_sibling(child);
-  if (child == NULL || !GTK_IS_BUTTON(child)) return;
-  const char *base = g_object_get_data(G_OBJECT(child), "pt-base-label");
-  if (base == NULL) return;
-  if (on) {
-    char *txt = g_strconcat(base, " ●", NULL);
-    gtk_button_set_label(GTK_BUTTON(child), txt);
-    g_free(txt);
-    gtk_widget_add_css_class(child, "activity");
-  } else {
-    gtk_button_set_label(GTK_BUTTON(child), base);
-    gtk_widget_remove_css_class(child, "activity");
-  }
 }
 
 static void pt_tab_strip_dispose(GObject *obj) {
@@ -99,6 +110,7 @@ static void pt_tab_strip_class_init(PtTabStripClass *klass) {
 static void pt_tab_strip_init(PtTabStrip *s) {
   gtk_widget_add_css_class(GTK_WIDGET(s), "pt-tabstrip");
   s->box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_valign(s->box, GTK_ALIGN_CENTER);
   gtk_widget_set_parent(s->box, GTK_WIDGET(s));
 }
 

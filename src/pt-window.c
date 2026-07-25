@@ -12,7 +12,8 @@
 typedef struct {
   char *title;
   GtkWidget *grid;      /* PtPaneGrid, owned ref */
-  gboolean activity;
+  int unread;           /* output bursts seen while this tab was unwatched */
+  gint64 unread_stamp;  /* monotonic time of the last counted burst */
 } PtTabUI;
 
 typedef struct {
@@ -98,18 +99,23 @@ static void refresh_sidebar(PtWindow *w) {
 
 static void refresh_tabstrip(PtWindow *w) {
   PtProjectUI *p = active_project(w);
-  GPtrArray *titles = g_ptr_array_new();
-  if (p != NULL)
-    for (guint i = 0; i < p->tabs->len; i++)
-      g_ptr_array_add(titles,
-          ((PtTabUI *)g_ptr_array_index(p->tabs, i))->title);
-  pt_tab_strip_set_tabs(PT_TAB_STRIP(w->tabstrip), titles,
+  int n = p != NULL ? (int)p->tabs->len : 0;
+  /* infos[].title borrows each tab's live string; the strip copies it before
+   * this returns, and nothing here can free a title in between. */
+  PtTabInfo *infos = g_new0(PtTabInfo, n);
+  for (int i = 0; i < n; i++) {
+    PtTabUI *t = g_ptr_array_index(p->tabs, i);
+    PtPaneGrid *grid = PT_PANE_GRID(t->grid);
+    PtTerminal *foc = pt_pane_grid_focused_terminal(grid);
+    infos[i].title = t->title;
+    infos[i].running = pt_pane_grid_any_running(grid);
+    infos[i].last_exit = foc != NULL ? pt_terminal_last_exit(foc) : -1;
+    infos[i].unread = t->unread;
+    infos[i].accent = p->accent;
+  }
+  pt_tab_strip_set_tabs(PT_TAB_STRIP(w->tabstrip), infos, n,
                         p != NULL ? p->active_tab : -1);
-  if (p != NULL)
-    for (guint i = 0; i < p->tabs->len; i++)
-      pt_tab_strip_set_activity(PT_TAB_STRIP(w->tabstrip), (int)i,
-          ((PtTabUI *)g_ptr_array_index(p->tabs, i))->activity);
-  g_ptr_array_free(titles, TRUE);
+  g_free(infos);
 }
 
 static void refresh_statusline(PtWindow *w) {
@@ -132,7 +138,7 @@ static void show_active_grid(PtWindow *w) {
     gtk_box_remove(GTK_BOX(w->content), child);
   PtTabUI *t = active_tab(active_project(w));
   if (t != NULL) {
-    t->activity = FALSE;
+    t->unread = 0;
     gtk_box_append(GTK_BOX(w->content), t->grid);
     pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
   } else {
@@ -173,15 +179,27 @@ static void on_grid_focus(PtPaneGrid *g, gpointer user) {
   refresh_statusline(PT_WINDOW(user));
 }
 
+/* Output on an unwatched tab bumps its unread counter. Background projects
+ * count too, so scan every project; only the tab the user is actually looking
+ * at (active project AND active tab) is exempt. Bursts are coalesced to at
+ * most one bump per 300ms so a chatty command reads as a few units of news
+ * rather than hundreds. */
 static void on_grid_activity(PtPaneGrid *g, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
-  PtProjectUI *p = active_project(w);
-  if (p == NULL) return;
-  for (guint i = 0; i < p->tabs->len; i++) {
-    PtTabUI *t = g_ptr_array_index(p->tabs, i);
-    if (t->grid == GTK_WIDGET(g) && (int)i != p->active_tab) {
-      t->activity = TRUE;
-      pt_tab_strip_set_activity(PT_TAB_STRIP(w->tabstrip), (int)i, TRUE);
+  for (guint pi = 0; pi < w->projects->len; pi++) {
+    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
+    gboolean p_active = ((int)pi == w->active_project);
+    for (guint ti = 0; ti < p->tabs->len; ti++) {
+      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
+      if (t->grid != GTK_WIDGET(g)) continue;
+      if (p_active && (int)ti == p->active_tab) return;   /* being watched */
+      gint64 now = g_get_monotonic_time();
+      if (now - t->unread_stamp > 300 * G_TIME_SPAN_MILLISECOND) {
+        t->unread++;
+        t->unread_stamp = now;
+        if (p_active) refresh_tabstrip(w);
+      }
+      return;
     }
   }
 }
@@ -209,6 +227,9 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
 }
 
 /* Focused pane's foreground program changed → relabel the owning tab live.
+ * A comm change is exactly when run-state flips, so refresh the strip (dots)
+ * and the sidebar (run counters) regardless of whether the title moved; both
+ * are throttled by the 700ms comm poll upstream.
  * Deliberately does NOT mark_dirty: command churn must not spam saves; the tab
  * title is captured on the next structural save anyway. */
 static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
@@ -222,6 +243,7 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
       t->title = g_strdup(comm);
       if ((int)pi == w->active_project)
         refresh_tabstrip(w);
+      refresh_sidebar(w);
       return;
     }
   }
