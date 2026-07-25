@@ -100,13 +100,34 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   return term;
 }
 
+/* Detach a widget through its parent's own child-management API. A GtkPaned
+ * tracks its start/end children in dedicated pointers; a bare
+ * gtk_widget_unparent() leaves those stale, and when the old paned is later
+ * disposed (event dispatch can keep it alive past a rebuild) its dispose
+ * unparents the stale pointers — ripping the widget out of whatever NEW
+ * parent it has by then. Blank panes. Mirrors ghostty's gtk detachWidget. */
+static void detach_from_parent(GtkWidget *w) {
+  GtkWidget *parent = gtk_widget_get_parent(w);
+  if (parent == NULL) return;
+  if (GTK_IS_PANED(parent)) {
+    GtkPaned *p = GTK_PANED(parent);
+    if (gtk_paned_get_start_child(p) == w) {
+      gtk_paned_set_start_child(p, NULL);
+      return;
+    }
+    if (gtk_paned_get_end_child(p) == w) {
+      gtk_paned_set_end_child(p, NULL);
+      return;
+    }
+  }
+  gtk_widget_unparent(w);
+}
+
 /* Detach every terminal from the old widget tree so paneds can be dropped. */
 static void detach_terminals(PtSplitNode *n) {
   if (n == NULL) return;
   if (n->kind == PT_SPLIT_LEAF) {
-    GtkWidget *term = n->user;
-    if (term != NULL && gtk_widget_get_parent(term) != NULL)
-      gtk_widget_unparent(term);
+    if (n->user != NULL) detach_from_parent(n->user);
     return;
   }
   detach_terminals(n->a);
@@ -211,7 +232,7 @@ gboolean pt_pane_grid_close_focused(PtPaneGrid *g) {
   if (g->focused == NULL) return FALSE;
   GtkWidget *term = g->focused->user;
   if (term != NULL) {
-    if (gtk_widget_get_parent(term) != NULL) gtk_widget_unparent(term);
+    detach_from_parent(term);
     g_object_unref(term);
     g->focused->user = NULL;
   }
@@ -284,7 +305,7 @@ static void free_terminals(PtSplitNode *n) {
   if (n->kind == PT_SPLIT_LEAF) {
     if (n->user != NULL) {
       GtkWidget *term = n->user;
-      if (gtk_widget_get_parent(term) != NULL) gtk_widget_unparent(term);
+      detach_from_parent(term);
       g_object_unref(term);
       n->user = NULL;
     }
