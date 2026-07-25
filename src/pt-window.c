@@ -5,6 +5,7 @@
 #include "pt-statusline.h"
 #include "pt-project-bar.h"
 #include "pt-pane-grid.h"
+#include "pt-palette.h"
 #include "pt-session.h"
 #include "pt-git-parse.h"
 #include "pt-git-monitor.h"
@@ -34,6 +35,7 @@ struct _PtWindow {
   GPtrArray *projects;  /* PtProjectUI* */
   int active_project;
   GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
+  GtkWidget *palette;   /* overlay child; hidden unless ⌃K is up */
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
@@ -636,12 +638,17 @@ static void on_project_selected(PtSidebar *sb, int idx, gpointer user) {
   action_switch_project(PT_WINDOW(user), idx);
 }
 
+/* Hands the keyboard back to whatever pane is on screen. Anything that steals
+ * focus for a transient UI (sidebar search, command palette) ends here. */
+static void focus_active_terminal(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  if (t != NULL) pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
+}
+
 /* Escape in the sidebar search hands the keyboard back to the terminal. */
 static void on_search_escape(PtSidebar *sb, gpointer user) {
   (void)sb;
-  PtWindow *w = PT_WINDOW(user);
-  PtTabUI *t = active_tab(active_project(w));
-  if (t != NULL) pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
+  focus_active_terminal(PT_WINDOW(user));
 }
 
 static void on_tab_selected(PtTabStrip *s, int idx, gpointer user) {
@@ -654,10 +661,53 @@ static void on_tab_new(PtTabStrip *s, gpointer user) {
   action_new_tab(PT_WINDOW(user));
 }
 
+/* ---------- command palette ---------- */
+/* Every project, each followed by its shells. The palette ranks this flat list
+ * and hands back the (project, tab) pair the user picked. */
+static void action_open_palette(PtWindow *w) {
+  GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtPaletteItem));
+  for (guint i = 0; i < w->projects->len; i++) {
+    PtProjectUI *p = g_ptr_array_index(w->projects, i);
+    PtPaletteItem it = {
+      .name = g_strdup(p->name),
+      .detail = p->is_repo
+          ? g_strdup_printf("%s · ⑂ %s", p->path, p->git.branch)
+          : g_strdup(p->path),
+      .shortcut = i < 9 ? g_strdup_printf("^%u", i + 1) : NULL,
+      .accent = p->accent, .is_shell = FALSE,
+      .project_idx = (int)i, .tab_idx = -1,
+    };
+    g_array_append_val(arr, it);
+    for (guint j = 0; j < p->tabs->len; j++) {
+      PtTabUI *t = g_ptr_array_index(p->tabs, j);
+      PtPaletteItem sh = {
+        .name = g_strdup(t->title),
+        .detail = g_strdup(p->name),
+        .shortcut = NULL, .accent = p->accent, .is_shell = TRUE,
+        .project_idx = (int)i, .tab_idx = (int)j,
+      };
+      g_array_append_val(arr, sh);
+    }
+  }
+  int n = (int)arr->len;
+  pt_palette_open(PT_PALETTE(w->palette),
+                  (PtPaletteItem *)g_array_free(arr, FALSE), n);
+}
+
+static void on_palette_activated(PtPalette *pal, int project_idx, int tab_idx,
+                                 gpointer user) {
+  (void)pal;
+  PtWindow *w = PT_WINDOW(user);
+  action_switch_project(w, project_idx);
+  if (tab_idx >= 0) action_switch_tab(w, tab_idx);
+}
+
+static void on_palette_closed(PtPalette *pal, gpointer user) {
+  (void)pal;
+  focus_active_terminal(PT_WINDOW(user));
+}
+
 /* ---------- shortcuts ---------- */
-/* Command palette: stub until the palette widget lands; ⌃K is wired to it now
- * so that change is widget-only. */
-static void action_open_palette(PtWindow *w) { (void)w; }
 
 typedef struct { PtWindow *w; int arg; } ShortcutCtx;
 
@@ -952,8 +1002,20 @@ static void pt_window_init(PtWindow *w) {
   gtk_box_append(GTK_BOX(main_col), w->statusline);
   gtk_box_append(GTK_BOX(body), main_col);
 
-  adw_application_window_set_content(ADW_APPLICATION_WINDOW(w), body);
+  /* The palette floats over everything, sidebar included, so it wraps the whole
+   * body rather than the content column. GtkOverlay leaves overlay children out
+   * of its size request, so a hidden palette costs the layout nothing. */
+  GtkWidget *overlay = gtk_overlay_new();
+  gtk_overlay_set_child(GTK_OVERLAY(overlay), body);
+  w->palette = pt_palette_new();
+  gtk_widget_set_visible(w->palette, FALSE);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), w->palette);
 
+  adw_application_window_set_content(ADW_APPLICATION_WINDOW(w), overlay);
+
+  g_signal_connect(w->palette, "activated",
+                   G_CALLBACK(on_palette_activated), w);
+  g_signal_connect(w->palette, "closed", G_CALLBACK(on_palette_closed), w);
   g_signal_connect(w->sidebar, "project-selected",
                    G_CALLBACK(on_project_selected), w);
   g_signal_connect(w->sidebar, "project-add", G_CALLBACK(on_project_add), w);
