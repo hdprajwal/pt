@@ -9,9 +9,12 @@
 gboolean pt_color_parse(const char *s, PtColor *out) {
   if (s == NULL) return FALSE;
   if (s[0] == '#' && strlen(s) == 7) {
-    char *end = NULL;
-    long v = strtol(s + 1, &end, 16);
-    if (end == NULL || *end != '\0') return FALSE;
+    /* Every one of the six must be a hex digit: strtol() would otherwise take
+     * a sign or leading space and hand back an unrelated color — "#-00001"
+     * sign-extends into pure white, "#+12345" reads as "#012345". */
+    for (int i = 1; i <= 6; i++)
+      if (!g_ascii_isxdigit(s[i])) return FALSE;
+    long v = strtol(s + 1, NULL, 16);
     out->r = (v >> 16) & 0xff;
     out->g = (v >> 8) & 0xff;
     out->b = v & 0xff;
@@ -131,11 +134,15 @@ static void theme_kv(const char *key, const char *value, int lineno,
     /* "N=#rrggbb" */
     char *eq = strchr(value, '=');
     if (eq == NULL) { g_warning("pt: theme line %d: bad palette", lineno); return; }
-    char *nstr = g_strndup(value, (gsize)(eq - value));
-    int n = atoi(g_strstrip(nstr));
+    char *nstr = g_strstrip(g_strndup(value, (gsize)(eq - value)));
+    char *nend = NULL;
+    gint64 n = g_ascii_strtoll(nstr, &nend, 10);
+    /* The whole trimmed index must be digits. atoi() reads "x" and "" as 0 and
+     * would silently repaint ANSI 0; strtoll alone would still take a sign. */
+    gboolean index_ok = g_ascii_isdigit(nstr[0]) && *nend == '\0';
     g_free(nstr);
     char *cstr = g_strstrip(g_strdup(eq + 1));
-    if (n >= 0 && n < 16 && pt_color_parse(cstr, &c)) {
+    if (index_ok && n >= 0 && n < 16 && pt_color_parse(cstr, &c)) {
       t->palette[n] = c;
       t->palette_set[n] = TRUE;
     } else {

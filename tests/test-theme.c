@@ -13,6 +13,12 @@ static void test_color_parse(void) {
   g_assert_cmpfloat(c.a, ==, 0.5);
   g_assert_false(pt_color_parse("#12", &c));
   g_assert_false(pt_color_parse("blue", &c));
+  /* strtol() takes a sign and leading space; a hex color must not.
+   * "#-00001" is the 7-char case that used to sign-extend into pure white. */
+  g_assert_false(pt_color_parse("#-000001", &c));
+  g_assert_false(pt_color_parse("#-00001", &c));
+  g_assert_false(pt_color_parse("#+12345", &c));
+  g_assert_false(pt_color_parse("# 12345", &c));
   char *css = pt_color_to_css(&(PtColor){0x0e, 0x10, 0x13, 1.0});
   g_assert_cmpstr(css, ==, "#0e1013");
   g_free(css);
@@ -101,6 +107,23 @@ static void test_derivation_dark(void) {
   pt_theme_free(t);
 }
 
+static void test_palette_index(void) {
+  /* A malformed slot index must warn and pin nothing. atoi() would read "x"
+   * and "" as 0 and silently repaint ANSI 0, and "1x" as slot 1. */
+  PtTheme *t = pt_theme_parse(
+      "palette = x=#ff0000\n"
+      "palette = =#ff0000\n"
+      "palette = 1x=#ff0000\n");
+  g_assert_false(t->palette_set[0]);
+  g_assert_false(t->palette_set[1]);
+  /* a well-formed entry still lands */
+  PtTheme *ok = pt_theme_parse("palette = 1=#ff0000\n");
+  g_assert_true(ok->palette_set[1]);
+  g_assert_cmpint(ok->palette[1].r, ==, 0xff);
+  pt_theme_free(ok);
+  pt_theme_free(t);
+}
+
 static void test_derivation_light(void) {
   /* Light terminal bg: chrome derives DARKER, never clips to white. */
   PtTheme *t = pt_theme_parse(
@@ -169,6 +192,7 @@ int main(void) {
   test_color_parse();
   test_pt_dark_identity();
   test_derivation_dark();
+  test_palette_index();
   test_derivation_light();
   test_precedence();
   test_missing_keys_fall_back();
