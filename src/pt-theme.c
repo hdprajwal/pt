@@ -83,7 +83,7 @@ const char *pt_theme_builtin_pt_dark(void) {
     "app-panel = #15181d\n"
     "app-terminal-clear = #0b0d10\n"
     "app-scrim = rgba(6,8,10,0.62)\n"
-    "app-border = rgba(255,255,255,0.06)\n"
+    "app-border = rgba(255,255,255,0.1)\n"
     "app-border-strong = rgba(255,255,255,0.1)\n"
     "app-hover = rgba(255,255,255,0.045)\n"
     "app-active = rgba(255,255,255,0.07)\n"
