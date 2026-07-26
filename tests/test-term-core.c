@@ -353,6 +353,133 @@ static void test_exit_marker_from_title(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+/* ---- mouse reporting ----
+ *
+ * `stty -echo` stops the tty from echoing our bytes back through the parser
+ * (where an escape sequence would be swallowed as a real one) and `-icanon`
+ * stops the line discipline from holding them until a newline, which a mouse
+ * report never sends. `cat -v` then renders what it reads printably: an ESC
+ * comes back as the two characters "^[", so the encoded report shows up as
+ * ordinary text in the grid. */
+static gboolean wait_for_text(PtTermCore *core, const char *needle) {
+  gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
+  while (g_get_monotonic_time() < deadline) {
+    g_main_context_iteration(NULL, FALSE);
+    pt_term_core_sync(core);
+    char *text = pt_term_core_grid_text(core);
+    gboolean hit = text != NULL && strstr(text, needle) != NULL;
+    g_free(text);
+    if (hit) return TRUE;
+    g_usleep(5000);
+  }
+  return FALSE;
+}
+
+static gboolean tracking_on(PtTermCore *c) {
+  return pt_term_core_mouse_tracking(c);
+}
+
+static gboolean alt_screen_on(PtTermCore *c) {
+  return pt_term_core_alt_screen(c);
+}
+
+static void test_mouse_report_sgr(void) {
+  /* Mode 1000 (normal tracking) + 1006 (SGR format), the pair Claude Code and
+     most modern TUIs ask for. Cells are 8x16 inset by 20/18, so pixel (21, 20)
+     is column 0, row 0 — reported 1-based as ";1;1". */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(tracking_on, core));
+
+  /* Left press then release: SGR button 0, "M" for press and "m" for release. */
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          21.0, 20.0));
+  g_assert_true(wait_for_text(core, "^[[<0;1;1M"));
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_RELEASE,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          21.0, 20.0));
+  g_assert_true(wait_for_text(core, "^[[<0;1;1m"));
+
+  /* The wheel rides the same protocol: button four is 64, five is 65. */
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_FOUR, 0,
+                                          29.0, 36.0));
+  g_assert_true(wait_for_text(core, "^[[<64;2;2M"));
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_FIVE, 0,
+                                          29.0, 36.0));
+  g_assert_true(wait_for_text(core, "^[[<65;2;2M"));
+
+  pt_term_core_free(core);
+}
+
+static void test_mouse_report_needs_tracking(void) {
+  /* No mouse mode set: the encoder must produce nothing at all, so a click in
+     a plain shell can never leak escape bytes into the command line. */
+  const char *argv[] = {"/bin/cat", NULL};
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  g_assert_nonnull(core);
+  g_assert_false(pt_term_core_mouse_tracking(core));
+  g_assert_false(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                           GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                           21.0, 20.0));
+  pt_term_core_free(core);
+}
+
+static void test_alt_screen_arrows(void) {
+  /* On the alt screen with no mouse tracking, the wheel becomes cursor keys.
+     Mode 1007 is on by default, and DECCKM is off here, so the normal form
+     ESC [ B is what a pager should receive. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1049h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(alt_screen_on, core));
+  g_assert_true(pt_term_core_alt_scroll(core));      /* default-on */
+  g_assert_false(pt_term_core_mouse_tracking(core));
+
+  pt_term_core_send_arrows(core, FALSE, 2);
+  g_assert_true(wait_for_text(core, "^[[B^[[B"));
+  pt_term_core_send_arrows(core, TRUE, 1);
+  g_assert_true(wait_for_text(core, "^[[A"));
+
+  pt_term_core_free(core);
+}
+
+static void test_scroll_bottom(void) {
+  /* Typing while scrolled up must snap back to the prompt. Fill the scrollback
+     past one screen, scroll up until the last line is off-view, then assert
+     scroll_bottom brings it back. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "i=1; while [ $i -le 60 ]; do echo line$i; i=$((i+1)); done; "
+    "echo bottom-marker; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "bottom-marker"));
+
+  pt_term_core_scroll_delta(core, -40);
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "bottom-marker"));   /* scrolled out of view */
+  g_free(text);
+
+  pt_term_core_scroll_bottom(core);
+  pt_term_core_sync(core);
+  text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_nonnull(strstr(text, "bottom-marker"));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
@@ -366,5 +493,9 @@ int main(int argc, char *argv[]) {
                   test_running_state_foreground_job);
   g_test_add_func("/termcore/spawn-env", test_spawn_env);
   g_test_add_func("/termcore/exit-marker", test_exit_marker_from_title);
+  g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
+  g_test_add_func("/termcore/mouse-report-off", test_mouse_report_needs_tracking);
+  g_test_add_func("/termcore/alt-screen-arrows", test_alt_screen_arrows);
+  g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
   return g_test_run();
 }

@@ -30,6 +30,8 @@ gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
                                guint32 unshifted_cp,
                                const char *utf8, gsize utf8_len);
 void pt_term_core_scroll_delta(PtTermCore *c, int rows);
+/* Snap the viewport back to the active area (what typing should do). */
+void pt_term_core_scroll_bottom(PtTermCore *c);
 
 /* ---- mouse selection (viewport-relative pixels; PT_PAD_X/PT_PAD_Y-inset) ---- */
 void pt_term_core_selection_press(PtTermCore *c, double px, double py,
@@ -39,7 +41,25 @@ void pt_term_core_selection_release(PtTermCore *c, double px, double py);
 void pt_term_core_selection_clear(PtTermCore *c);
 char *pt_term_core_selection_text(PtTermCore *c);  /* NULL when no selection; caller g_free */
 
+/* ---- mouse reporting (modes 9/1000/1002/1003; same pixel space as above) ----
+ *
+ * When an app tracks the mouse it owns the pointer: wheel, buttons and motion
+ * are encoded in whatever format the app asked for (X10/SGR/URxvt/SGR-pixels)
+ * and written to the pty instead of driving selection or the viewport.
+ * Pass GHOSTTY_MOUSE_BUTTON_UNKNOWN for bare motion (no button held).
+ * Returns TRUE when the encoder produced bytes (event was consumed) — not
+ * every event reports, e.g. motion inside the same cell, or motion at all in
+ * press/release-only modes. */
+gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
+                                   GhosttyMouseButton button, GhosttyMods mods,
+                                   double px, double py);
 gboolean pt_term_core_mouse_tracking(PtTermCore *c);
+gboolean pt_term_core_alt_screen(PtTermCore *c);   /* alternate screen active */
+gboolean pt_term_core_alt_scroll(PtTermCore *c);   /* mode 1007, default on */
+/* Wheel on the alt screen with alt-scroll on: `count` cursor-key arrows,
+ * application or normal form per DECCKM. */
+void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count);
+
 gboolean pt_term_core_bracketed_paste(PtTermCore *c);
 void pt_term_core_sync(PtTermCore *c);              /* render_state_update */
 GhosttyTerminal pt_term_core_terminal(PtTermCore *c);

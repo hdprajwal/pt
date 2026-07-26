@@ -19,6 +19,9 @@ struct PtTermCore {
   GhosttyRenderStateRowCells row_cells;
   GhosttyKeyEncoder key_encoder;
   GhosttyKeyEvent key_event;
+  GhosttyMouseEncoder mouse_encoder;
+  GhosttyMouseEvent mouse_event;
+  guint buttons_down;       /* bitmask of held buttons, by GhosttyMouseButton */
 
   int pty_fd;
   pid_t child;
@@ -239,7 +242,9 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
       ghostty_render_state_row_iterator_new(NULL, &c->row_iter) != GHOSTTY_SUCCESS ||
       ghostty_render_state_row_cells_new(NULL, &c->row_cells) != GHOSTTY_SUCCESS ||
       ghostty_key_encoder_new(NULL, &c->key_encoder) != GHOSTTY_SUCCESS ||
-      ghostty_key_event_new(NULL, &c->key_event) != GHOSTTY_SUCCESS) {
+      ghostty_key_event_new(NULL, &c->key_event) != GHOSTTY_SUCCESS ||
+      ghostty_mouse_encoder_new(NULL, &c->mouse_encoder) != GHOSTTY_SUCCESS ||
+      ghostty_mouse_event_new(NULL, &c->mouse_event) != GHOSTTY_SUCCESS) {
     g_set_error(error, g_quark_from_static_string("pt-term-core"), 1,
                 "libghostty-vt object creation failed");
     pt_term_core_free(c);
@@ -339,6 +344,12 @@ void pt_term_core_scroll_delta(PtTermCore *c, int rows) {
     .tag = GHOSTTY_SCROLL_VIEWPORT_DELTA,
     .value = { .delta = rows },
   };
+  ghostty_terminal_scroll_viewport(c->terminal, sv);
+  if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
+}
+
+void pt_term_core_scroll_bottom(PtTermCore *c) {
+  GhosttyTerminalScrollViewport sv = { .tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM };
   ghostty_terminal_scroll_viewport(c->terminal, sv);
   if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
 }
@@ -493,6 +504,93 @@ gboolean pt_term_core_mouse_tracking(PtTermCore *c) {
   return tracking;
 }
 
+/* ---- mouse reporting ----
+ *
+ * The encoder needs both the terminal's protocol state (which tracking mode,
+ * which output format) and the renderer geometry, so it can map surface pixels
+ * to cells and tell when the pointer left the viewport. Terminal state is
+ * synced per event because the app can flip modes at any time; the geometry is
+ * rebuilt from the same cell metrics and padding the widget draws with. */
+static void mouse_encoder_sync(PtTermCore *c, gboolean any_button_pressed) {
+  ghostty_mouse_encoder_setopt_from_terminal(c->mouse_encoder, c->terminal);
+
+  GhosttyMouseEncoderSize size = GHOSTTY_INIT_SIZED(GhosttyMouseEncoderSize);
+  size.screen_width = (uint32_t)(c->cols * c->cell_w + 2 * PT_CORE_PAD_X);
+  size.screen_height = (uint32_t)(c->rows * c->cell_h + 2 * PT_CORE_PAD_Y);
+  size.cell_width = (uint32_t)c->cell_w;
+  size.cell_height = (uint32_t)c->cell_h;
+  size.padding_left = size.padding_right = PT_CORE_PAD_X;
+  size.padding_top = size.padding_bottom = PT_CORE_PAD_Y;
+  ghostty_mouse_encoder_setopt(c->mouse_encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE,
+                               &size);
+
+  bool pressed = any_button_pressed;
+  ghostty_mouse_encoder_setopt(
+      c->mouse_encoder, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed);
+  /* Dedupe motion by cell: without this a TUI gets a report per pixel. */
+  bool track_last_cell = true;
+  ghostty_mouse_encoder_setopt(
+      c->mouse_encoder, GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL,
+      &track_last_cell);
+}
+
+gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
+                                   GhosttyMouseButton button, GhosttyMods mods,
+                                   double px, double py) {
+  if (c->child_exited || c->pty_fd < 0) return FALSE;
+
+  /* The encoder wants a button mask that already includes the current event,
+   * so a press registers before encoding and a release clears before it. */
+  if (button != GHOSTTY_MOUSE_BUTTON_UNKNOWN) {
+    if (action == GHOSTTY_MOUSE_ACTION_PRESS)
+      c->buttons_down |= 1u << button;
+    else if (action == GHOSTTY_MOUSE_ACTION_RELEASE)
+      c->buttons_down &= ~(1u << button);
+  }
+  mouse_encoder_sync(c, c->buttons_down != 0);
+
+  ghostty_mouse_event_set_action(c->mouse_event, action);
+  if (button != GHOSTTY_MOUSE_BUTTON_UNKNOWN)
+    ghostty_mouse_event_set_button(c->mouse_event, button);
+  else
+    ghostty_mouse_event_clear_button(c->mouse_event);
+  ghostty_mouse_event_set_mods(c->mouse_event, mods);
+  ghostty_mouse_event_set_position(c->mouse_event,
+                                   (GhosttyMousePosition){ .x = (float)px,
+                                                           .y = (float)py });
+
+  char buf[128];
+  size_t written = 0;
+  if (ghostty_mouse_encoder_encode(c->mouse_encoder, c->mouse_event, buf,
+                                   sizeof(buf), &written) != GHOSTTY_SUCCESS ||
+      written == 0)
+    return FALSE;
+  pty_write_raw(c->pty_fd, buf, written);
+  return TRUE;
+}
+
+gboolean pt_term_core_alt_screen(PtTermCore *c) {
+  GhosttyTerminalScreen screen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
+  ghostty_terminal_get(c->terminal, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN,
+                       &screen);
+  return screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE;
+}
+
+gboolean pt_term_core_alt_scroll(PtTermCore *c) {
+  bool on = false;
+  ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_ALT_SCROLL, &on);
+  return on;
+}
+
+void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count) {
+  if (c->child_exited || c->pty_fd < 0 || count <= 0) return;
+  bool app_cursor = false;
+  ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_DECCKM, &app_cursor);
+  const char *seq = app_cursor ? (up ? "\x1bOA" : "\x1bOB")
+                               : (up ? "\x1b[A" : "\x1b[B");
+  for (int i = 0; i < count; i++) pty_write_raw(c->pty_fd, seq, 3);
+}
+
 gboolean pt_term_core_bracketed_paste(PtTermCore *c) {
   bool on = false;
   ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_BRACKETED_PASTE, &on);
@@ -593,6 +691,8 @@ void pt_term_core_free(PtTermCore *c) {
   }
   if (c->key_event != NULL) ghostty_key_event_free(c->key_event);
   if (c->key_encoder != NULL) ghostty_key_encoder_free(c->key_encoder);
+  if (c->mouse_event != NULL) ghostty_mouse_event_free(c->mouse_event);
+  if (c->mouse_encoder != NULL) ghostty_mouse_encoder_free(c->mouse_encoder);
   if (c->row_cells != NULL) ghostty_render_state_row_cells_free(c->row_cells);
   if (c->row_iter != NULL) ghostty_render_state_row_iterator_free(c->row_iter);
   if (c->render_state != NULL) ghostty_render_state_free(c->render_state);
