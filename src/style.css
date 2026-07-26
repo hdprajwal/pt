@@ -14,13 +14,17 @@ label {
 
 /* Flatten Adwaita chrome (kept from previous theme, class list updated). */
 button.pt-tab-close, button.pt-remove, button.pt-add-project, button.pt-tab-new,
+button.pt-tab-zed, button.pt-tab-panel,
+button.pt-info-refresh, button.pt-info-btn,
 windowcontrols button.titlebutton, windowcontrols button {
   background-image: none; background-color: transparent;
   box-shadow: none; border: none; min-height: 0; min-width: 0;
   outline: none; outline-width: 0;
 }
 button.pt-tab-close:focus, button.pt-remove:focus, button.pt-add-project:focus,
-button.pt-tab-new:focus, windowcontrols button:focus,
+button.pt-tab-new:focus, button.pt-tab-zed:focus, button.pt-tab-panel:focus,
+windowcontrols button:focus,
+button.pt-info-refresh:focus, button.pt-info-btn:focus,
 button.pt-tab-close:focus-visible, button.pt-add-project:focus-visible {
   outline: none; box-shadow: none;
 }
@@ -39,11 +43,11 @@ windowcontrols button.titlebutton.close:hover image { color: var(--pt-err); }
 windowcontrols button.titlebutton.close,
 windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
 
-/* ---- status dots (the only circles) ---- */
+/* ---- status dots (the only circles) ----
+ * 6px: tab-strip run state and palette rows. 7px: the info panel's accent. */
 .pt-dot { border-radius: 50%; background-color: var(--pt-text-dim); }
 .pt-dot-6 { min-width: 6px; min-height: 6px; }
 .pt-dot-7 { min-width: 7px; min-height: 7px; }
-.pt-dot-8 { min-width: 8px; min-height: 8px; }
 .pt-dot.running { background-color: var(--pt-ok); box-shadow: 0 0 0 3px var(--pt-ok-glow); }
 .pt-dot.idle    { background-color: var(--pt-text-dim); box-shadow: none; }
 .pt-dot.error   { background-color: var(--pt-err); box-shadow: none; }
@@ -53,21 +57,12 @@ windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
   background-color: var(--pt-surface);
   border-right: 1px solid var(--pt-border);
 }
-.pt-sidebar-header {
-  color: var(--pt-text-mid); font-family: var(--pt-font-sans);
-  font-weight: 600; font-size: var(--pt-fs-md); letter-spacing: .08em;
-  padding: 10px 14px 8px 14px;
-}
-.pt-sidebar-count {
-  color: var(--pt-text-dim); font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm);
-  padding: 10px 14px 8px 14px;
-}
 .pt-search {
   background-color: var(--pt-field-bg);
   border: 1px solid var(--pt-border);
   /* 26 + 1px border top/bottom = 28 rendered, matching the other bars */
   min-height: 26px;
-  margin: 0 8px 6px 8px;
+  margin: 8px 8px 6px 8px;
   padding: 0 8px;
 }
 .pt-search text, .pt-search entry {
@@ -117,6 +112,104 @@ button.pt-add-project {
 button.pt-add-project:hover { background-color: var(--pt-hover); color: var(--pt-text); }
 .pt-add-hint { color: var(--pt-text-ghost); font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); }
 
+/* ---- info panel (266px, fixed; mirrors the sidebar) ---- */
+.pt-infopanel {
+  background-color: var(--pt-surface);
+  border-left: 1px solid var(--pt-border);
+}
+.pt-info-sect { padding: 10px 12px 12px; }
+.pt-info-sect.git { border-top: 1px solid var(--pt-border); }
+.pt-info-head {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-2xs);
+  color: var(--pt-text-dim); letter-spacing: 1px;
+  margin-bottom: 10px;
+}
+.pt-info-count {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
+  color: var(--pt-warn); margin-bottom: 8px;
+}
+button.pt-info-refresh, button.pt-info-refresh label {
+  color: var(--pt-text-dim); font-size: var(--pt-fs-md);
+}
+button.pt-info-refresh { padding: 0 3px; margin-bottom: 10px; }
+button.pt-info-refresh:hover,
+button.pt-info-refresh:hover label { color: var(--pt-text); }
+.pt-info-shell {
+  font-family: var(--pt-font-sans); font-weight: 600;
+  font-size: var(--pt-fs-lg); color: var(--pt-text);
+}
+.pt-info-pid {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
+  color: var(--pt-text-dim);
+}
+.pt-info-path {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm2);
+  color: var(--pt-text-muted); margin: 8px 0 10px 0;
+}
+/* font-weight too: Adwaita bolds button labels, and these read as quiet
+ * actions, not calls to action. */
+button.pt-info-btn, button.pt-info-btn label {
+  color: var(--pt-text-muted); font-family: var(--pt-font-sans);
+  font-size: var(--pt-fs-sm); font-weight: 400;
+}
+button.pt-info-btn {
+  background-color: var(--pt-field-bg);
+  border: 1px solid var(--pt-border);
+  min-height: 0; min-width: 0; padding: 4px 9px;
+}
+/* The Zed action carries the same symbolic icon as the tab strip's button;
+ * Adwaita colours the image separately, so it needs the rule too. 12px keeps
+ * it on the label's line inside the smaller flat button. */
+button.pt-info-btn image { color: var(--pt-text-muted); -gtk-icon-size: 12px; }
+button.pt-info-btn:hover { background-color: var(--pt-hover); }
+button.pt-info-btn:hover, button.pt-info-btn:hover label,
+button.pt-info-btn:hover image { color: var(--pt-text); }
+/* The branch line is the git section's header, so the icon sits on the text
+ * line (12px, like the Zed button's) and every child shares one bottom margin
+ * to keep the row's baseline even. */
+.pt-info-branch-icon {
+  color: var(--pt-text-muted); -gtk-icon-size: 12px; margin-bottom: 8px;
+}
+.pt-info-branch-icon.empty { color: var(--pt-text-ghost); }
+.pt-info-branch {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-base);
+  color: var(--pt-text); margin-bottom: 8px;
+}
+.pt-info-ab {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
+  color: var(--pt-text-dim); margin-bottom: 8px;
+}
+.pt-info-file { min-height: 19px; }
+.pt-info-st {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm);
+  color: var(--pt-text-dim); min-width: 16px;
+}
+.pt-info-st.m { color: var(--pt-warn); }
+.pt-info-st.a { color: var(--pt-ok); }
+.pt-info-st.d { color: var(--pt-err); }
+.pt-info-st.u { color: var(--pt-text-dim); }
+.pt-info-fdir {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm);
+  color: var(--pt-text-ghost);
+}
+.pt-info-fname {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm);
+  color: var(--pt-text-muted);
+}
+.pt-info-file:hover .pt-info-fname { color: var(--pt-text); }
+.pt-info-add {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
+  color: var(--pt-ok);
+}
+.pt-info-del {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
+  color: var(--pt-err);
+}
+.pt-info-empty {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm);
+  color: var(--pt-text-ghost); margin-bottom: 8px;
+}
+
 /* ---- project bar (46px) ---- */
 .pt-projectbar {
   background-color: var(--pt-background);
@@ -163,13 +256,6 @@ button.pt-add-project:hover { background-color: var(--pt-hover); color: var(--pt
   background-color: var(--pt-background);
   box-shadow: none;
 }
-/* Active tab's top edge in the project accent (class set in pt-tab-strip.c). */
-.pt-tab.active.pt-a0 { box-shadow: inset 0 2px 0 var(--pt-accent-0); }
-.pt-tab.active.pt-a1 { box-shadow: inset 0 2px 0 var(--pt-accent-1); }
-.pt-tab.active.pt-a2 { box-shadow: inset 0 2px 0 var(--pt-accent-2); }
-.pt-tab.active.pt-a3 { box-shadow: inset 0 2px 0 var(--pt-accent-3); }
-.pt-tab.active.pt-a4 { box-shadow: inset 0 2px 0 var(--pt-accent-4); }
-.pt-tab.active.pt-a5 { box-shadow: inset 0 2px 0 var(--pt-accent-5); }
 /* Full-height 1px border after every tab (see pt-tab-strip.c). */
 .pt-tab-sep {
   background-color: var(--pt-border-strong);
@@ -193,6 +279,23 @@ button.pt-add-project:hover { background-color: var(--pt-hover); color: var(--pt
  * tab then stretches to match. */
 button.pt-tab-new { min-width: 24px; min-height: 24px; padding: 0; margin: 0 4px; color: var(--pt-text-faint); font-size: var(--pt-fs-plus); }
 button.pt-tab-new:hover { background-color: var(--pt-hover); color: var(--pt-text); }
+/* Opens the active project in Zed; sits after the +, same flat treatment. The
+ * icon is symbolic (bundled as a GResource), so `color` recolours it — but the
+ * image child needs the rule too, Adwaita colours it separately. */
+button.pt-tab-zed { min-width: 24px; min-height: 24px; padding: 0; margin: 0 2px 0 0; }
+button.pt-tab-zed, button.pt-tab-zed image {
+  color: var(--pt-text-faint); -gtk-icon-size: 14px;
+}
+button.pt-tab-zed:hover { background-color: var(--pt-hover); }
+button.pt-tab-zed:hover, button.pt-tab-zed:hover image { color: var(--pt-text); }
+/* Toggles the info panel (⌃I); last in the right-edge cluster, same flat
+ * symbolic treatment as the Zed button. */
+button.pt-tab-panel { min-width: 24px; min-height: 24px; padding: 0; margin: 0 6px 0 0; }
+button.pt-tab-panel, button.pt-tab-panel image {
+  color: var(--pt-text-faint); -gtk-icon-size: 14px;
+}
+button.pt-tab-panel:hover { background-color: var(--pt-hover); }
+button.pt-tab-panel:hover, button.pt-tab-panel:hover image { color: var(--pt-text); }
 
 /* ---- status bar (34px) ---- */
 .pt-statusbar {
@@ -264,18 +367,21 @@ button.pt-tab-new:hover { background-color: var(--pt-hover); color: var(--pt-tex
 .pt-empty { color: var(--pt-text-faint); font-family: var(--pt-font-mono); font-size: var(--pt-fs-md); }
 .pt-empty-hint { color: var(--pt-text-ghost); font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm); }
 
-/* ---- scrollbars (sidebar project list) ----
+/* ---- scrollbars (sidebar project list, info-panel file list) ----
  * Adwaita's slider uses a 4px transparent border inside a 6px min-width, which
  * makes GTK measure a -2px content width and warn. Restating the slider box
  * both silences that and keeps the bar unobtrusive. */
-.pt-sidebar scrollbar { background: none; border: none; }
+.pt-sidebar scrollbar, .pt-infopanel scrollbar { background: none; border: none; }
 .pt-sidebar scrollbar slider,
-.pt-sidebar scrollbar.overlay-indicator:not(.dragging):not(.hovering) slider {
+.pt-sidebar scrollbar.overlay-indicator:not(.dragging):not(.hovering) slider,
+.pt-infopanel scrollbar slider,
+.pt-infopanel scrollbar.overlay-indicator:not(.dragging):not(.hovering) slider {
   background-color: var(--pt-slider);
   border: none; margin: 2px;
   min-width: 5px; min-height: 24px;
 }
-.pt-sidebar scrollbar slider:hover { background-color: var(--pt-slider-hover); }
+.pt-sidebar scrollbar slider:hover,
+.pt-infopanel scrollbar slider:hover { background-color: var(--pt-slider-hover); }
 
 /* ---- paned separators ---- */
 paned > separator {
@@ -292,12 +398,13 @@ paned > separator:hover { background-color: var(--pt-ok); }
 .pt-dot.pt-a4 { background-color: var(--pt-accent-4); }
 .pt-dot.pt-a5 { background-color: var(--pt-accent-5); }
 
-.pt-project-row.active .pt-dot.pt-a0 { box-shadow: 0 0 0 3px var(--pt-accent-0-glow); }
-.pt-project-row.active .pt-dot.pt-a1 { box-shadow: 0 0 0 3px var(--pt-accent-1-glow); }
-.pt-project-row.active .pt-dot.pt-a2 { box-shadow: 0 0 0 3px var(--pt-accent-2-glow); }
-.pt-project-row.active .pt-dot.pt-a3 { box-shadow: 0 0 0 3px var(--pt-accent-3-glow); }
-.pt-project-row.active .pt-dot.pt-a4 { box-shadow: 0 0 0 3px var(--pt-accent-4-glow); }
-.pt-project-row.active .pt-dot.pt-a5 { box-shadow: 0 0 0 3px var(--pt-accent-5-glow); }
+/* The panel speaks for one project at a time, so its dot always glows. */
+.pt-infopanel .pt-dot.pt-a0 { box-shadow: 0 0 0 3px var(--pt-accent-0-glow); }
+.pt-infopanel .pt-dot.pt-a1 { box-shadow: 0 0 0 3px var(--pt-accent-1-glow); }
+.pt-infopanel .pt-dot.pt-a2 { box-shadow: 0 0 0 3px var(--pt-accent-2-glow); }
+.pt-infopanel .pt-dot.pt-a3 { box-shadow: 0 0 0 3px var(--pt-accent-3-glow); }
+.pt-infopanel .pt-dot.pt-a4 { box-shadow: 0 0 0 3px var(--pt-accent-4-glow); }
+.pt-infopanel .pt-dot.pt-a5 { box-shadow: 0 0 0 3px var(--pt-accent-5-glow); }
 
 .pt-project-row.active.pt-a0 { box-shadow: inset 2px 0 0 var(--pt-accent-0); }
 .pt-project-row.active.pt-a1 { box-shadow: inset 2px 0 0 var(--pt-accent-1); }

@@ -10,8 +10,7 @@ static guint signals[N_SIGNALS];
 
 struct _PtSidebar {
   GtkWidget parent_instance;
-  GtkWidget *box;          /* vertical: header, search, rows, sep, add */
-  GtkWidget *count_label;
+  GtkWidget *box;          /* vertical: search, rows, sep, add */
   GtkWidget *search;       /* GtkText */
   GtkWidget *rows_box;
   PtSidebarRow *rows;      /* owned deep copy; name/path are g_strdup'd */
@@ -76,25 +75,18 @@ static void rebuild_rows(PtSidebar *sb) {
   while ((child = gtk_widget_get_first_child(sb->rows_box)) != NULL)
     gtk_box_remove(GTK_BOX(sb->rows_box), child);
 
-  int shown = 0;
   for (int i = 0; i < sb->n_rows; i++) {
     if (!row_matches(sb, i)) continue;
-    shown++;
     const PtSidebarRow *r = &sb->rows[i];
 
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(row, "pt-project-row");
+    /* The row carries no dot any more; the accent survives as the active
+     * row's inset left edge (see .pt-project-row.active.pt-aN). */
     pt_accent_set_class(row, r->accent);
     if (i == sb->active) gtk_widget_add_css_class(row, "active");
     /* Original project index — the window never sees filtered positions. */
     g_object_set_data(G_OBJECT(row), "pt-index", GINT_TO_POINTER(i));
-
-    GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_add_css_class(dot, "pt-dot");
-    gtk_widget_add_css_class(dot, "pt-dot-7");
-    pt_accent_set_class(dot, r->accent);
-    gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(row), dot);
 
     GtkWidget *name = gtk_label_new(r->name);
     gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
@@ -165,10 +157,6 @@ static void rebuild_rows(PtSidebar *sb) {
     gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
     gtk_box_append(GTK_BOX(sb->rows_box), row);
   }
-
-  char n[16];
-  g_snprintf(n, sizeof(n), "%d", shown);
-  gtk_label_set_text(GTK_LABEL(sb->count_label), n);
 }
 
 /* ---------- search ---------- */
@@ -304,19 +292,6 @@ static void pt_sidebar_init(PtSidebar *sb) {
   sb->active = -1;
   sb->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_parent(sb->box, GTK_WIDGET(sb));
-
-  /* header: PROJECTS ................ <n> */
-  GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  GtkWidget *title = gtk_label_new("PROJECTS");
-  gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-  gtk_widget_set_hexpand(title, TRUE);
-  gtk_widget_add_css_class(title, "pt-sidebar-header");
-  gtk_box_append(GTK_BOX(header), title);
-  sb->count_label = gtk_label_new("0");
-  gtk_widget_set_halign(sb->count_label, GTK_ALIGN_END);
-  gtk_widget_add_css_class(sb->count_label, "pt-sidebar-count");
-  gtk_box_append(GTK_BOX(header), sb->count_label);
-  gtk_box_append(GTK_BOX(sb->box), header);
 
   /* search: ⌕ [.................] */
   GtkWidget *search_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);

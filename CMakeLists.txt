@@ -36,9 +36,12 @@ add_custom_command(
           --sourcedir=${CMAKE_SOURCE_DIR}/src
           ${CMAKE_SOURCE_DIR}/src/pt.gresource.xml
   DEPENDS src/pt.gresource.xml src/style.css
+          src/icons/scalable/actions/pt-zed-symbolic.svg
+          src/icons/scalable/actions/pt-panel-right-symbolic.svg
+          src/icons/scalable/actions/pt-git-branch-symbolic.svg
   COMMENT "Compiling GResources")
 
-add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-palette.c src/pt-settings.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c ${PT_RES_C})
+add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-palette.c src/pt-settings.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c ${PT_RES_C})
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC

@@ -5,7 +5,6 @@
 struct _PtProjectBar {
   GtkWidget parent_instance;
   GtkWidget *handle;   /* GtkWindowHandle — the bar drags the window */
-  GtkWidget *dot;      /* accent identity */
   GtkWidget *name;
   GtkWidget *path;
   GtkWidget *chip;     /* branch + dirty count; hidden when not a repo */
@@ -46,7 +45,7 @@ void pt_project_bar_update(PtProjectBar *b, const char *name, const char *path,
   }
   gtk_widget_set_visible(b->chip, has_branch);
 
-  pt_accent_set_class(b->dot, accent);
+  /* The chip is the bar's only accented element. */
   pt_accent_set_class(b->chip, accent);
 }
 
@@ -76,12 +75,6 @@ static void pt_project_bar_init(PtProjectBar *b) {
   GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
   gtk_widget_add_css_class(box, "pt-projectbar");
   gtk_window_handle_set_child(GTK_WINDOW_HANDLE(b->handle), box);
-
-  b->dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_add_css_class(b->dot, "pt-dot");
-  gtk_widget_add_css_class(b->dot, "pt-dot-8");
-  gtk_widget_set_valign(b->dot, GTK_ALIGN_CENTER);
-  gtk_box_append(GTK_BOX(box), b->dot);
 
   b->name = gtk_label_new("pt");
   gtk_label_set_xalign(GTK_LABEL(b->name), 0.0f);

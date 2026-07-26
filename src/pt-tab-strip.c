@@ -1,7 +1,7 @@
 #include "pt-tab-strip.h"
-#include "pt-accent.h"
 
-enum { SIG_SELECTED, SIG_NEW, SIG_CLOSE, N_SIGNALS };
+enum { SIG_SELECTED, SIG_NEW, SIG_CLOSE, SIG_OPEN_EDITOR, SIG_TOGGLE_PANEL,
+       N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtTabStrip {
@@ -13,6 +13,9 @@ struct _PtTabStrip {
   PtTabInfo *last;         /* owned; last[i].title is g_strdup'd */
   int last_n, last_active, last_accent;
   gboolean rendered;
+  /* Probed once in init, not per rebuild: the strip rebuilds several times a
+   * second and PATH does not move underneath a running window. */
+  gboolean has_zed;
 };
 
 G_DEFINE_FINAL_TYPE(PtTabStrip, pt_tab_strip, GTK_TYPE_WIDGET)
@@ -47,6 +50,16 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user) {
 static void on_new_clicked(GtkButton *btn, gpointer user) {
   (void)btn;
   g_signal_emit(PT_TAB_STRIP(user), signals[SIG_NEW], 0);
+}
+
+static void on_zed_clicked(GtkButton *btn, gpointer user) {
+  (void)btn;
+  g_signal_emit(PT_TAB_STRIP(user), signals[SIG_OPEN_EDITOR], 0);
+}
+
+static void on_panel_clicked(GtkButton *btn, gpointer user) {
+  (void)btn;
+  g_signal_emit(PT_TAB_STRIP(user), signals[SIG_TOGGLE_PANEL], 0);
 }
 
 static void clear_box(GtkWidget *box) {
@@ -107,10 +120,7 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
 
     GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
     gtk_widget_add_css_class(row, "pt-tab");
-    if (is_active) {
-      gtk_widget_add_css_class(row, "active");
-      pt_accent_set_class(row, accent);  /* accent top edge, see style.css */
-    }
+    if (is_active) gtk_widget_add_css_class(row, "active");
     g_object_set_data(G_OBJECT(row), "pt-index", GINT_TO_POINTER(i));
 
     GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -162,6 +172,28 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
   gtk_widget_set_valign(plus, GTK_ALIGN_CENTER);
   g_signal_connect(plus, "clicked", G_CALLBACK(on_new_clicked), s);
   gtk_box_append(GTK_BOX(s->box), plus);
+
+  /* Opens the active project in Zed. Omitted entirely when zed is not on
+   * PATH — a button that cannot do anything is worse than no button. */
+  if (s->has_zed) {
+    GtkWidget *zed = gtk_button_new_from_icon_name("pt-zed-symbolic");
+    gtk_widget_add_css_class(zed, "flat");
+    gtk_widget_add_css_class(zed, "pt-tab-zed");
+    gtk_widget_set_valign(zed, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(zed, "Open in Zed");
+    g_signal_connect(zed, "clicked", G_CALLBACK(on_zed_clicked), s);
+    gtk_box_append(GTK_BOX(s->box), zed);
+  }
+
+  /* Last in the cluster: toggles the info panel, same as ⌃I. Unlike the Zed
+   * button this is never gated — the panel is always there to show. */
+  GtkWidget *panel = gtk_button_new_from_icon_name("pt-panel-right-symbolic");
+  gtk_widget_add_css_class(panel, "flat");
+  gtk_widget_add_css_class(panel, "pt-tab-panel");
+  gtk_widget_set_valign(panel, GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text(panel, "Toggle info panel  ^I");
+  g_signal_connect(panel, "clicked", G_CALLBACK(on_panel_clicked), s);
+  gtk_box_append(GTK_BOX(s->box), panel);
 }
 
 static void pt_tab_strip_dispose(GObject *obj) {
@@ -181,10 +213,17 @@ static void pt_tab_strip_class_init(PtTabStripClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_CLOSE] = g_signal_new("tab-close", PT_TYPE_TAB_STRIP,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
+  signals[SIG_OPEN_EDITOR] = g_signal_new("open-editor", PT_TYPE_TAB_STRIP,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[SIG_TOGGLE_PANEL] = g_signal_new("toggle-panel", PT_TYPE_TAB_STRIP,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void pt_tab_strip_init(PtTabStrip *s) {
   gtk_widget_add_css_class(GTK_WIDGET(s), "pt-tabstrip");
+  char *zed = g_find_program_in_path("zed");
+  s->has_zed = (zed != NULL);
+  g_free(zed);
   s->box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_valign(s->box, GTK_ALIGN_CENTER);
   gtk_widget_set_parent(s->box, GTK_WIDGET(s));

@@ -12,6 +12,12 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
   gtk_style_context_add_provider_for_display(gdk_display_get_default(),
       GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_USER + 1);
   g_object_unref(css);
+  /* Bundled symbolic icons (pt-zed-symbolic). The theme scans for the
+   * scalable/actions layout under this prefix, so hand it the icons root, not
+   * the file. */
+  gtk_icon_theme_add_resource_path(
+      gtk_icon_theme_get_for_display(gdk_display_get_default()),
+      "/dev/hdprajwal/pt/icons");
   /* The window owns the config and installs the theme provider itself. */
   gtk_window_present(GTK_WINDOW(pt_window_new(app)));
 }

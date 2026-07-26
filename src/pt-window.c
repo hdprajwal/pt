@@ -4,6 +4,7 @@
 
 #include "pt-terminal.h"
 #include "pt-sidebar.h"
+#include "pt-info-panel.h"
 #include "pt-tab-strip.h"
 #include "pt-statusline.h"
 #include "pt-project-bar.h"
@@ -29,6 +30,7 @@ typedef struct {
   int active_tab;
   gboolean missing;
   PtGitStatus git;
+  GPtrArray *git_files;  /* PtGitFile*, owned copy of the monitor's list */
   gboolean is_repo;
   int accent;           /* 0..5 index into the fixed accent cycle */
   PtGitMonitor *monitor;
@@ -40,6 +42,7 @@ struct _PtWindow {
   GPtrArray *projects;  /* PtProjectUI* */
   int active_project;
   GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
+  GtkWidget *infopanel;  /* right rail; hidden until ⌃I */
   GtkWidget *palette;   /* overlay child; hidden unless ⌃K is up */
   GtkWidget *settings;  /* overlay child, same stack as the palette; ⌃, */
   guint save_source;    /* debounce timer; used from Task 12 */
@@ -360,6 +363,62 @@ static void refresh_statusline(PtWindow *w) {
                        p != NULL ? p->accent : 0);
 }
 
+/* ---------- info panel ---------- */
+/* The directory the panel shows and its three buttons act on: the focused
+ * pane's cwd, falling back to the project root. NULL when there is neither.
+ * Caller frees. */
+static char *panel_dir(PtWindow *w) {
+  PtTerminal *term = focused_terminal(w);
+  char *cwd = term != NULL ? pt_terminal_current_cwd(term) : NULL;
+  if (cwd != NULL) return cwd;
+  PtProjectUI *p = active_project(w);
+  return p != NULL ? g_strdup(p->path) : NULL;
+}
+
+/* The shell's own name, not the foreground command: the pane's shell pid is a
+ * direct child, so its comm stays "zsh" while a build runs under it. $SHELL
+ * covers a pid we cannot read. Caller frees. */
+static char *shell_name_for(int pid) {
+  if (pid > 0) {
+    char *path = g_strdup_printf("/proc/%d/comm", pid);
+    char *comm = NULL;
+    gboolean ok = g_file_get_contents(path, &comm, NULL, NULL);
+    g_free(path);
+    if (ok) {
+      g_strstrip(comm);
+      if (comm[0] != '\0') return comm;
+    }
+    g_free(comm);
+  }
+  const char *sh = g_getenv("SHELL");
+  return g_path_get_basename(sh != NULL && sh[0] != '\0' ? sh : "sh");
+}
+
+/* Hidden is the default state, and the 500ms tick calls this unconditionally —
+ * so a hidden panel must cost nothing at all. */
+static void refresh_infopanel(PtWindow *w) {
+  if (w->infopanel == NULL || !gtk_widget_get_visible(w->infopanel)) return;
+  PtProjectUI *p = active_project(w);
+  PtTerminal *term = focused_terminal(w);
+  /* A pane that has never been allocated (a tab restored into the background,
+   * or the first frame of a fresh one) has no core yet, and there is no pid to
+   * show until it does. */
+  PtTermCore *core = term != NULL ? pt_terminal_core(term) : NULL;
+  int pid = core != NULL ? (int)pt_term_core_shell_pid(core) : 0;
+  char *shell = shell_name_for(pid);
+  char *dir = panel_dir(w);
+  pt_info_panel_set_info(PT_INFO_PANEL(w->infopanel), shell, pid,
+                         dir != NULL ? dir : "",
+                         p != NULL ? p->accent : 0);
+  g_free(shell);
+  g_free(dir);
+  PtGitStatus none = {0};
+  pt_info_panel_set_git(PT_INFO_PANEL(w->infopanel),
+                        p != NULL ? &p->git : &none,
+                        p != NULL && p->is_repo,
+                        p != NULL ? p->git_files : NULL);
+}
+
 /* Keeps the bar moving mid-task: a long build emits no signal per line, so the
  * only way to see 128/214 tick over is to look. Deliberately does nothing when
  * the focused pane is idle — the falling edge is covered by "command-changed",
@@ -369,6 +428,9 @@ static gboolean tick_statusline(gpointer user) {
   PtTerminal *term = focused_terminal(w);
   if (term != NULL && pt_terminal_running(term))
     refresh_statusline(w);
+  /* The panel has no signal for "the focused pane cd'd" or "focus moved", so
+   * it rides this poll. No-op while hidden. */
+  refresh_infopanel(w);
   return G_SOURCE_CONTINUE;
 }
 
@@ -571,16 +633,20 @@ static void tab_ui_free(gpointer data) {
   g_free(t);
 }
 
-static void on_git_update(const PtGitStatus *st, gboolean is_repo,
-                          gpointer user) {
+static void on_git_update(const PtGitStatus *st, GPtrArray *files,
+                          gboolean is_repo, gpointer user) {
   /* user is the PtProjectUI; find its window via stored back-pointer */
   PtProjectUI *p = user;
   p->git = *st;
   p->is_repo = is_repo;
+  /* `files` dies with this call, so the project keeps its own copy. */
+  g_clear_pointer(&p->git_files, g_ptr_array_unref);
+  p->git_files = pt_git_files_copy(files);
   /* No refresh_statusline here: the status bar stopped speaking for git in the
    * rebuild (that moved to the project bar), and scraping the terminal grid on
    * every git poll would be pure waste. */
   refresh_sidebar(p->window);
+  refresh_infopanel(p->window);
 }
 
 static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
@@ -605,6 +671,7 @@ static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
 static void project_ui_free(gpointer data) {
   PtProjectUI *p = data;
   pt_git_monitor_free(p->monitor);
+  g_clear_pointer(&p->git_files, g_ptr_array_unref);
   g_free(p->name);
   g_free(p->path);
   g_ptr_array_free(p->tabs, TRUE);
@@ -617,6 +684,7 @@ static void action_switch_project(PtWindow *w, int idx) {
   w->active_project = idx;
   refresh_sidebar(w);
   show_active_grid(w);
+  refresh_infopanel(w);
   mark_dirty(w);
 }
 
@@ -625,6 +693,7 @@ static void action_switch_tab(PtWindow *w, int idx) {
   if (p == NULL || idx < 0 || (guint)idx >= p->tabs->len) return;
   p->active_tab = idx;
   show_active_grid(w);
+  refresh_infopanel(w);
   mark_dirty(w);
 }
 
@@ -889,6 +958,16 @@ static void on_search_escape(PtSidebar *sb, gpointer user) {
   focus_active_terminal(PT_WINDOW(user));
 }
 
+/* Shared by ⌃I and the tab strip's panel button. */
+static void action_toggle_infopanel(PtWindow *w) {
+  gboolean show = !gtk_widget_get_visible(w->infopanel);
+  gtk_widget_set_visible(w->infopanel, show);
+  /* refresh_infopanel is a no-op while hidden, so without this the panel would
+   * appear holding whatever it showed when it was last closed. */
+  if (show) refresh_infopanel(w);
+  focus_active_terminal(w);
+}
+
 static void on_tab_selected(PtTabStrip *s, int idx, gpointer user) {
   (void)s;
   action_switch_tab(PT_WINDOW(user), idx);
@@ -902,6 +981,76 @@ static void on_tab_new(PtTabStrip *s, gpointer user) {
 static void on_tab_close(PtTabStrip *s, int idx, gpointer user) {
   (void)s;
   action_close_tab(PT_WINDOW(user), idx);
+}
+
+static void on_toggle_panel(PtTabStrip *s, gpointer user) {
+  (void)s;
+  action_toggle_infopanel(PT_WINDOW(user));
+}
+
+/* Fire-and-forget: zed detaches into its own process and pt never waits on it,
+ * so nothing here reports back beyond a failed spawn. */
+static void spawn_editor(const char *path) {
+  if (path == NULL || path[0] == '\0') return;
+  char *argv[] = {"zed", (char *)path, NULL};
+  GError *err = NULL;
+  if (!g_spawn_async(NULL, argv, NULL,
+                     G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL |
+                         G_SPAWN_STDERR_TO_DEV_NULL,
+                     NULL, NULL, NULL, &err)) {
+    g_warning("pt: failed to launch zed: %s", err->message);
+    g_clear_error(&err);
+  }
+}
+
+static void on_open_editor(PtTabStrip *s, gpointer user) {
+  (void)s;
+  PtProjectUI *p = active_project(PT_WINDOW(user));
+  if (p != NULL) spawn_editor(p->path);
+}
+
+/* ---------- info panel actions ---------- */
+/* All three act on the directory the panel is showing, not the project root:
+ * that is the path under the buttons. */
+static void on_info_open_editor(PtInfoPanel *ip, gpointer user) {
+  (void)ip;
+  char *dir = panel_dir(PT_WINDOW(user));
+  spawn_editor(dir);
+  g_free(dir);
+}
+
+static void on_info_open_files(PtInfoPanel *ip, gpointer user) {
+  (void)ip;
+  char *dir = panel_dir(PT_WINDOW(user));
+  if (dir == NULL) return;
+  char *uri = g_filename_to_uri(dir, NULL, NULL);
+  GError *err = NULL;
+  if (uri != NULL &&
+      !g_app_info_launch_default_for_uri(uri, NULL, &err)) {
+    g_warning("pt: failed to open the file manager: %s", err->message);
+    g_clear_error(&err);
+  }
+  g_free(uri);
+  g_free(dir);
+}
+
+static void on_info_copy_path(PtInfoPanel *ip, gpointer user) {
+  (void)ip;
+  PtWindow *w = PT_WINDOW(user);
+  char *dir = panel_dir(w);
+  if (dir == NULL) return;
+  gdk_clipboard_set_text(gtk_widget_get_clipboard(GTK_WIDGET(w)), dir);
+  g_free(dir);
+}
+
+static void on_info_refresh(PtInfoPanel *ip, gpointer user) {
+  (void)ip;
+  PtWindow *w = PT_WINDOW(user);
+  PtProjectUI *p = active_project(w);
+  /* The git side lands asynchronously; everything else is up to date on the
+   * spot. */
+  if (p != NULL && p->monitor != NULL) pt_git_monitor_refresh(p->monitor);
+  refresh_infopanel(w);
 }
 
 /* ---------- command palette ---------- */
@@ -1081,6 +1230,25 @@ static gboolean sc_add_project(GtkWidget *wg, GVariant *a, gpointer u) {
   if (palette_blocks(PT_WINDOW(u))) return FALSE;
   action_add_project(PT_WINDOW(u)); return TRUE;
 }
+static gboolean sc_toggle_sidebar(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a;
+  PtWindow *w = PT_WINDOW(u);
+  if (palette_blocks(w)) return FALSE;
+  gtk_widget_set_visible(w->sidebar, !gtk_widget_get_visible(w->sidebar));
+  /* Hiding while the sidebar search holds focus would strand the keyboard. */
+  focus_active_terminal(w);
+  return TRUE;
+}
+/* ⌃I costs the terminal its Ctrl+I (which a shell reads as Tab): this
+ * window-level controller runs in the CAPTURE phase and takes it first. That
+ * is the requested binding. */
+static gboolean sc_toggle_infopanel(GtkWidget *wg, GVariant *a, gpointer u) {
+  (void)wg; (void)a;
+  PtWindow *w = PT_WINDOW(u);
+  if (palette_blocks(w)) return FALSE;
+  action_toggle_infopanel(w);
+  return TRUE;
+}
 static gboolean sc_next_tab(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
   if (palette_blocks(PT_WINDOW(u))) return FALSE;
@@ -1208,6 +1376,8 @@ static void install_shortcuts(PtWindow *w) {
   add_shortcut(ctl, "<Control>k", sc_palette, w, NULL);
   add_shortcut(ctl, "<Control>comma", sc_settings, w, NULL);
   add_shortcut(ctl, "<Control>n", sc_add_project, w, NULL);
+  add_shortcut(ctl, "<Control>b", sc_toggle_sidebar, w, NULL);
+  add_shortcut(ctl, "<Control>i", sc_toggle_infopanel, w, NULL);
   add_shortcut(ctl, "<Control>t", sc_new_tab, w, NULL);
   add_shortcut(ctl, "<Control><Shift>t", sc_new_tab, w, NULL);
   add_shortcut(ctl, "<Control>Tab", sc_next_tab, w, NULL);
@@ -1411,6 +1581,18 @@ static void pt_window_init(PtWindow *w) {
   gtk_box_append(GTK_BOX(main_col), w->statusline);
   gtk_box_append(GTK_BOX(body), main_col);
 
+  /* Right rail, mirror of the sidebar: full window height, hidden until ⌃I or
+   * the tab strip's panel button, and never persisted — every launch starts
+   * without it. */
+  w->infopanel = pt_info_panel_new();
+  gtk_widget_set_visible(w->infopanel, FALSE);
+  /* Same gate as the tab strip's Zed button: a button that cannot do anything
+   * is worse than no button. PATH does not move under a running window. */
+  char *zed = g_find_program_in_path("zed");
+  pt_info_panel_set_has_zed(PT_INFO_PANEL(w->infopanel), zed != NULL);
+  g_free(zed);
+  gtk_box_append(GTK_BOX(body), w->infopanel);
+
   /* The palette floats over everything, sidebar included, so it wraps the whole
    * body rather than the content column. GtkOverlay leaves overlay children out
    * of its size request, so a hidden palette costs the layout nothing. */
@@ -1448,6 +1630,16 @@ static void pt_window_init(PtWindow *w) {
                    G_CALLBACK(on_tab_selected), w);
   g_signal_connect(w->tabstrip, "tab-new", G_CALLBACK(on_tab_new), w);
   g_signal_connect(w->tabstrip, "tab-close", G_CALLBACK(on_tab_close), w);
+  g_signal_connect(w->tabstrip, "open-editor", G_CALLBACK(on_open_editor), w);
+  g_signal_connect(w->tabstrip, "toggle-panel",
+                   G_CALLBACK(on_toggle_panel), w);
+  g_signal_connect(w->infopanel, "open-editor",
+                   G_CALLBACK(on_info_open_editor), w);
+  g_signal_connect(w->infopanel, "open-files",
+                   G_CALLBACK(on_info_open_files), w);
+  g_signal_connect(w->infopanel, "copy-path",
+                   G_CALLBACK(on_info_copy_path), w);
+  g_signal_connect(w->infopanel, "refresh", G_CALLBACK(on_info_refresh), w);
 
   install_shortcuts(w);
   g_signal_connect(w, "close-request", G_CALLBACK(on_close_request), NULL);

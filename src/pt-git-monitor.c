@@ -20,7 +20,46 @@ static void monitor_unref(PtGitMonitor *m) {
   g_free(m);
 }
 
-typedef struct { PtGitMonitor *m; guint generation; } Inflight;
+/* One poll: the status pass fills this in, the numstat pass adds line counts,
+ * and whoever finishes last delivers it. */
+typedef struct {
+  PtGitMonitor *m;
+  guint generation;
+  PtGitStatus st;
+  GPtrArray *files;      /* PtGitFile*, owned until deliver() */
+  gboolean is_repo;
+} Inflight;
+
+static gboolean inflight_current(Inflight *inf) {
+  return !inf->m->freed && inf->generation == inf->m->generation &&
+         inf->m->cb != NULL;
+}
+
+static void deliver(Inflight *inf) {
+  PtGitMonitor *m = inf->m;
+  if (inflight_current(inf))
+    m->cb(&inf->st, inf->files, inf->is_repo, m->user);
+  g_ptr_array_unref(inf->files);
+  monitor_unref(m);
+  g_free(inf);
+}
+
+static void on_numstat_done(GObject *src, GAsyncResult *res, gpointer user) {
+  Inflight *inf = user;
+  char *out = NULL;
+  GSubprocess *proc = G_SUBPROCESS(src);
+  g_subprocess_communicate_utf8_finish(proc, res, &out, NULL, NULL);
+  /* A repo with no commits yet has no HEAD to diff against, so this pass just
+   * fails — the file list still stands, only without counts. */
+  if (g_subprocess_get_successful(proc) && out != NULL) {
+    GPtrArray *stats = pt_git_parse_numstat(out);
+    pt_git_files_merge_numstat(inf->files, stats);
+    g_ptr_array_unref(stats);
+  }
+  g_free(out);
+  g_object_unref(proc);
+  deliver(inf);
+}
 
 static void on_git_done(GObject *src, GAsyncResult *res, gpointer user) {
   Inflight *inf = user;
@@ -28,18 +67,26 @@ static void on_git_done(GObject *src, GAsyncResult *res, gpointer user) {
   char *out = NULL;
   GSubprocess *proc = G_SUBPROCESS(src);
   g_subprocess_communicate_utf8_finish(proc, res, &out, NULL, NULL);
-  if (!m->freed && inf->generation == m->generation && m->cb != NULL) {
-    PtGitStatus st;
-    gboolean is_repo =
-        g_subprocess_get_successful(proc) &&
-        out != NULL && pt_git_parse_porcelain_v2(out, &st);
-    if (!is_repo) memset(&st, 0, sizeof(st));
-    m->cb(&st, is_repo, m->user);
-  }
+  inf->is_repo = g_subprocess_get_successful(proc) &&
+                 out != NULL && pt_git_parse_porcelain_v2(out, &inf->st);
+  if (!inf->is_repo) memset(&inf->st, 0, sizeof(inf->st));
+  inf->files = pt_git_parse_files(inf->is_repo ? out : NULL);
   g_free(out);
   g_object_unref(proc);
-  monitor_unref(m);
-  g_free(inf);
+
+  /* Porcelain carries no line counts, so a second pass fetches them and the
+   * callback waits for it. Skipped when there is nothing to count. */
+  if (inf->is_repo && inf->files->len > 0 && inflight_current(inf)) {
+    GSubprocess *diff = g_subprocess_new(
+        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+        NULL, "git", "-C", m->path, "diff", "HEAD", "--numstat", NULL);
+    if (diff != NULL) {
+      g_subprocess_communicate_utf8_async(diff, NULL, NULL, on_numstat_done,
+                                          inf);
+      return;
+    }
+  }
+  deliver(inf);
 }
 
 void pt_git_monitor_refresh(PtGitMonitor *m) {
@@ -53,11 +100,13 @@ void pt_git_monitor_refresh(PtGitMonitor *m) {
     g_clear_error(&err);
     if (m->cb != NULL) {
       PtGitStatus st = {0};
-      m->cb(&st, FALSE, m->user);
+      GPtrArray *files = pt_git_parse_files(NULL);
+      m->cb(&st, files, FALSE, m->user);
+      g_ptr_array_unref(files);
     }
     return;
   }
-  Inflight *inf = g_new(Inflight, 1);
+  Inflight *inf = g_new0(Inflight, 1);
   inf->m = m;
   inf->generation = m->generation;
   m->refs++;
