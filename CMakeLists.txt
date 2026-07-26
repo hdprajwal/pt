@@ -5,6 +5,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Must be set before FetchContent pulls in ghostty. With no build type CMake
+# passes no -O flag to the C compiler, and ghostty's CMake only maps a build
+# type to -Doptimize when one is set (there is no fallback on that path), so
+# zig builds libghostty-vt in its Debug default. That costs ~1.8ms per line of
+# VT output — seconds to print a directory listing — versus microseconds when
+# the parser is optimized.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
+
 include(FetchContent)
 
 # libghostty-vt is built by ghostty's CMake wrapper via `zig build lib-vt`.
