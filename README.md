@@ -12,9 +12,10 @@ Releases. Install the latest one with:
 curl -fsSL https://github.com/hdprajwal/pt/releases/latest/download/install.sh | sh
 ```
 
-This installs `pt` to `~/.local/bin` and the prompt snippets to
-`~/.local/share/pt/prompt` (set `PT_PREFIX` to change the prefix; pass a tag
-as an argument to pin a version). You still need the runtime libraries from
+This installs `pt` to `~/.local/bin`, the prompt snippets to
+`~/.local/share/pt/prompt`, and a desktop entry + app icon so pt shows up
+in your application launcher (set `PT_PREFIX` to change the prefix; pass a
+tag as an argument to pin a version). You still need the runtime libraries from
 your package manager: GTK4 ≥ 4.16, libadwaita, and json-glib — plus the
 fonts listed below. To build from source instead, read on.
 
@@ -54,6 +55,12 @@ Run the app:
 
 ```sh
 ./build/pt
+```
+
+Or install it, including the desktop entry and icon for your launcher:
+
+```sh
+cmake --install build --prefix ~/.local
 ```
 
 ## Tests

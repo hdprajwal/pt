@@ -56,9 +56,15 @@ jobs:
             VERSION="dev-$(echo "${GITHUB_SHA}" | cut -c1-7)"
           fi
           NAME="pt-${VERSION}-linux-${{ matrix.arch }}"
-          mkdir -p "stage/${NAME}/bin" "stage/${NAME}/share/pt/prompt"
+          mkdir -p "stage/${NAME}/bin" "stage/${NAME}/share/pt/prompt" \
+                   "stage/${NAME}/share/applications" \
+                   "stage/${NAME}/share/icons/hicolor/scalable/apps"
           install -m755 build/pt "stage/${NAME}/bin/pt"
           install -m644 share/prompt/pt-prompt.* "stage/${NAME}/share/pt/prompt/"
+          install -m644 share/applications/dev.hdprajwal.pt.desktop \
+            "stage/${NAME}/share/applications/"
+          install -m644 share/icons/hicolor/scalable/apps/dev.hdprajwal.pt.svg \
+            "stage/${NAME}/share/icons/hicolor/scalable/apps/"
           install -m644 README.md "stage/${NAME}/README.md"
           tar -C stage -czf "${NAME}.tar.gz" "${NAME}"
 

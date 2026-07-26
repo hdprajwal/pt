@@ -55,7 +55,17 @@ add_library(ptcore STATIC
   src/pt-session.c
   src/pt-term-core.c)
 target_include_directories(ptcore PUBLIC src)
-target_link_libraries(ptcore PUBLIC ghostty-vt PkgConfig::JSON PkgConfig::GLIB util m)
+# Static: the shared imported target leaves the binary with a RUNPATH into
+# the build tree and a runtime dependency no user machine can satisfy.
+target_link_libraries(ptcore PUBLIC ghostty-vt-static PkgConfig::JSON PkgConfig::GLIB util m)
+
+include(GNUInstallDirs)
+install(TARGETS pt RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES share/applications/dev.hdprajwal.pt.desktop
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(FILES share/icons/hicolor/scalable/apps/dev.hdprajwal.pt.svg
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+install(DIRECTORY share/prompt/ DESTINATION ${CMAKE_INSTALL_DATADIR}/pt/prompt)
 
 enable_testing()
 

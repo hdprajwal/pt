@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=pt
+GenericName=Terminal Workspace
+Comment=Project-oriented terminal workspace
+Exec=pt
+Icon=dev.hdprajwal.pt
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;project;workspace;
+StartupNotify=true

@@ -37,11 +37,23 @@ curl -fsSL -o "$TMP/checksums.txt" "$BASE/checksums.txt"
 (cd "$TMP" && grep " $NAME.tar.gz\$" checksums.txt | sha256sum -c -)
 
 tar -xzf "$TMP/$NAME.tar.gz" -C "$TMP"
-mkdir -p "$PREFIX/bin" "$PREFIX/share/pt/prompt"
+mkdir -p "$PREFIX/bin" "$PREFIX/share/pt/prompt" \
+         "$PREFIX/share/applications" \
+         "$PREFIX/share/icons/hicolor/scalable/apps"
 install -m755 "$TMP/$NAME/bin/pt" "$PREFIX/bin/pt"
 install -m644 "$TMP/$NAME"/share/pt/prompt/pt-prompt.* "$PREFIX/share/pt/prompt/"
+install -m644 "$TMP/$NAME/share/icons/hicolor/scalable/apps/dev.hdprajwal.pt.svg" \
+  "$PREFIX/share/icons/hicolor/scalable/apps/"
+# Absolute Exec: app launchers do not necessarily share the shell's PATH.
+sed "s|^Exec=pt$|Exec=$PREFIX/bin/pt|" \
+  "$TMP/$NAME/share/applications/dev.hdprajwal.pt.desktop" \
+  > "$PREFIX/share/applications/dev.hdprajwal.pt.desktop"
+command -v update-desktop-database >/dev/null 2>&1 &&
+  update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 &&
+  gtk-update-icon-cache -qt "$PREFIX/share/icons/hicolor" 2>/dev/null || true
 
-echo "installed pt $TAG -> $PREFIX/bin/pt"
+echo "installed pt $TAG -> $PREFIX/bin/pt (desktop entry + icon included)"
 
 case ":$PATH:" in
   *":$PREFIX/bin:"*) ;;
