@@ -333,24 +333,35 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &cx);
     ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cy);
     GhosttyColorRgb cc = cursor_has_value ? cursor_color : fg_default;
-    gtk_snapshot_append_color(snapshot,
-        &(GdkRGBA){cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.55f},
-        &GRAPHENE_RECT_INIT(PT_PAD_X + cx * t->cell_w,
-                            PT_PAD_Y + cy * t->cell_h,
-                            t->cell_w, t->cell_h));
+    if (t->focused) {
+      gtk_snapshot_append_color(snapshot,
+          &(GdkRGBA){cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.55f},
+          &GRAPHENE_RECT_INIT(PT_PAD_X + cx * t->cell_w,
+                              PT_PAD_Y + cy * t->cell_h,
+                              t->cell_w, t->cell_h));
+    } else {
+      /* unfocused pane: hollow cursor. The alpha is higher than the filled
+       * block's because a 1px outline reads much fainter at 0.55f. */
+      GdkRGBA out = { cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.8f };
+      GskRoundedRect cr;
+      gsk_rounded_rect_init_from_rect(&cr,
+          &GRAPHENE_RECT_INIT(PT_PAD_X + cx * t->cell_w,
+                              PT_PAD_Y + cy * t->cell_h,
+                              t->cell_w, t->cell_h), 0);
+      gtk_snapshot_append_border(snapshot, &cr,
+          (float[4]){ 1, 1, 1, 1 },
+          (GdkRGBA[4]){ out, out, out, out });
+    }
   }
 
-  /* focused-pane ring: an inset 1px border in the theme's focus-ring color,
-   * drawn on top of the content (the CSS box-shadow would be painted over
-   * by our bg fill). */
-  if (t->focused) {
-    GdkRGBA ring = { th_ring.r / 255.0f, th_ring.g / 255.0f,
-                     th_ring.b / 255.0f, (float)th_ring.a };
-    GskRoundedRect rr;
-    gsk_rounded_rect_init_from_rect(&rr, &GRAPHENE_RECT_INIT(0, 0, w, h), 0);
-    gtk_snapshot_append_border(snapshot, &rr,
-        (float[4]){ 1, 1, 1, 1 },
-        (GdkRGBA[4]){ ring, ring, ring, ring });
+  /* unfocused scrim, in place of the old focused-pane ring: instead of
+   * outlining the pane that has focus, we wash every other pane toward the
+   * background, so the focused one is simply the one that still looks vivid.
+   * Drawn last over the content, which also dims the hollow cursor above. */
+  if (!t->focused) {
+    gtk_snapshot_append_color(snapshot,
+        &(GdkRGBA){th_bg.r / 255.0f, th_bg.g / 255.0f, th_bg.b / 255.0f, 0.35f},
+        &GRAPHENE_RECT_INIT(0, 0, w, h));
   }
 
   /* exited banner */
