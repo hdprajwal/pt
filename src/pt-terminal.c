@@ -52,9 +52,18 @@ struct _PtTerminal {
   PangoLayout *layout;
   PangoFontDescription *font_desc;
   int cell_w, cell_h;
+  int baseline;              /* ascent, in px: text nodes sit on the baseline */
   gboolean exited;
   int exit_status;
   gboolean focused;
+
+  /* mouse: last known pointer position (wheel events report at the cursor,
+   * and GTK scroll events carry no coordinates), plus the sub-row remainder
+   * of smooth/touchpad scrolling. */
+  double mouse_x, mouse_y;
+  double scroll_pending;    /* sub-row remainder, local viewport scrolling */
+  double report_pending;    /* sub-notch remainder, wheel reports to the app */
+  gboolean reporting_drag;   /* the app owns this drag, not the selection */
 };
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
@@ -89,6 +98,102 @@ static void core_command(PtTermCore *core, const char *comm, gpointer user) {
   g_signal_emit(t, signals[SIG_COMMAND_CHANGED], 0, comm);
 }
 
+/* ---- glyph cache ----
+ *
+ * Shaping is the expensive half of drawing text — itemization, font selection
+ * and HarfBuzz, all of it per call — and a terminal draws the same few hundred
+ * characters over and over. So each (style, grapheme) is shaped once and the
+ * result kept for the life of the process, keyed by a small stack-built string.
+ *
+ * Every glyph's advance is forced to the cell grid. That is what lets adjacent
+ * cells share a single text node: the font's natural advance is not exactly
+ * cell_w after rounding, so concatenating text would drift a fraction of a
+ * pixel per column and visibly bow a long line. Overriding the geometry keeps
+ * every cell nailed to its column while still batching. */
+typedef struct {
+  PangoFont *font;            /* owned ref; runs break when this changes */
+  PangoGlyphString *glyphs;   /* owned; advances already snapped to the grid */
+} GlyphEntry;
+
+static GHashTable *glyph_cache;   /* char key -> GlyphEntry */
+
+static void glyph_entry_free(gpointer p) {
+  GlyphEntry *e = p;
+  g_clear_object(&e->font);
+  g_clear_pointer(&e->glyphs, pango_glyph_string_free);
+  g_free(e);
+}
+
+static void glyph_cache_clear(void) {
+  if (glyph_cache != NULL) g_hash_table_remove_all(glyph_cache);
+}
+
+/* key: one style byte (kept printable so the whole thing is a C string) then
+ * the cluster's UTF-8 bytes. */
+static void glyph_key(char *out, gsize out_len, const char *utf8, gsize len,
+                      gboolean bold, gboolean italic) {
+  out[0] = (char)('a' + (bold ? 1 : 0) + (italic ? 2 : 0));
+  gsize n = MIN(len, out_len - 2);
+  memcpy(out + 1, utf8, n);
+  out[1 + n] = '\0';
+}
+
+static const GlyphEntry *glyph_lookup(PtTerminal *t, const char *utf8,
+                                      gsize len, gboolean bold,
+                                      gboolean italic) {
+  char key[64];
+  glyph_key(key, sizeof(key), utf8, len, bold, italic);
+  if (glyph_cache == NULL)
+    glyph_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                        glyph_entry_free);
+  GlyphEntry *e = g_hash_table_lookup(glyph_cache, key);
+  if (e != NULL) return e->font != NULL ? e : NULL;
+
+  /* Miss: shape it once. The font description rides in on the attribute list
+   * so itemization picks the terminal font (and its fallbacks) rather than the
+   * widget context's default. */
+  PangoContext *pc = gtk_widget_get_pango_context(GTK_WIDGET(t));
+  PangoAttrList *attrs = pango_attr_list_new();
+  pango_attr_list_insert(attrs, pango_attr_font_desc_new(t->font_desc));
+  if (bold)
+    pango_attr_list_insert(attrs, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+  if (italic)
+    pango_attr_list_insert(attrs, pango_attr_style_new(PANGO_STYLE_ITALIC));
+
+  e = g_new0(GlyphEntry, 1);
+  GList *items = pango_itemize(pc, utf8, 0, (int)len, attrs, NULL);
+  if (items != NULL) {
+    PangoItem *item = items->data;          /* one cell is one item in practice */
+    PangoGlyphString *gs = pango_glyph_string_new();
+    pango_shape(utf8, (int)len, &item->analysis, gs);
+    /* First glyph carries the cell advance; combining marks stay at zero. */
+    for (int i = 0; i < gs->num_glyphs; i++)
+      gs->glyphs[i].geometry.width = i == 0 ? t->cell_w * PANGO_SCALE : 0;
+    e->font = g_object_ref(item->analysis.font);
+    e->glyphs = gs;
+    g_list_free_full(items, (GDestroyNotify)pango_item_free);
+  }
+  pango_attr_list_unref(attrs);
+  g_hash_table_insert(glyph_cache, g_strdup(key), e);
+  return e->font != NULL ? e : NULL;
+}
+
+/* Emit one text node for the accumulated run and reset it. */
+static void flush_run(GtkSnapshot *snapshot, PangoFont *font,
+                      PangoGlyphString *run, const GdkRGBA *color,
+                      int x, int y, int baseline) {
+  if (run->num_glyphs == 0) return;
+  if (font != NULL) {
+    GskRenderNode *node = gsk_text_node_new(
+        font, run, color, &GRAPHENE_POINT_INIT(x, y + baseline));
+    if (node != NULL) {
+      gtk_snapshot_append_node(snapshot, node);
+      gsk_render_node_unref(node);
+    }
+  }
+  run->num_glyphs = 0;
+}
+
 /* ---- geometry ---- */
 static void measure_font(PtTerminal *t) {
   PangoContext *pc = gtk_widget_get_pango_context(GTK_WIDGET(t));
@@ -97,9 +202,16 @@ static void measure_font(PtTerminal *t) {
   t->cell_w = PANGO_PIXELS(pango_font_metrics_get_approximate_digit_width(m));
   t->cell_h = PANGO_PIXELS(pango_font_metrics_get_ascent(m) +
                            pango_font_metrics_get_descent(m));
+  /* Text nodes are positioned by baseline, not by the layout's top-left the
+   * way gtk_snapshot_append_layout was. */
+  t->baseline = PANGO_PIXELS(pango_font_metrics_get_ascent(m));
   pango_font_metrics_unref(m);
   if (t->cell_w < 1) t->cell_w = 8;
   if (t->cell_h < 1) t->cell_h = 16;
+  if (t->baseline < 1) t->baseline = t->cell_h;
+  /* Cached advances are in terms of cell_w, and the cached font follows the
+   * description — both just changed. */
+  glyph_cache_clear();
 }
 
 /* Theme colors pushed into libghostty: the ANSI slots the theme pins (so
@@ -176,6 +288,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   PtTerminal *t = PT_TERMINAL(widget);
   int w = gtk_widget_get_width(widget);
   int h = gtk_widget_get_height(widget);
+  gint64 frame_t0 = g_get_monotonic_time();
 
   ensure_core(t);
   if (t->core == NULL) {
@@ -214,6 +327,12 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     return;
 
   char text[64];
+  /* The run being accumulated: glyphs for consecutive cells that share a font
+   * and a colour. Flushed on any change, on a blank, and at end of row. */
+  PangoGlyphString *run = pango_glyph_string_new();
+  PangoFont *run_font = NULL;
+  GdkRGBA run_color = { 0, 0, 0, 1 };
+  int run_x = 0;
   int y = PT_PAD_Y;
   while (ghostty_render_state_row_iterator_next(iter)) {
     GhosttyRenderStateRowCells cells = pt_term_core_row_cells(t->core);
@@ -239,6 +358,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &bg) == GHOSTTY_SUCCESS;
 
       if (glen == 0) {
+        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
         if (selected)
           gtk_snapshot_append_color(snapshot, &sel_rgba,
               &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
@@ -280,6 +400,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
       PtBlockRect rects[4];
       int nrects = glen == 1 ? pt_block_glyph_rects(cps[0], rects) : 0;
       if (nrects > 0) {
+        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
         for (int i = 0; i < nrects; i++)
           gtk_snapshot_append_color(snapshot,
               &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f,
@@ -297,30 +418,42 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
       for (uint32_t i = 0; i < glen && pos < 60; i++)
         pos += g_unichar_to_utf8((gunichar)cps[i], text + pos);
       text[pos] = '\0';
+      gboolean blank = glen == 1 && cps[0] == ' ';
       if (cps != cps_stack) g_free(cps);
 
-      pango_layout_set_text(t->layout, text, pos);
-      pango_layout_set_attributes(t->layout, NULL);
-      if (style.bold || style.italic) {
-        PangoAttrList *attrs = pango_attr_list_new();
-        if (style.bold)
-          pango_attr_list_insert(attrs,
-              pango_attr_weight_new(PANGO_WEIGHT_BOLD));
-        if (style.italic)
-          pango_attr_list_insert(attrs,
-              pango_attr_style_new(PANGO_STYLE_ITALIC));
-        pango_layout_set_attributes(t->layout, attrs);
-        pango_attr_list_unref(attrs);
+      /* A space paints nothing, and most of a terminal screen is spaces —
+       * shaping them was the single largest slice of the old frame cost. */
+      if (blank) {
+        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
+        x += t->cell_w;
+        continue;
       }
-      gtk_snapshot_save(snapshot);
-      gtk_snapshot_translate(snapshot, &GRAPHENE_POINT_INIT(x, y));
-      gtk_snapshot_append_layout(snapshot, t->layout,
-          &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1});
-      gtk_snapshot_restore(snapshot);
+
+      const GlyphEntry *ge =
+          glyph_lookup(t, text, (gsize)pos, style.bold, style.italic);
+      if (ge == NULL) { x += t->cell_w; continue; }
+
+      GdkRGBA fg_rgba = { fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1 };
+      if (run->num_glyphs > 0 &&
+          (ge->font != run_font || !gdk_rgba_equal(&fg_rgba, &run_color)))
+        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
+      if (run->num_glyphs == 0) {
+        run_font = ge->font;
+        run_color = fg_rgba;
+        run_x = x;
+      }
+      int at = run->num_glyphs;
+      pango_glyph_string_set_size(run, at + ge->glyphs->num_glyphs);
+      memcpy(run->glyphs + at, ge->glyphs->glyphs,
+             sizeof(PangoGlyphInfo) * ge->glyphs->num_glyphs);
+      for (int i = 0; i < ge->glyphs->num_glyphs; i++)
+        run->log_clusters[at + i] = at + i;
       x += t->cell_w;
     }
+    flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
     y += t->cell_h;
   }
+  pango_glyph_string_free(run);
 
   /* cursor */
   bool cur_visible = false, cur_in_vp = false;
@@ -381,6 +514,11 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
                                &(GdkRGBA){0.9f, 0.76f, 0.48f, 1});
     gtk_snapshot_restore(snapshot);
   }
+
+  g_debug("pt frame: %.2f ms (%dx%d cells)",
+          (double)(g_get_monotonic_time() - frame_t0) / 1000.0,
+          t->cell_w > 0 ? (w - 2 * PT_PAD_X) / t->cell_w : 0,
+          t->cell_h > 0 ? (h - 2 * PT_PAD_Y) / t->cell_h : 0);
 }
 
 /* ---- input ---- */
@@ -438,22 +576,132 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
       pt_term_core_send_key(t->core, key, GHOSTTY_KEY_ACTION_PRESS, mods,
                             unshifted, utf8, utf8_len);
   if (consumed) {
-    /* any keypress that writes to the pty drops the selection */
+    /* any keypress that writes to the pty drops the selection, and snaps the
+     * viewport back to the prompt: typing into scrollback you can't see is how
+     * you run a command without noticing it ran. */
     pt_term_core_selection_clear(t->core);
+    pt_term_core_scroll_bottom(t->core);
     gtk_widget_queue_draw(GTK_WIDGET(t));
   }
   return consumed;
 }
 
+/* ---- mouse ----
+ *
+ * An app that enables mouse tracking (Claude Code, vim, htop, lazygit) owns
+ * the pointer: wheel, buttons and motion are encoded to the pty instead of
+ * driving selection or the viewport. Holding shift takes the pointer back for
+ * the length of that event, which is how every other terminal lets you select
+ * text out of a full-screen app.
+ */
+/* Rows per wheel notch, as before. Pixel-unit deltas (touchpads, and wheels
+ * whose driver reports high-resolution scrolling) already carry the distance
+ * the content should travel, so they convert by cell height and nothing else:
+ * a 21px drag on a 21px cell is one row, which keeps the terminal moving at
+ * the same rate as the rest of the desktop. */
+#define PT_SCROLL_ROWS 3
+
+static GdkModifierType controller_mods(GtkEventController *ctl) {
+  GdkEvent *ev = gtk_event_controller_get_current_event(ctl);
+  return ev != NULL ? gdk_event_get_modifier_state(ev) : 0;
+}
+
+static gboolean mouse_reporting(PtTerminal *t, GdkModifierType state) {
+  return t->core != NULL && (state & GDK_SHIFT_MASK) == 0 &&
+         pt_term_core_mouse_tracking(t->core);
+}
+
+static GhosttyMouseButton ghostty_button(guint gdk_button) {
+  switch (gdk_button) {
+  case GDK_BUTTON_PRIMARY:   return GHOSTTY_MOUSE_BUTTON_LEFT;
+  case GDK_BUTTON_MIDDLE:    return GHOSTTY_MOUSE_BUTTON_MIDDLE;
+  case GDK_BUTTON_SECONDARY: return GHOSTTY_MOUSE_BUTTON_RIGHT;
+  case 8:                    return GHOSTTY_MOUSE_BUTTON_FOUR;
+  case 9:                    return GHOSTTY_MOUSE_BUTTON_FIVE;
+  default:                   return GHOSTTY_MOUSE_BUTTON_UNKNOWN;
+  }
+}
+
+static void on_motion(GtkEventControllerMotion *ctl, double x, double y,
+                      gpointer user) {
+  PtTerminal *t = PT_TERMINAL(user);
+  t->mouse_x = x;
+  t->mouse_y = y;
+  GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
+  if (!mouse_reporting(t, state)) return;
+  /* The core drops motion the app didn't ask for (press-only modes) and
+   * repeats within one cell, so this stays cheap on every pointer move. */
+  pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_MOTION,
+                            GHOSTTY_MOUSE_BUTTON_UNKNOWN, pt_keymap_mods(state),
+                            x, y);
+}
+
 static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
                           gpointer user) {
-  (void)ctl; (void)dx;
+  (void)dx;
   PtTerminal *t = PT_TERMINAL(user);
   if (t->core == NULL) return FALSE;
-  /* When an app tracks the mouse (vim, htop), it owns the wheel; v1 forwards
-   * nothing in that case rather than corrupting viewport state. */
-  if (pt_term_core_mouse_tracking(t->core)) return TRUE;
-  pt_term_core_scroll_delta(t->core, dy > 0 ? 3 : -3);
+
+  /* Wheels report in notches, touchpads in pixels: normalize both to rows and
+   * keep the remainder, so slow trackpad scrolling accumulates into a row
+   * instead of being rounded away. */
+  gboolean pixels =
+      gtk_event_controller_scroll_get_unit(ctl) == GDK_SCROLL_UNIT_SURFACE;
+  /* Two currencies, tracked side by side so switching between a tracking app
+   * and the local viewport mid-gesture doesn't mix them up. Scrolling pt's own
+   * grid is measured in rows; an app that owns the wheel is fed *notches*,
+   * because that is what a wheel physically sends and what the app is tuned
+   * for — one report per row would triple a wheel's traffic and bury a TUI
+   * under a touchpad's event rate, which surfaces as the view lagging behind
+   * the pointer. */
+  double rows_f = pixels ? dy / (double)t->cell_h : dy * PT_SCROLL_ROWS;
+  /* A wheel notch is one report; pixel travel reports every row, which keeps
+   * the app responding to short gestures. Coarser thresholds delay the first
+   * report until the pointer has travelled far enough, which reads as lag. */
+  double notches_f = pixels ? dy / (double)t->cell_h : dy;
+
+  double pend_rows = t->scroll_pending + rows_f;
+  int rows = (int)trunc(pend_rows);
+  t->scroll_pending = pend_rows - rows;
+
+  double pend_notches = t->report_pending + notches_f;
+  int notches = (int)trunc(pend_notches);
+  t->report_pending = pend_notches - notches;
+
+  g_debug("pt scroll: dy=%.3f unit=%s cell_h=%d -> rows=%d notches=%d",
+          dy, pixels ? "pixels" : "notches", t->cell_h, rows, notches);
+
+  GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
+
+  if (mouse_reporting(t, state)) {
+    if (notches == 0) return TRUE;
+    /* One button-4/5 press per notch, reported at the pointer: GTK scroll
+     * events carry no coordinates of their own. */
+    pt_term_core_selection_clear(t->core);
+    GhosttyMods mods = pt_keymap_mods(state);
+    GhosttyMouseButton btn = notches < 0 ? GHOSTTY_MOUSE_BUTTON_FOUR
+                                         : GHOSTTY_MOUSE_BUTTON_FIVE;
+    for (int i = 0; i < ABS(notches); i++)
+      pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_PRESS, btn, mods,
+                                t->mouse_x, t->mouse_y);
+    gtk_widget_queue_draw(GTK_WIDGET(t));
+    return TRUE;
+  }
+
+  if (rows == 0) return TRUE;
+
+  /* Alt screen with alternate scroll (mode 1007, on by default) and no mouse
+   * reporting: the wheel becomes cursor keys, which is what makes less, man
+   * and git log scroll under a plain pager. */
+  if (pt_term_core_alt_screen(t->core) && !pt_term_core_mouse_tracking(t->core) &&
+      pt_term_core_alt_scroll(t->core)) {
+    pt_term_core_selection_clear(t->core);
+    pt_term_core_send_arrows(t->core, rows < 0, ABS(rows));
+    gtk_widget_queue_draw(GTK_WIDGET(t));
+    return TRUE;
+  }
+
+  pt_term_core_scroll_delta(t->core, rows);
   return TRUE;
 }
 
@@ -463,6 +711,25 @@ static void on_click_pressed(GtkGestureClick *g, int n, double x, double y,
   PtTerminal *t = PT_TERMINAL(user);
   gtk_widget_grab_focus(GTK_WIDGET(t));
   if (t->core == NULL) return;
+  t->mouse_x = x;
+  t->mouse_y = y;
+
+  guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(g));
+  GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(g));
+  t->reporting_drag = mouse_reporting(t, state);
+  if (t->reporting_drag) {
+    pt_term_core_selection_clear(t->core);
+    pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_PRESS,
+                              ghostty_button(button), pt_keymap_mods(state),
+                              x, y);
+    gtk_widget_queue_draw(GTK_WIDGET(t));
+    return;
+  }
+  /* Locally only the primary button means anything: middle and right exist
+   * for the app's sake, and dropping them here keeps them from clearing a
+   * selection the user just made. */
+  if (button != GDK_BUTTON_PRIMARY) return;
+
   /* controller event time is in milliseconds; the core wants nanoseconds */
   guint32 ms =
       gtk_event_controller_get_current_event_time(GTK_EVENT_CONTROLLER(g));
@@ -472,9 +739,25 @@ static void on_click_pressed(GtkGestureClick *g, int n, double x, double y,
 
 static void on_click_released(GtkGestureClick *g, int n, double x, double y,
                               gpointer user) {
-  (void)g; (void)n;
+  (void)n;
   PtTerminal *t = PT_TERMINAL(user);
   if (t->core == NULL) return;
+  t->mouse_x = x;
+  t->mouse_y = y;
+
+  guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(g));
+  /* Release follows whichever owner took the press, so an app that stops
+   * tracking mid-drag still sees the button go up. */
+  if (t->reporting_drag) {
+    GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(g));
+    pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_RELEASE,
+                              ghostty_button(button), pt_keymap_mods(state),
+                              x, y);
+    t->reporting_drag = FALSE;
+    gtk_widget_queue_draw(GTK_WIDGET(t));
+    return;
+  }
+  if (button != GDK_BUTTON_PRIMARY) return;
   pt_term_core_selection_release(t->core, x, y);
   gtk_widget_queue_draw(GTK_WIDGET(t));
 }
@@ -483,6 +766,10 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
                            gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
   if (t->core == NULL) return;
+  /* Drags the app owns are reported from the motion controller, which fires
+   * with the button held too; building a selection here as well would paint
+   * one over the app's own. */
+  if (t->reporting_drag) return;
   double sx = 0, sy = 0;
   gtk_gesture_drag_get_start_point(g, &sx, &sy);
   pt_term_core_selection_drag(t->core, sx + ox, sy + oy);
@@ -645,9 +932,15 @@ static void pt_terminal_init(PtTerminal *t) {
   gtk_widget_add_controller(GTK_WIDGET(t), scroll);
 
   GtkGesture *click = gtk_gesture_click_new();
+  /* button 0: report middle and right clicks too, not just the primary. */
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0);
   g_signal_connect(click, "pressed", G_CALLBACK(on_click_pressed), t);
   g_signal_connect(click, "released", G_CALLBACK(on_click_released), t);
   gtk_widget_add_controller(GTK_WIDGET(t), GTK_EVENT_CONTROLLER(click));
+
+  GtkEventController *motion = gtk_event_controller_motion_new();
+  g_signal_connect(motion, "motion", G_CALLBACK(on_motion), t);
+  gtk_widget_add_controller(GTK_WIDGET(t), motion);
 
   GtkGesture *drag = gtk_gesture_drag_new();
   g_signal_connect(drag, "drag-update", G_CALLBACK(on_drag_update), t);
