@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: 0.15.2
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    # Fedora because ubuntu-latest (24.04) ships GTK 4.14 and the app needs
+    # gtk4 >= 4.16. Fedora also keeps glibc modern enough for rolling distros
+    # without being bleeding-edge-only.
+    container: fedora:42
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y gcc cmake make pkgconf-pkg-config git tar xz gzip \
+            gtk4-devel libadwaita-devel json-glib-devel glib2-devel
+
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          curl -fsSLO "https://ziglang.org/download/${ZIG_VERSION}/zig-${{ matrix.arch }}-linux-${ZIG_VERSION}.tar.xz"
+          tar -xJf "zig-${{ matrix.arch }}-linux-${ZIG_VERSION}.tar.xz" -C /opt
+          ln -s "/opt/zig-${{ matrix.arch }}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
+          zig version
+
+      - name: Configure and build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="dev-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          NAME="pt-${VERSION}-linux-${{ matrix.arch }}"
+          mkdir -p "stage/${NAME}/bin" "stage/${NAME}/share/pt/prompt"
+          install -m755 build/pt "stage/${NAME}/bin/pt"
+          install -m644 share/prompt/pt-prompt.* "stage/${NAME}/share/pt/prompt/"
+          install -m644 README.md "stage/${NAME}/README.md"
+          tar -C stage -czf "${NAME}.tar.gz" "${NAME}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pt-linux-${{ matrix.arch }}
+          path: pt-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum pt-*.tar.gz > checksums.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/pt-*.tar.gz dist/checksums.txt install.sh
