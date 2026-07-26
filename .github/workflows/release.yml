@@ -42,11 +42,22 @@ jobs:
 
       - name: Configure and build
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          # -Dcpu=baseline: zig compiles for the *native* CPU by default, and
+          # the runner's AVX-512 leaks into the statically linked compiler-rt
+          # (weak `round` overrides libm's) — SIGILL on older machines.
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DGHOSTTY_ZIG_BUILD_FLAGS="-Dcpu=baseline"
           cmake --build build -j"$(nproc)"
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Check binary portability
+        run: |
+          if objdump -d build/pt | grep -Eq 'vrndscale|%zmm|\{1to'; then
+            echo "::error::build/pt contains AVX-512 instructions; it will SIGILL on older CPUs"
+            exit 1
+          fi
 
       - name: Package
         run: |
