@@ -146,6 +146,7 @@ typedef struct {
   PtTerminal *term;   /* owned ref */
   char *text;         /* owned */
   gboolean primary;
+  gboolean refocus;   /* the pane had the keyboard when the dialog went up */
 } PtOsc52Ctx;
 
 /* On finalize, so it covers the responses and dismissal alike (as with the
@@ -165,7 +166,11 @@ static void on_osc52_confirm_response(AdwAlertDialog *dlg, const char *response,
   PtOsc52Ctx *p = user;
   if (g_strcmp0(response, "copy") == 0)
     clipboard_set(p->term, p->text, p->primary);
-  if (gtk_widget_get_root(GTK_WIDGET(p->term)) != NULL)
+  /* Only back to the pane that asked if that is where the keyboard already
+   * was. Unlike a paste, nobody started this: the program did, possibly in a
+   * pane the user is not looking at, and answering its dialog must not move
+   * the next thing they type into a different shell. */
+  if (p->refocus && gtk_widget_get_root(GTK_WIDGET(p->term)) != NULL)
     gtk_widget_grab_focus(GTK_WIDGET(p->term));
 }
 
@@ -192,6 +197,9 @@ static void present_osc52_confirm(PtTerminal *t, char *text, gsize len,
   p->term = g_object_ref(t);
   p->text = text;
   p->primary = primary;
+  /* Asked now, while it still means something: presenting the dialog takes
+   * the keyboard away from whatever had it. */
+  p->refocus = gtk_widget_has_focus(GTK_WIDGET(t));
   g_signal_connect_data(dlg, "response", G_CALLBACK(on_osc52_confirm_response),
                         p, osc52_ctx_free, 0);
   adw_dialog_present(dlg, GTK_WIDGET(t));
