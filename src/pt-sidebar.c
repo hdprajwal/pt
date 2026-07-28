@@ -52,6 +52,15 @@ static int first_visible_index(PtSidebar *sb) {
 }
 
 /* ---------- callbacks ---------- */
+/* Remembers where the press landed, and deliberately nothing else — see
+ * on_row_released for why selecting here is not an option. */
+static void on_row_pressed(GtkGestureClick *g, int n, double x, double y,
+                           gpointer user) {
+  (void)n; (void)user;
+  g_object_set_data(G_OBJECT(g), "pt-press-x", GINT_TO_POINTER((int)x));
+  g_object_set_data(G_OBJECT(g), "pt-press-y", GINT_TO_POINTER((int)y));
+}
+
 /* Release, not press: selecting on press switches project — and the window
  * answers that by rebuilding the whole rail, destroying this very row — before
  * the drag source has seen enough motion to recognise a drag. Rows would be
@@ -60,10 +69,22 @@ static int first_visible_index(PtSidebar *sb) {
  * resets the row's controllers, which drops the click gesture's sequence. */
 static void on_row_released(GtkGestureClick *g, int n, double x, double y,
                             gpointer user) {
-  (void)n; (void)x; (void)y;
+  (void)n;
   GtkWidget *row = gtk_event_controller_get_widget(
       GTK_EVENT_CONTROLLER(g));
   PtSidebar *sb = user;
+  /* A drag that never started still ends up here: GtkDragSource ignores motion
+   * for the first 100ms of a press (MIN_TIME_TO_DND), so a quick flick crosses
+   * the drag threshold without ever beginning a drag. Measure the travel with
+   * GTK's own threshold and let that release go, otherwise an abandoned drag
+   * switches project. GtkGestureClick's "stopped" looks like the signal for
+   * this, but it also fires when a press is merely held past the double-click
+   * time — still an ordinary click. */
+  if (gtk_drag_check_threshold(
+          row, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(g), "pt-press-x")),
+          GPOINTER_TO_INT(g_object_get_data(G_OBJECT(g), "pt-press-y")),
+          (int)x, (int)y))
+    return;
   int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "pt-index"));
   g_signal_emit(sb, signals[SIG_SELECTED], 0, idx);
 }
@@ -270,6 +291,7 @@ static void rebuild_rows(PtSidebar *sb) {
     gtk_box_append(GTK_BOX(row), slot);
 
     GtkGesture *click = gtk_gesture_click_new();
+    g_signal_connect(click, "pressed", G_CALLBACK(on_row_pressed), sb);
     g_signal_connect(click, "released", G_CALLBACK(on_row_released), sb);
     gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
 
