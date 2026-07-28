@@ -20,5 +20,6 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
                              int n_rows, int active);
 void pt_sidebar_focus_search(PtSidebar *sb);
 /* Signals: "project-selected" (int), "project-add" (void),
- *          "project-remove" (int), "search-escape" (void) —
+ *          "project-remove" (int), "project-moved" (int from, int to),
+ *          "search-escape" (void) —
  * indexes are ALWAYS original project indexes, filter-independent. */

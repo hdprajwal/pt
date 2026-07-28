@@ -5,7 +5,8 @@
 /* The sidebar is a fixed-width rail, not a min-width one. */
 #define PT_SIDEBAR_WIDTH 266
 
-enum { SIG_SELECTED, SIG_ADD, SIG_REMOVE, SIG_SEARCH_ESCAPE, N_SIGNALS };
+enum { SIG_SELECTED, SIG_ADD, SIG_REMOVE, SIG_MOVED, SIG_SEARCH_ESCAPE,
+       N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtSidebar {
@@ -16,8 +17,11 @@ struct _PtSidebar {
   PtSidebarRow *rows;      /* owned deep copy; name/path are g_strdup'd */
   int n_rows;
   int active;
-  gboolean rendered;       /* rows_box reflects `rows` (see set_projects) */
+  gboolean rendered;       /* rows_box reflects `rows` + `query` (set_projects) */
   char *query;             /* owned; NULL or "" means "show everything" */
+  gboolean dragging;       /* a row drag is in flight (see set_projects) */
+  int drag_from;           /* row being dragged, -1 when idle */
+  int drop_from, drop_to;  /* move a drop asked for, -1 for none yet */
 };
 
 G_DEFINE_FINAL_TYPE(PtSidebar, pt_sidebar, GTK_TYPE_WIDGET)
@@ -69,11 +73,118 @@ static void on_add_clicked(GtkButton *btn, gpointer user) {
   g_signal_emit(PT_SIDEBAR(user), signals[SIG_ADD], 0);
 }
 
+/* ---------- drag to reorder ---------- */
+static void rebuild_rows(PtSidebar *sb);
+
+static int row_index(GtkEventController *ctl) {
+  GtkWidget *row = gtk_event_controller_get_widget(ctl);
+  return GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "pt-index"));
+}
+
+static void clear_drop_marks(PtSidebar *sb) {
+  for (GtkWidget *row = gtk_widget_get_first_child(sb->rows_box); row != NULL;
+       row = gtk_widget_get_next_sibling(row)) {
+    gtk_widget_remove_css_class(row, "pt-drop-above");
+    gtk_widget_remove_css_class(row, "pt-drop-below");
+  }
+}
+
+static GdkContentProvider *on_drag_prepare(GtkDragSource *src, double x,
+                                           double y, gpointer user) {
+  (void)user;
+  /* The hotspot has to come from here; ::drag-begin gets no coordinates. */
+  g_object_set_data(G_OBJECT(src), "pt-hot-x", GINT_TO_POINTER((int)x));
+  g_object_set_data(G_OBJECT(src), "pt-hot-y", GINT_TO_POINTER((int)y));
+  return gdk_content_provider_new_typed(
+      G_TYPE_INT, row_index(GTK_EVENT_CONTROLLER(src)));
+}
+
+static void on_drag_begin(GtkDragSource *src, GdkDrag *drag, gpointer user) {
+  (void)drag;
+  PtSidebar *sb = user;
+  GtkWidget *row = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(src));
+  sb->dragging = TRUE;
+  sb->drag_from = row_index(GTK_EVENT_CONTROLLER(src));
+  sb->drop_from = sb->drop_to = -1;
+  GdkPaintable *icon = gtk_widget_paintable_new(row);
+  gtk_drag_source_set_icon(src, icon,
+      GPOINTER_TO_INT(g_object_get_data(G_OBJECT(src), "pt-hot-x")),
+      GPOINTER_TO_INT(g_object_get_data(G_OBJECT(src), "pt-hot-y")));
+  g_object_unref(icon);
+}
+
+/* GtkDragSource emits this after a cancelled or failed drag too, so it is the
+ * one place that can be trusted to lift the rebuild freeze — miss that and the
+ * sidebar stops updating for the rest of the session. */
+static void on_drag_end(GtkDragSource *src, GdkDrag *drag, gboolean del,
+                        gpointer user) {
+  (void)src; (void)drag; (void)del;
+  PtSidebar *sb = user;
+  /* A GtkDragSource keeps itself alive until the drag ends, so this can arrive
+   * after the window took the sidebar's rows down (closing mid-drag). */
+  if (sb->rows_box == NULL) return;
+  sb->dragging = FALSE;
+  sb->drag_from = -1;
+  clear_drop_marks(sb);
+  int from = sb->drop_from, to = sb->drop_to;
+  sb->drop_from = sb->drop_to = -1;
+  /* Deferred out of ::drop on purpose: the window answers by rebuilding every
+   * row, and the dragged widget has to outlive GTK's drop handling. */
+  if (from >= 0 && to >= 0)
+    g_signal_emit(sb, signals[SIG_MOVED], 0, from, to);
+  /* Refreshes that arrived mid-drag were held back; draw the newest data once.
+   * A move above normally does this already, through the window's refresh. */
+  if (!sb->rendered) {
+    sb->rendered = TRUE;
+    rebuild_rows(sb);
+  }
+}
+
+static GdkDragAction on_drop_enter(GtkDropTarget *dt, double x, double y,
+                                   gpointer user) {
+  (void)x; (void)y;
+  PtSidebar *sb = user;
+  int idx = row_index(GTK_EVENT_CONTROLLER(dt));
+  if (sb->drag_from < 0 || idx == sb->drag_from) return 0;
+  /* A drop lands the dragged row in this row's slot, so the marker goes on the
+   * edge it will arrive from: below when it is heading down the list, above
+   * when it is heading up. */
+  gtk_widget_add_css_class(gtk_event_controller_get_widget(
+      GTK_EVENT_CONTROLLER(dt)),
+      idx > sb->drag_from ? "pt-drop-below" : "pt-drop-above");
+  return GDK_ACTION_MOVE;
+}
+
+static void on_drop_leave(GtkDropTarget *dt, gpointer user) {
+  (void)user;
+  GtkWidget *row = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(dt));
+  gtk_widget_remove_css_class(row, "pt-drop-above");
+  gtk_widget_remove_css_class(row, "pt-drop-below");
+}
+
+static gboolean on_drop(GtkDropTarget *dt, const GValue *value, double x,
+                        double y, gpointer user) {
+  (void)x; (void)y;
+  PtSidebar *sb = user;
+  if (!G_VALUE_HOLDS_INT(value)) return FALSE;
+  int from = g_value_get_int(value);
+  int to = row_index(GTK_EVENT_CONTROLLER(dt));
+  if (from < 0 || from >= sb->n_rows || from == to) return FALSE;
+  sb->drop_from = from;
+  sb->drop_to = to;
+  return TRUE;
+}
+
 /* ---------- row rendering ---------- */
 static void rebuild_rows(PtSidebar *sb) {
   GtkWidget *child;
   while ((child = gtk_widget_get_first_child(sb->rows_box)) != NULL)
     gtk_box_remove(GTK_BOX(sb->rows_box), child);
+
+  /* A filter hides rows, so the row above the one under the pointer is not the
+   * project above it in the real list — a drop would move the project somewhere
+   * the user never pointed at. Reordering waits until the list is whole. */
+  gboolean reorderable = sb->query == NULL || sb->query[0] == '\0';
 
   for (int i = 0; i < sb->n_rows; i++) {
     if (!row_matches(sb, i)) continue;
@@ -155,6 +266,28 @@ static void rebuild_rows(PtSidebar *sb) {
     GtkGesture *click = gtk_gesture_click_new();
     g_signal_connect(click, "pressed", G_CALLBACK(on_row_clicked), sb);
     gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
+
+    if (reorderable) {
+      /* connect_object, unlike the click gesture above: a drag source outlives
+       * its row for the length of the drag, so its handlers must go quiet if
+       * the sidebar itself is gone by the time the drag ends. */
+      GtkDragSource *src = gtk_drag_source_new();
+      gtk_drag_source_set_actions(src, GDK_ACTION_MOVE);
+      g_signal_connect_object(src, "prepare",
+                              G_CALLBACK(on_drag_prepare), sb, 0);
+      g_signal_connect_object(src, "drag-begin",
+                              G_CALLBACK(on_drag_begin), sb, 0);
+      g_signal_connect_object(src, "drag-end",
+                              G_CALLBACK(on_drag_end), sb, 0);
+      gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(src));
+
+      GtkDropTarget *dst = gtk_drop_target_new(G_TYPE_INT, GDK_ACTION_MOVE);
+      g_signal_connect(dst, "enter", G_CALLBACK(on_drop_enter), sb);
+      g_signal_connect(dst, "leave", G_CALLBACK(on_drop_leave), sb);
+      g_signal_connect(dst, "drop", G_CALLBACK(on_drop), sb);
+      gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(dst));
+    }
+
     gtk_box_append(GTK_BOX(sb->rows_box), row);
   }
 }
@@ -164,6 +297,12 @@ static void on_search_changed(GtkEditable *ed, gpointer user) {
   PtSidebar *sb = user;
   g_free(sb->query);
   sb->query = g_strdup(gtk_editable_get_text(ed));
+  /* Typing mid-drag must not rebuild under GTK's feet either; drag-end catches
+   * the new filter up. */
+  if (sb->dragging) {
+    sb->rendered = FALSE;
+    return;
+  }
   rebuild_rows(sb);
 }
 
@@ -229,6 +368,13 @@ void pt_sidebar_set_projects(PtSidebar *sb, const PtSidebarRow *rows,
     }
   }
   sb->active = active;
+  /* Rebuilding mid-drag would destroy the very widget GTK is dragging, and one
+   * busy pane pushes refreshes through here a couple of times a second. Keep
+   * the new data and let drag-end draw it. */
+  if (sb->dragging) {
+    sb->rendered = FALSE;
+    return;
+  }
   sb->rendered = TRUE;
   rebuild_rows(sb);
 }
@@ -239,6 +385,8 @@ static void pt_sidebar_dispose(GObject *obj) {
   clear_rows(sb);
   g_clear_pointer(&sb->query, g_free);
   g_clear_pointer(&sb->box, gtk_widget_unparent);
+  /* box owned the rows; a drag still in flight reads this to know they died. */
+  sb->rows_box = NULL;
   G_OBJECT_CLASS(pt_sidebar_parent_class)->dispose(obj);
 }
 
@@ -282,6 +430,9 @@ static void pt_sidebar_class_init(PtSidebarClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_REMOVE] = g_signal_new("project-remove", PT_TYPE_SIDEBAR,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
+  signals[SIG_MOVED] = g_signal_new("project-moved", PT_TYPE_SIDEBAR,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+      G_TYPE_INT, G_TYPE_INT);
   signals[SIG_SEARCH_ESCAPE] = g_signal_new("search-escape", PT_TYPE_SIDEBAR,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
@@ -290,6 +441,7 @@ static void pt_sidebar_init(PtSidebar *sb) {
   gtk_widget_add_css_class(GTK_WIDGET(sb), "pt-sidebar");
   gtk_widget_set_size_request(GTK_WIDGET(sb), PT_SIDEBAR_WIDTH, -1);
   sb->active = -1;
+  sb->drag_from = sb->drop_from = sb->drop_to = -1;
   sb->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_parent(sb->box, GTK_WIDGET(sb));
 

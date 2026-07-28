@@ -181,3 +181,12 @@ PtSessionState *pt_session_load(const char *path) {
 char *pt_session_default_path(void) {
   return g_build_filename(g_get_user_config_dir(), "pt", "state.json", NULL);
 }
+
+int pt_session_index_after_move(int index, int from, int to) {
+  if (from == to || index < 0) return index;
+  if (index == from) return to;
+  /* Everything the moved project passes over shifts one slot the other way;
+   * everything outside [from, to] keeps its position. */
+  if (from < to) return (index > from && index <= to) ? index - 1 : index;
+  return (index >= to && index < from) ? index + 1 : index;
+}

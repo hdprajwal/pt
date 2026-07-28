@@ -36,3 +36,7 @@ gboolean pt_session_save(const PtSessionState *s, const char *path, GError **err
 /* Load; on unreadable/corrupt file renames it to <path>.bak and returns NULL. */
 PtSessionState *pt_session_load(const char *path);
 char *pt_session_default_path(void);   /* ~/.config/pt/state.json, caller frees */
+/* Where `index` ends up once the project at `from` is moved to `to`. Kept
+ * separate from any array because the thing that has to survive a reorder is a
+ * stored position (active_project), not an element. */
+int pt_session_index_after_move(int index, int from, int to);
