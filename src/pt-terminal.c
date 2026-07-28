@@ -72,7 +72,6 @@ struct _PtTerminal {
    * and GTK scroll events carry no coordinates), plus the sub-row remainder
    * of smooth/touchpad scrolling. */
   double mouse_x, mouse_y;
-  GdkModifierType mouse_mods;  /* last modifiers seen, pointer or keyboard */
   gboolean pointer_in;       /* the pointer is inside this pane */
   double scroll_pending;    /* sub-row remainder, local viewport scrolling */
   double report_pending;    /* sub-notch remainder, wheel reports to the app */
@@ -736,6 +735,19 @@ static void set_link_cursor(PtTerminal *t, gboolean on) {
   gtk_widget_set_cursor_from_name(GTK_WIDGET(t), on ? "pointer" : NULL);
 }
 
+/* Shift decides who owns the pointer, so the cursor needs it as it is *now* —
+ * not as of the last event this pane happened to see. It cannot be read off
+ * the event that prompted the question: keys only reach the focused pane, and
+ * a crossing has no event to read at all (GTK leaves the controller with no
+ * current event during `enter` — measured, not assumed). The seat's keyboard
+ * is the one source that is always current, whichever pane is asking. */
+static GdkModifierType live_mods(void) {
+  GdkDisplay *display = gdk_display_get_default();
+  GdkSeat *seat = display != NULL ? gdk_display_get_default_seat(display) : NULL;
+  GdkDevice *kbd = seat != NULL ? gdk_seat_get_keyboard(seat) : NULL;
+  return kbd != NULL ? gdk_device_get_modifier_state(kbd) : 0;
+}
+
 /* Asks again what is under the pointer where it already is. The pointer is not
  * the only thing that moves: output scrolls the grid out from under it and a
  * resize reflows it, either of which can take the link away or bring one in
@@ -746,7 +758,7 @@ static void update_link_cursor(PtTerminal *t) {
   if (!t->pointer_in || t->core == NULL) return;
   /* The app owns the pointer, links included: ⌃click goes to it, so the
    * cursor must not promise otherwise. */
-  if (pointer_reports(t, t->mouse_mods)) { set_link_cursor(t, FALSE); return; }
+  if (pointer_reports(t, live_mods())) { set_link_cursor(t, FALSE); return; }
   char *uri = pt_term_core_hyperlink_at(t->core, t->mouse_x, t->mouse_y);
   set_link_cursor(t, uri != NULL);
   g_free(uri);
@@ -759,7 +771,6 @@ static void on_motion(GtkEventControllerMotion *ctl, double x, double y,
   t->mouse_y = y;
   t->pointer_in = TRUE;
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
-  t->mouse_mods = state;
   update_link_cursor(t);
   if (!pointer_reports(t, state)) return;
   /* The core drops motion the app didn't ask for (press-only modes) and
@@ -792,15 +803,14 @@ static void on_motion_leave(GtkEventControllerMotion *ctl, gpointer user) {
 
 /* Shift is the override that takes the pointer back from an app tracking it,
  * so pressing or releasing it changes the answer for a pointer that never
- * moved. Keys only reach the focused pane, so a pointer parked over some
- * *other* pane keeps a stale hand until it moves — cosmetic, and the click
- * itself always reads the live modifiers. */
+ * moved. Only a prod to go and look — the state itself comes from the seat.
+ * Keys reach the focused pane alone, so shift changing while the pointer sits
+ * over some *other* pane still goes unnoticed until anything at all happens
+ * there; cosmetic, and the click itself has never used this path. */
 static gboolean on_key_modifiers(GtkEventControllerKey *ctl,
                                  GdkModifierType state, gpointer user) {
-  (void)ctl;
-  PtTerminal *t = PT_TERMINAL(user);
-  t->mouse_mods = state;
-  update_link_cursor(t);
+  (void)ctl; (void)state;
+  update_link_cursor(PT_TERMINAL(user));
   return GDK_EVENT_PROPAGATE;
 }
 
