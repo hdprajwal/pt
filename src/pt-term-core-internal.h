@@ -67,7 +67,7 @@ void pt_osc_scan_clear(PtOscScan *s);
  * request (`?` in place of the data), a payload with no ';' in it, text that
  * is not valid base64 — g_base64_decode() answers junk rather than failing, so
  * the alphabet is checked first — an empty clipboard, one over the cap, or one
- * whose decoded bytes contain a NUL. */
+ * whose decoded bytes contain a NUL or are not valid UTF-8. */
 char *pt_osc52_decode(const char *payload, gsize len, gboolean *primary,
                       gsize *out_len);
 

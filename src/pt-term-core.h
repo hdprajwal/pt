@@ -22,8 +22,9 @@ typedef struct {
   /* A program asked to put `text` on the clipboard with OSC 52 (`primary`
    * TRUE when it asked for the primary selection rather than the clipboard
    * proper). Already decoded, size-capped and checked: `text` is NUL-
-   * terminated, `len` bytes long, holds no NUL of its own, and is valid for
-   * the call only. Nothing has touched the real clipboard yet — that is the
+   * terminated, `len` bytes long, holds no NUL of its own, is valid UTF-8 (a
+   * clipboard is offered to the desktop as text), and is valid for the call
+   * only. Nothing has touched the real clipboard yet — that is the
    * consumer's call, and so is asking the user first. Never fires for the
    * read form of OSC 52; see pt_term_core_set_osc52(). */
   void (*clipboard_write)(PtTermCore *core, const char *text, gsize len,

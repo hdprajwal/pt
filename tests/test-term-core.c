@@ -717,6 +717,25 @@ static void test_osc52_decode(void) {
   /* An embedded NUL would put only the head of the text on the clipboard
      while every length here still counted the rest. "YQBi" is "a\0b". */
   g_assert_null(pt_osc52_decode("c;YQBi", 6, NULL, NULL));
+
+  /* Valid base64 is not the same as text. A clipboard is offered to the rest
+     of the desktop as UTF-8, so bytes that are not UTF-8 would be advertised
+     as text and come back mangled. "/w==" is a lone 0xFF, and "ww==" is a
+     lead byte with the rest of its character missing, which is what a yank
+     cut off mid-character looks like. */
+  g_assert_null(pt_osc52_decode("c;/w==", 6, NULL, NULL));
+  g_assert_null(pt_osc52_decode("c;ww==", 6, NULL, NULL));
+
+  /* Text that is not ASCII is still text, and has to survive whole. */
+  const char *utf8 = "héllo — ✓ 日本語";
+  char *b64 = g_base64_encode((const guchar *)utf8, strlen(utf8));
+  char *payload = g_strconcat("c;", b64, NULL);
+  out = pt_osc52_decode(payload, strlen(payload), NULL, &len);
+  g_assert_cmpstr(out, ==, utf8);
+  g_assert_cmpuint(len, ==, strlen(utf8));
+  g_free(out);
+  g_free(payload);
+  g_free(b64);
 }
 
 static void test_osc52_decode_cap(void) {
