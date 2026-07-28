@@ -57,7 +57,11 @@ struct _PtTerminal {
   gboolean exited;
   int exit_status;
   gboolean focused;
-  gboolean paste_confirm_open;   /* a repeated ⌃⇧V must not stack dialogs */
+  /* A paste is in flight: reserved when the clipboard read starts and released
+   * when the text is pasted, dropped, or the confirmation closes. The read is
+   * async, so a flag set only once the dialog is up would let a repeated ⌃⇧V
+   * start a second read and stack a second dialog. */
+  gboolean paste_pending;
 
   /* mouse: last known pointer position (wheel events report at the cursor,
    * and GTK scroll events carry no coordinates), plus the sub-row remainder
@@ -784,10 +788,13 @@ typedef struct {
   char *text;         /* owned */
 } PtPasteCtx;
 
+/* Runs when the dialog is finalized, so it covers every way one can go away:
+ * the Paste response, the Cancel response, and dismissal (Escape, or clicking
+ * outside), which AdwAlertDialog reports as the close response. */
 static void paste_ctx_free(gpointer data, GClosure *closure) {
   (void)closure;
   PtPasteCtx *p = data;
-  p->term->paste_confirm_open = FALSE;
+  p->term->paste_pending = FALSE;
   g_object_unref(p->term);
   g_free(p->text);
   g_free(p);
@@ -804,16 +811,25 @@ static void on_paste_confirm_response(AdwAlertDialog *dlg, const char *response,
     gtk_widget_grab_focus(GTK_WIDGET(p->term));
 }
 
-/* Text with a line break (or its own end-of-paste sequence) runs the moment it
- * lands in a shell, so it gets a look first. Takes ownership of `text` and of
- * the reference on `t`. */
-static void present_paste_confirm(PtTerminal *t, char *text) {
-  gboolean multiline = strchr(text, '\n') != NULL;
+/* CR, LF and CRLF all break a line once. A break at the very end closes the
+ * last line rather than opening another, so "a\nb\n" is two lines, not three. */
+static guint paste_line_count(const char *text) {
   guint lines = 1;
-  for (const char *p = text; *p != '\0'; p++)
-    if (*p == '\n' && p[1] != '\0') lines++;   /* a trailing newline ends the
-                                                  last line, it does not start
-                                                  another */
+  for (const char *p = text; *p != '\0'; p++) {
+    if (*p != '\n' && *p != '\r') continue;
+    if (*p == '\r' && p[1] == '\n') p++;
+    if (p[1] == '\0') break;
+    lines++;
+  }
+  return lines;
+}
+
+/* Text with a line break (or its own end-of-paste sequence) runs the moment it
+ * lands in a shell, so it gets a look first. Takes ownership of `text`, of the
+ * reference on `t`, and of `t`'s paste_pending reservation. */
+static void present_paste_confirm(PtTerminal *t, char *text) {
+  gboolean multiline = strpbrk(text, "\r\n") != NULL;
+  guint lines = paste_line_count(text);
   char *heading = g_strdup_printf(lines == 1 ? "Paste %u line?"
                                              : "Paste %u lines?", lines);
   AdwDialog *dlg = adw_alert_dialog_new(
@@ -831,7 +847,6 @@ static void present_paste_confirm(PtTerminal *t, char *text) {
   PtPasteCtx *p = g_new0(PtPasteCtx, 1);
   p->term = t;
   p->text = text;
-  t->paste_confirm_open = TRUE;
   g_signal_connect_data(dlg, "response", G_CALLBACK(on_paste_confirm_response),
                         p, paste_ctx_free, 0);
   adw_dialog_present(dlg, GTK_WIDGET(t));
@@ -840,24 +855,31 @@ static void present_paste_confirm(PtTerminal *t, char *text) {
 static void on_paste_text(GObject *src, GAsyncResult *res, gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
   char *text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(src), res, NULL);
-  if (text == NULL || t->core == NULL) {
-    g_free(text);
-    g_object_unref(t);
-    return;
+  /* Exactly one of the branches below may hand the reservation on, and the
+   * tail releases it otherwise: leaking it would leave the pane unable to
+   * paste for the rest of its life. */
+  gboolean handed_on = FALSE;
+  if (text != NULL && t->core != NULL) {
+    /* The core sanitizes either way; the dialog is about what the text will do
+     * once it gets there, not about what bytes reach the pty. */
+    if (pt_term_core_paste_is_safe(text, -1)) {
+      pt_term_core_paste(t->core, text, -1);
+    } else if (gtk_widget_get_root(GTK_WIDGET(t)) != NULL) {
+      present_paste_confirm(t, text);   /* takes text, the ref and the slot */
+      handed_on = TRUE;
+    }
+    /* Unsafe with no window to ask in (the pane was unparented while the read
+     * was in flight): dropped. Never pasted without asking. */
   }
-  /* The core sanitizes either way; the dialog is about what the text will do
-   * once it gets there, not about what bytes reach the pty. */
-  if (!pt_term_core_paste_is_safe(text, -1)) {
-    present_paste_confirm(t, text);   /* takes both */
-    return;
-  }
-  pt_term_core_paste(t->core, text, -1);
+  if (handed_on) return;
   g_free(text);
+  t->paste_pending = FALSE;
   g_object_unref(t);
 }
 
 void pt_terminal_paste(PtTerminal *t) {
-  if (t->paste_confirm_open) return;   /* the open dialog owns this paste */
+  if (t->paste_pending) return;   /* an earlier ⌃⇧V is still working */
+  t->paste_pending = TRUE;
   GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(t));
   gdk_clipboard_read_text_async(cb, NULL, on_paste_text, g_object_ref(t));
 }
