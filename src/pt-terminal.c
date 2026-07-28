@@ -72,7 +72,7 @@ struct _PtTerminal {
    * and GTK scroll events carry no coordinates), plus the sub-row remainder
    * of smooth/touchpad scrolling. */
   double mouse_x, mouse_y;
-  GdkModifierType mouse_mods;  /* modifiers as of that position */
+  GdkModifierType mouse_mods;  /* last modifiers seen, pointer or keyboard */
   gboolean pointer_in;       /* the pointer is inside this pane */
   double scroll_pending;    /* sub-row remainder, local viewport scrolling */
   double report_pending;    /* sub-notch remainder, wheel reports to the app */
@@ -769,11 +769,39 @@ static void on_motion(GtkEventControllerMotion *ctl, double x, double y,
                             x, y);
 }
 
+/* A pane can arrive under a pointer that is not moving — a new window maps, a
+ * split rearranges — and then no motion is coming to notice the link below it.
+ * Deliberately reports nothing to the app: pt reports motion, and the pointer
+ * has not moved. */
+static void on_motion_enter(GtkEventControllerMotion *ctl, double x, double y,
+                            gpointer user) {
+  (void)ctl;
+  PtTerminal *t = PT_TERMINAL(user);
+  t->mouse_x = x;
+  t->mouse_y = y;
+  t->pointer_in = TRUE;
+  update_link_cursor(t);
+}
+
 static void on_motion_leave(GtkEventControllerMotion *ctl, gpointer user) {
   (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   t->pointer_in = FALSE;
   set_link_cursor(t, FALSE);
+}
+
+/* Shift is the override that takes the pointer back from an app tracking it,
+ * so pressing or releasing it changes the answer for a pointer that never
+ * moved. Keys only reach the focused pane, so a pointer parked over some
+ * *other* pane keeps a stale hand until it moves — cosmetic, and the click
+ * itself always reads the live modifiers. */
+static gboolean on_key_modifiers(GtkEventControllerKey *ctl,
+                                 GdkModifierType state, gpointer user) {
+  (void)ctl;
+  PtTerminal *t = PT_TERMINAL(user);
+  t->mouse_mods = state;
+  update_link_cursor(t);
+  return GDK_EVENT_PROPAGATE;
 }
 
 static void on_uri_launched(GObject *src, GAsyncResult *res, gpointer user) {
@@ -1142,8 +1170,11 @@ void pt_terminal_set_mouse_reporting(gboolean on) {
   mouse_reporting_default = on;
   /* The file is the source of truth: a pane the user toggled by hand goes
    * back in step the next time the config is applied, same as the theme. */
-  for (GSList *l = live_terminals; l != NULL; l = l->next)
-    ((PtTerminal *)l->data)->report_mouse = on;
+  for (GSList *l = live_terminals; l != NULL; l = l->next) {
+    PtTerminal *t = l->data;
+    t->report_mouse = on;
+    update_link_cursor(t);   /* who owns the pointer just changed under it */
+  }
 }
 
 gboolean pt_terminal_mouse_reporting(PtTerminal *t) { return t->report_mouse; }
@@ -1153,6 +1184,7 @@ gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t) {
   /* Handing the pointer to the app mid-selection would leave a highlight
    * nothing can clear. */
   if (t->report_mouse && t->core != NULL) pt_term_core_selection_clear(t->core);
+  update_link_cursor(t);     /* who owns the pointer just changed under it */
   gtk_widget_queue_draw(GTK_WIDGET(t));
   return t->report_mouse;
 }
@@ -1203,6 +1235,7 @@ static void pt_terminal_init(PtTerminal *t) {
 
   GtkEventController *key = gtk_event_controller_key_new();
   g_signal_connect(key, "key-pressed", G_CALLBACK(on_key_pressed), t);
+  g_signal_connect(key, "modifiers", G_CALLBACK(on_key_modifiers), t);
   gtk_widget_add_controller(GTK_WIDGET(t), key);
 
   GtkEventController *scroll =
@@ -1219,6 +1252,7 @@ static void pt_terminal_init(PtTerminal *t) {
 
   GtkEventController *motion = gtk_event_controller_motion_new();
   g_signal_connect(motion, "motion", G_CALLBACK(on_motion), t);
+  g_signal_connect(motion, "enter", G_CALLBACK(on_motion_enter), t);
   g_signal_connect(motion, "leave", G_CALLBACK(on_motion_leave), t);
   gtk_widget_add_controller(GTK_WIDGET(t), motion);
 
