@@ -110,10 +110,17 @@ a line, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies the selection
 selection and snaps the view back to the prompt.
 
 That holds inside full-screen apps too — Claude Code, vim, htop, lazygit, fzf.
-Those apps normally ask the terminal for the mouse, and pt does not hand it
-over: `mouse-reporting` ships off, which is the one place pt deliberately
-differs from ghostty's defaults. The cost is that mouse-driven features inside
-those apps (clicking a vim buffer, dragging a pane divider) do nothing.
+Those apps normally ask the terminal for the mouse, and pt does not hand the
+*pointer* over: `mouse-reporting` ships off, which is the one place pt
+deliberately differs from ghostty's defaults. The cost is that click-driven
+features inside those apps (clicking a vim buffer, dragging a pane divider) do
+nothing.
+
+The wheel is not part of that deal. An app that asks for the mouse gets the
+wheel whatever `mouse-reporting` says, because scrolling is not how you select
+text and an app on the alternate screen leaves pt nothing to scroll. Holding
+<kbd>Shift</kbd> takes the wheel back and moves pt's own view, the way every
+other terminal does it.
 
 Set `mouse-reporting = true` for the usual terminal behaviour. A plain drag
 then goes to the app, and holding <kbd>Shift</kbd> takes the pointer back for

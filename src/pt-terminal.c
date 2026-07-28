@@ -715,6 +715,21 @@ static gboolean pointer_reports(PtTerminal *t, GdkModifierType state) {
   return t->button_down ? t->reporting_drag : mouse_reporting(t, state);
 }
 
+/* Who owns the *wheel*, which is not the same question. `mouse-reporting` is
+ * off by default so that a plain press and drag selects text inside a
+ * full-screen TUI without learning a modifier first — that is a statement
+ * about the press, and the wheel got swept up in it: an app tracking the mouse
+ * on the alt screen took the wheel out of pt's hands (no scrollback to move)
+ * without being given it, so scrolling did nothing at all. So the wheel goes
+ * to any app that tracks the mouse, and shift takes it back, which is what
+ * xterm, kitty and ghostty all do. Mid-drag it still follows whoever took the
+ * press, for the same reason the pointer does. */
+static gboolean wheel_reports(PtTerminal *t, GdkModifierType state) {
+  if (t->button_down) return t->reporting_drag;
+  return t->core != NULL && (state & GDK_SHIFT_MASK) == 0 &&
+         pt_term_core_mouse_tracking(t->core);
+}
+
 static GhosttyMouseButton ghostty_button(guint gdk_button) {
   switch (gdk_button) {
   case GDK_BUTTON_PRIMARY:   return GHOSTTY_MOUSE_BUTTON_LEFT;
@@ -877,10 +892,10 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
 
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
 
-  /* Latched like motion is: a wheel turn in the middle of a drag belongs to
-   * whoever took the press, so scrolling to extend a selection past the
+  /* Not pointer_reports(): the wheel is not gated on `mouse-reporting`. It is
+   * still latched mid-drag though, so scrolling to extend a selection past the
    * viewport moves pt's scrollback instead of landing in the app. */
-  if (pointer_reports(t, state)) {
+  if (wheel_reports(t, state)) {
     if (notches == 0) return TRUE;
     /* One button-4/5 press per notch, reported at the pointer: GTK scroll
      * events carry no coordinates of their own. */
