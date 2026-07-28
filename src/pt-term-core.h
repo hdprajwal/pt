@@ -10,6 +10,14 @@ typedef struct {
   void (*exited)(PtTermCore *core, int status, gpointer user);
   void (*title)(PtTermCore *core, const char *title, gpointer user);
   void (*command)(PtTermCore *core, const char *comm, gpointer user);
+  /* An OSC sequence the shell or an app emitted, scanned off the pty stream
+   * because libghostty parses OSC but hands almost none of it back. `code` is
+   * the number before the first ';', `payload` everything after it (NUL-
+   * terminated as well as counted, valid for the call only). Every code pt
+   * sees arrives here — switch on the ones you want and ignore the rest.
+   * Set to NULL and the scanner does not run at all. */
+  void (*osc)(PtTermCore *core, int code, const char *payload, gsize len,
+              gpointer user);
 } PtTermCoreCallbacks;
 
 /* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh).

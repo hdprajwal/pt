@@ -48,6 +48,8 @@ struct PtTermCore {
   guint64 last_press_ns;
   uint16_t last_press_col, last_press_row;
 
+  PtOscScan osc;            /* OSC scanner state, carried across reads */
+
   PtTermCoreCallbacks cbs;
   gpointer cbs_user;
 };
@@ -267,6 +269,12 @@ void pt_osc_scan_clear(PtOscScan *s) {
   s->state = PT_OSC_GROUND;
 }
 
+static void core_osc_dispatch(int code, const char *payload, gsize len,
+                              gpointer user) {
+  PtTermCore *c = user;
+  c->cbs.osc(c, code, payload, len, c->cbs_user);
+}
+
 /* ---- child + fd sources ---- */
 static void on_child_exited(GPid pid, gint wait_status, gpointer ud) {
   PtTermCore *c = ud;
@@ -288,6 +296,11 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
       ssize_t n = read(fd, buf, sizeof(buf));
       if (n > 0) {
         ghostty_terminal_vt_write(c->terminal, buf, (size_t)n);
+        /* After the parser, so an OSC consumer sees terminal state that
+         * already includes the bytes it is reacting to. Skipped entirely
+         * when nobody is listening. */
+        if (c->cbs.osc != NULL)
+          pt_osc_scan_feed(&c->osc, buf, (size_t)n, core_osc_dispatch, c);
         got_data = TRUE;
       } else if (n == 0) { c->eof = TRUE; break; }
       else {
@@ -826,6 +839,7 @@ void pt_term_core_free(PtTermCore *c) {
   if (c->fd_source != 0) g_source_remove(c->fd_source);
   if (c->child_source != 0) g_source_remove(c->child_source);
   if (c->cmd_timer != 0) g_source_remove(c->cmd_timer);
+  pt_osc_scan_clear(&c->osc);
   if (c->pty_fd >= 0) close(c->pty_fd);
   if (c->child > 0 && !c->child_exited) {
     kill(c->child, SIGHUP);
