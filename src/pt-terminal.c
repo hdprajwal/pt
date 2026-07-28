@@ -72,6 +72,8 @@ struct _PtTerminal {
    * and GTK scroll events carry no coordinates), plus the sub-row remainder
    * of smooth/touchpad scrolling. */
   double mouse_x, mouse_y;
+  GdkModifierType mouse_mods;  /* modifiers as of that position */
+  gboolean pointer_in;       /* the pointer is inside this pane */
   double scroll_pending;    /* sub-row remainder, local viewport scrolling */
   double report_pending;    /* sub-notch remainder, wheel reports to the app */
   gboolean reporting_drag;   /* the app owns this drag, not the selection */
@@ -82,11 +84,17 @@ struct _PtTerminal {
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
 
+/* Declared up here only because the two places that have to re-ask what is
+ * under the pointer — new output and a resize — both run well before the
+ * mouse code it belongs with. */
+static void update_link_cursor(PtTerminal *t);
+
 /* ---- core callbacks ---- */
 static void core_draw(PtTermCore *core, gpointer user) {
   (void)core;
   PtTerminal *t = PT_TERMINAL(user);
   gtk_widget_queue_draw(GTK_WIDGET(t));
+  update_link_cursor(t);       /* the grid just moved under the pointer */
   g_signal_emit(t, signals[SIG_ACTIVITY], 0);
 }
 
@@ -227,10 +235,14 @@ static gboolean row_has_hyperlink(GhosttyRenderStateRowIterator iter) {
 
 /* Drawn in a second pass over the row rather than inline with the text: the
  * first pass paints each cell's background as it reaches it, which would cover
- * a line already put down under it. */
+ * a line already put down under it. The colour is resolved the same way that
+ * pass resolves the glyph's, inverse included — under inverse video the cell's
+ * foreground is what got painted *behind* the text, so an underline in it is
+ * a line the same colour as the block it sits on. */
 static void draw_row_underlines(PtTerminal *t, GtkSnapshot *snapshot,
                                 GhosttyRenderStateRowIterator iter, int y,
-                                GhosttyColorRgb fg_default) {
+                                GhosttyColorRgb fg_default,
+                                GhosttyColorRgb bg_default) {
   GhosttyRenderStateRowCells cells = pt_term_core_row_cells(t->core);
   if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                                    &cells) != GHOSTTY_SUCCESS)
@@ -245,10 +257,21 @@ static void draw_row_underlines(PtTerminal *t, GtkSnapshot *snapshot,
       ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &linked);
     if (linked) {
       GhosttyColorRgb fg = fg_default;
+      GhosttyColorRgb bg = bg_default;
       if (ghostty_render_state_row_cells_get(cells,
               GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR,
               &fg) != GHOSTTY_SUCCESS)
         fg = fg_default;
+      if (ghostty_render_state_row_cells_get(cells,
+              GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR,
+              &bg) != GHOSTTY_SUCCESS)
+        bg = bg_default;
+      GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
+      ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
+      /* Selection only replaces the background, so it leaves this alone —
+       * exactly as it leaves the glyph colour alone in the first pass. */
+      if (style.inverse) fg = bg;
       gtk_snapshot_append_color(snapshot,
           &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1},
           &GRAPHENE_RECT_INIT(x, uy, t->cell_w, 1));
@@ -344,6 +367,10 @@ static void pt_terminal_size_allocate(GtkWidget *widget, int width, int height,
   if (rows < 2) rows = 2;
   pt_term_core_resize(t->core, (guint16)cols, (guint16)rows,
                       t->cell_w, t->cell_h);
+  /* Reflow can carry a link away from a pointer that never moved, and a pane
+   * that only ever gets resized (a split, a font change) sees no output to
+   * catch it on. */
+  update_link_cursor(t);
 }
 
 /* ---- rendering ---- */
@@ -515,7 +542,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     }
     flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
     if (row_has_hyperlink(iter))
-      draw_row_underlines(t, snapshot, iter, y, fg_default);
+      draw_row_underlines(t, snapshot, iter, y, fg_default, bg_default);
     y += t->cell_h;
   }
   pango_glyph_string_free(run);
@@ -709,31 +736,44 @@ static void set_link_cursor(PtTerminal *t, gboolean on) {
   gtk_widget_set_cursor_from_name(GTK_WIDGET(t), on ? "pointer" : NULL);
 }
 
+/* Asks again what is under the pointer where it already is. The pointer is not
+ * the only thing that moves: output scrolls the grid out from under it and a
+ * resize reflows it, either of which can take the link away or bring one in
+ * without a single motion event. So the answer is re-derived on redraw too,
+ * from the last position seen — one grid lookup per redraw, and only while the
+ * pointer is actually in the pane. */
+static void update_link_cursor(PtTerminal *t) {
+  if (!t->pointer_in || t->core == NULL) return;
+  /* The app owns the pointer, links included: ⌃click goes to it, so the
+   * cursor must not promise otherwise. */
+  if (pointer_reports(t, t->mouse_mods)) { set_link_cursor(t, FALSE); return; }
+  char *uri = pt_term_core_hyperlink_at(t->core, t->mouse_x, t->mouse_y);
+  set_link_cursor(t, uri != NULL);
+  g_free(uri);
+}
+
 static void on_motion(GtkEventControllerMotion *ctl, double x, double y,
                       gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
   t->mouse_x = x;
   t->mouse_y = y;
+  t->pointer_in = TRUE;
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
-  if (pointer_reports(t, state)) {
-    /* The app owns the pointer, links included: ⌃click goes to it, so the
-     * cursor must not promise otherwise. */
-    set_link_cursor(t, FALSE);
-    /* The core drops motion the app didn't ask for (press-only modes) and
-     * repeats within one cell, so this stays cheap on every pointer move. */
-    pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_MOTION,
-                              GHOSTTY_MOUSE_BUTTON_UNKNOWN,
-                              pt_keymap_mods(state), x, y);
-    return;
-  }
-  char *uri = t->core != NULL ? pt_term_core_hyperlink_at(t->core, x, y) : NULL;
-  set_link_cursor(t, uri != NULL);
-  g_free(uri);
+  t->mouse_mods = state;
+  update_link_cursor(t);
+  if (!pointer_reports(t, state)) return;
+  /* The core drops motion the app didn't ask for (press-only modes) and
+   * repeats within one cell, so this stays cheap on every pointer move. */
+  pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_MOTION,
+                            GHOSTTY_MOUSE_BUTTON_UNKNOWN, pt_keymap_mods(state),
+                            x, y);
 }
 
 static void on_motion_leave(GtkEventControllerMotion *ctl, gpointer user) {
   (void)ctl;
-  set_link_cursor(PT_TERMINAL(user), FALSE);
+  PtTerminal *t = PT_TERMINAL(user);
+  t->pointer_in = FALSE;
+  set_link_cursor(t, FALSE);
 }
 
 static void on_uri_launched(GObject *src, GAsyncResult *res, gpointer user) {
