@@ -86,6 +86,22 @@ reports each command's exit code back to the app and prints an identity line
 If a repository with a huge untracked tree makes the prompt slow, set
 `PT_PROMPT_GIT_UNTRACKED=no` to count only tracked changes.
 
+## Projects
+
+The sidebar lists your projects. Click a row to switch to it, or press
+<kbd>Ctrl</kbd>+<kbd>1</kbd> … <kbd>Ctrl</kbd>+<kbd>9</kbd> to pick one by
+position. <kbd>Ctrl</kbd>+<kbd>N</kbd> adds a folder, the <kbd>×</kbd> on a row
+removes it, and <kbd>Ctrl</kbd>+<kbd>B</kbd> hides the whole rail.
+
+Drag a row up or down to reorder the list. A line on the row you are over shows
+where the dragged one will land, and the new order is saved with the rest of
+the session. The number shortcuts go by position, so after a reorder they point
+at whatever now sits in those slots.
+
+Dragging is off while the search box has text in it: the filtered list is not
+the list you would be reordering, so a drop there would move a project
+somewhere you never pointed at.
+
 ## Selecting and copying text
 
 Left-click and drag selects. Double-click selects a word, triple-click selects

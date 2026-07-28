@@ -958,6 +958,23 @@ static void on_project_remove(PtSidebar *sb, int idx, gpointer user) {
   mark_dirty(w);
 }
 
+/* The sidebar renders w->projects and does not own the order, so a reorder is
+ * one array move here plus a save. */
+static void on_project_moved(PtSidebar *sb, int from, int to, gpointer user) {
+  (void)sb;
+  PtWindow *w = PT_WINDOW(user);
+  if (w->projects == NULL) return;
+  int n = (int)w->projects->len;
+  if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+  gpointer p = g_ptr_array_steal_index(w->projects, from);
+  g_ptr_array_insert(w->projects, to, p);
+  /* active_project is a position, not an identity: skip this and a reorder
+   * silently switches the user to whatever project slid into that slot. */
+  w->active_project = pt_session_index_after_move(w->active_project, from, to);
+  refresh_sidebar(w);
+  mark_dirty(w);
+}
+
 static void on_project_selected(PtSidebar *sb, int idx, gpointer user) {
   (void)sb;
   action_switch_project(PT_WINDOW(user), idx);
@@ -1666,6 +1683,8 @@ static void pt_window_init(PtWindow *w) {
   g_signal_connect(w->sidebar, "project-add", G_CALLBACK(on_project_add), w);
   g_signal_connect(w->sidebar, "project-remove",
                    G_CALLBACK(on_project_remove), w);
+  g_signal_connect(w->sidebar, "project-moved",
+                   G_CALLBACK(on_project_moved), w);
   g_signal_connect(w->sidebar, "search-escape",
                    G_CALLBACK(on_search_escape), w);
   g_signal_connect(w->tabstrip, "tab-selected",
