@@ -1,6 +1,6 @@
 #include "pt-terminal.h"
 #include "pt-block.h"
-#include "pt-config.h"       /* PT_CONFIG_MOUSE_REPORTING_DEFAULT */
+#include "pt-config.h"       /* mouse-reporting and osc52 defaults */
 #include "pt-keymap.h"
 #include "pt-session.h"      /* PT_FONT_SIZE_DEFAULT, shared with persistence */
 #include <adwaita.h>         /* paste confirmation dialog */
@@ -41,6 +41,9 @@ static char *font_family;   /* NULL -> PT_FONT_FAMILY_DEFAULT */
  * it is set. Off by default: see PT_CONFIG_MOUSE_REPORTING_DEFAULT. */
 static gboolean mouse_reporting_default = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
 
+/* The `osc52` config key, same arrangement: mirrored into every terminal. */
+static PtOsc52Mode osc52_default = PT_CONFIG_OSC52_DEFAULT;
+
 /* Env applied by pt_terminal_new when the caller has no project context
  * (pane grids build terminals straight from split-tree leaves). */
 static char **default_env;
@@ -78,6 +81,8 @@ struct _PtTerminal {
   gboolean reporting_drag;   /* the app owns this drag, not the selection */
   gboolean button_down;      /* a button is held: ownership is already decided */
   gboolean report_mouse;     /* this pane's copy of `mouse-reporting` */
+  PtOsc52Mode osc52;         /* this pane's copy of `osc52` */
+  gboolean osc52_asking;     /* a clipboard-write confirmation is up */
   gboolean link_cursor;      /* the hand cursor is up: a link is under the pointer */
 };
 
@@ -117,6 +122,96 @@ static void core_command(PtTermCore *core, const char *comm, gpointer user) {
   g_free(t->last_command);
   t->last_command = g_strdup(comm);
   g_signal_emit(t, signals[SIG_COMMAND_CHANGED], 0, comm);
+}
+
+/* ---- clipboard writes from programs (OSC 52) ----
+ *
+ * The core has already decoded the base64, capped the size and thrown out
+ * anything malformed, so what is left is where the text goes and whether to
+ * ask first. It deliberately does *not* go through the paste sanitizer on the
+ * way in: this text is headed for the clipboard, not for a pty, and the
+ * newlines and tabs a sanitizer would flatten are the whole point of a yank.
+ * The sanitizing belongs at the other end, and is already there — whenever the
+ * text comes back out (⌃⇧V, or into any other app), pt_term_core_paste()
+ * rewrites the control bytes and pt_term_core_paste_is_safe() asks first, the
+ * same as for anything else on the system clipboard. */
+static void clipboard_set(PtTerminal *t, const char *text, gboolean primary) {
+  GdkClipboard *cb = primary ? gtk_widget_get_primary_clipboard(GTK_WIDGET(t))
+                             : gtk_widget_get_clipboard(GTK_WIDGET(t));
+  gdk_clipboard_set_text(cb, text);
+}
+
+/* Clipboard text held across the confirmation dialog. */
+typedef struct {
+  PtTerminal *term;   /* owned ref */
+  char *text;         /* owned */
+  gboolean primary;
+} PtOsc52Ctx;
+
+/* On finalize, so it covers the responses and dismissal alike (as with the
+ * paste confirmation below). */
+static void osc52_ctx_free(gpointer data, GClosure *closure) {
+  (void)closure;
+  PtOsc52Ctx *p = data;
+  p->term->osc52_asking = FALSE;
+  g_object_unref(p->term);
+  g_free(p->text);
+  g_free(p);
+}
+
+static void on_osc52_confirm_response(AdwAlertDialog *dlg, const char *response,
+                                      gpointer user) {
+  (void)dlg;
+  PtOsc52Ctx *p = user;
+  if (g_strcmp0(response, "copy") == 0)
+    clipboard_set(p->term, p->text, p->primary);
+  if (gtk_widget_get_root(GTK_WIDGET(p->term)) != NULL)
+    gtk_widget_grab_focus(GTK_WIDGET(p->term));
+}
+
+/* Takes ownership of `text` and of `t`'s asking slot; holds `t` alive itself,
+ * since a pane can be closed while its dialog is up. */
+static void present_osc52_confirm(PtTerminal *t, char *text, gsize len,
+                                  gboolean primary) {
+  /* Name the pane by whatever is running in it: with several panes open, "a
+   * program" is not enough to decide with. */
+  const char *who = t->last_command != NULL ? t->last_command : "this pane";
+  char *heading = g_strdup_printf("Let %s copy %" G_GSIZE_FORMAT " %s?",
+                                  who, len, len == 1 ? "byte" : "bytes");
+  char *body = g_strdup_printf(
+      "The text goes on the %s, replacing what is there now.",
+      primary ? "primary selection" : "clipboard");
+  AdwDialog *dlg = adw_alert_dialog_new(heading, body);
+  g_free(heading);
+  g_free(body);
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dlg),
+                                 "cancel", "Cancel", "copy", "Copy", NULL);
+  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dlg), "cancel");
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dlg), "cancel");
+  PtOsc52Ctx *p = g_new0(PtOsc52Ctx, 1);
+  p->term = g_object_ref(t);
+  p->text = text;
+  p->primary = primary;
+  g_signal_connect_data(dlg, "response", G_CALLBACK(on_osc52_confirm_response),
+                        p, osc52_ctx_free, 0);
+  adw_dialog_present(dlg, GTK_WIDGET(t));
+}
+
+static void core_clipboard_write(PtTermCore *core, const char *text, gsize len,
+                                 gboolean primary, gpointer user) {
+  (void)core;
+  PtTerminal *t = PT_TERMINAL(user);
+  if (t->osc52 == PT_OSC52_OFF) return;
+  if (t->osc52 != PT_OSC52_ASK) {
+    clipboard_set(t, text, primary);
+    return;
+  }
+  /* A program copying in a loop must not be able to stack dialogs, and a pane
+   * with no window has nowhere to put one. Both drop the write rather than
+   * take it: nothing reaches the clipboard without an answer. */
+  if (t->osc52_asking || gtk_widget_get_root(GTK_WIDGET(t)) == NULL) return;
+  t->osc52_asking = TRUE;
+  present_osc52_confirm(t, g_strndup(text, len), len, primary);
 }
 
 /* ---- glyph cache ----
@@ -349,9 +444,13 @@ static void ensure_core(PtTerminal *t) {
     return;
   }
   apply_palette(t->core);
+  /* Registering clipboard_write is what starts the OSC scanner: with no
+   * consumer at all the core does not even look at the bytes. */
   PtTermCoreCallbacks cbs = { .draw = core_draw, .exited = core_exited,
-                              .title = core_title, .command = core_command };
+                              .title = core_title, .command = core_command,
+                              .clipboard_write = core_clipboard_write };
   pt_term_core_set_callbacks(t->core, &cbs, t);
+  pt_term_core_set_osc52(t->core, t->osc52);
 }
 
 static void pt_terminal_size_allocate(GtkWidget *widget, int width, int height,
@@ -1202,6 +1301,17 @@ void pt_terminal_set_mouse_reporting(gboolean on) {
   }
 }
 
+void pt_terminal_set_osc52(PtOsc52Mode mode) {
+  osc52_default = mode;
+  for (GSList *l = live_terminals; l != NULL; l = l->next) {
+    PtTerminal *t = l->data;
+    t->osc52 = mode;
+    /* Turning it off has to reach the core too, or a pane keeps decoding
+     * clipboards nobody will ever be shown. */
+    if (t->core != NULL) pt_term_core_set_osc52(t->core, mode);
+  }
+}
+
 gboolean pt_terminal_mouse_reporting(PtTerminal *t) { return t->report_mouse; }
 
 gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t) {
@@ -1256,6 +1366,7 @@ static void pt_terminal_init(PtTerminal *t) {
   t->layout = gtk_widget_create_pango_layout(GTK_WIDGET(t), NULL);
   pango_layout_set_font_description(t->layout, t->font_desc);
   t->report_mouse = mouse_reporting_default;
+  t->osc52 = osc52_default;
   live_terminals = g_slist_prepend(live_terminals, t);
 
   GtkEventController *key = gtk_event_controller_key_new();
