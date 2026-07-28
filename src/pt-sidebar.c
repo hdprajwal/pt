@@ -52,8 +52,14 @@ static int first_visible_index(PtSidebar *sb) {
 }
 
 /* ---------- callbacks ---------- */
-static void on_row_clicked(GtkGestureClick *g, int n, double x, double y,
-                           gpointer user) {
+/* Release, not press: selecting on press switches project — and the window
+ * answers that by rebuilding the whole rail, destroying this very row — before
+ * the drag source has seen enough motion to recognise a drag. Rows would be
+ * undraggable and every abandoned drag would leave the user somewhere else.
+ * A recognised drag never reaches this handler: gtk_drag_source_drag_begin()
+ * resets the row's controllers, which drops the click gesture's sequence. */
+static void on_row_released(GtkGestureClick *g, int n, double x, double y,
+                            gpointer user) {
   (void)n; (void)x; (void)y;
   GtkWidget *row = gtk_event_controller_get_widget(
       GTK_EVENT_CONTROLLER(g));
@@ -264,7 +270,7 @@ static void rebuild_rows(PtSidebar *sb) {
     gtk_box_append(GTK_BOX(row), slot);
 
     GtkGesture *click = gtk_gesture_click_new();
-    g_signal_connect(click, "pressed", G_CALLBACK(on_row_clicked), sb);
+    g_signal_connect(click, "released", G_CALLBACK(on_row_released), sb);
     gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
 
     if (reorderable) {
