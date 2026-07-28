@@ -609,6 +609,13 @@ static void test_paste_unbracketed_newline_becomes_cr(void) {
   pt_term_core_paste(core, "a\nb", 3);
   g_assert_true(wait_for_text(core, "a^Mb"));
 
+  /* A CR already in the clipboard is neither stripped nor rewritten — 0x0D is
+     not in ghostty's strip set — so it reaches the child exactly as it was.
+     That is why pt_term_core_paste_is_safe has to catch it: on a normal tty
+     (icrnl on, unlike here) it arrives as a newline and submits the line. */
+  pt_term_core_paste(core, "c\rd", 3);
+  g_assert_true(wait_for_text(core, "c^Md"));
+
   pt_term_core_sync(core);
   char *text = pt_term_core_grid_text(core);
   g_assert_nonnull(text);
@@ -624,6 +631,11 @@ static void test_paste_is_safe(void) {
   /* An embedded end sequence is unsafe too, newline or not. */
   g_assert_false(pt_term_core_paste_is_safe("ls\x1b[201~rm -rf /", 16));
   g_assert_true(pt_term_core_paste_is_safe("ls", -1));   /* NUL-terminated */
+  /* A bare CR submits the line just as an LF does — the encoder passes it
+     through and the tty's icrnl maps it back — so it has to be unsafe. */
+  g_assert_false(pt_term_core_paste_is_safe("a\rb", 3));
+  g_assert_false(pt_term_core_paste_is_safe("a\r\nb", 4));
+  g_assert_false(pt_term_core_paste_is_safe("echo hi\r", 8));   /* trailing */
 }
 
 int main(int argc, char *argv[]) {

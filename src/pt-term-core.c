@@ -765,7 +765,15 @@ void pt_term_core_paste(PtTermCore *c, const char *text, gssize len) {
 
 gboolean pt_term_core_paste_is_safe(const char *text, gssize len) {
   if (text == NULL) return TRUE;
-  return ghostty_paste_is_safe(text, len < 0 ? strlen(text) : (size_t)len);
+  size_t n = len < 0 ? strlen(text) : (size_t)len;
+  /* ghostty looks for "\n" and the end sequence, and its encoder replaces
+   * control bytes with spaces — but a bare CR is in neither set, so it reaches
+   * the pty untouched and the line discipline's ICRNL turns it back into a
+   * newline. That submits the line, which is the whole thing this check exists
+   * to catch. Old-Mac line endings and crafted web pages both produce one.
+   * Unsafe regardless of bracketed paste mode, exactly as "\n" already is. */
+  if (memchr(text, '\r', n) != NULL) return FALSE;
+  return ghostty_paste_is_safe(text, n);
 }
 
 void pt_term_core_sync(PtTermCore *c) {

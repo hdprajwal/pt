@@ -78,8 +78,9 @@ gboolean pt_term_core_bracketed_paste(PtTermCore *c);
  * 2004 off, newlines become carriage returns instead. len < 0 → NUL-terminated.
  * The caller keeps ownership of `text` and it is not modified. */
 void pt_term_core_paste(PtTermCore *c, const char *text, gssize len);
-/* FALSE when the text holds a newline or an end-of-paste sequence, i.e. when
- * pasting it into a shell can run a command. Worth a confirmation. */
+/* FALSE when the text holds a line break — LF, or a bare CR, which the encoder
+ * passes through and the tty maps back to LF — or an end-of-paste sequence,
+ * i.e. when pasting it into a shell can run a command. Worth a confirmation. */
 gboolean pt_term_core_paste_is_safe(const char *text, gssize len);
 void pt_term_core_sync(PtTermCore *c);              /* render_state_update */
 GhosttyTerminal pt_term_core_terminal(PtTermCore *c);
