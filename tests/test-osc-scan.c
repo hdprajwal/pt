@@ -178,6 +178,24 @@ static void test_plain_text_is_free(void) {
   pt_osc_scan_clear(&s);
 }
 
+static void test_bare_9c_is_payload(void) {
+  PtOscScan s = {0};
+  Hits h = {0};
+  /* 0x9C is payload here, not a single-byte ST. libghostty's osc_string table
+   * maps 0x20..0xFF to osc_put and that write lands after the "anywhere"
+   * 0x9C => ground rule in genTable(), so the parser appends it too — and it
+   * must, because inside an OSC it consumes raw bytes rather than decoded
+   * codepoints, and 0x9C is a UTF-8 continuation byte. U+011C is C4 9C:
+   * terminating on it would cut this payload in half. */
+  feed(&s, &h, "\033]9;\304\234 arrived\007");
+  g_assert_cmpint(h.n, ==, 1);
+  g_assert_cmpint(h.code[0], ==, 9);
+  g_assert_cmpstr(h.payload[0], ==, "\304\234 arrived");
+  g_assert_cmpuint(h.len[0], ==, 10);
+  hits_clear(&h);
+  pt_osc_scan_clear(&s);
+}
+
 static void test_malformed_is_dropped(void) {
   PtOscScan s = {0};
   Hits h = {0};
@@ -276,6 +294,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/oscscan/clipboard-cap", test_clipboard_gets_a_bigger_cap);
   g_test_add_func("/oscscan/unterminated", test_unterminated_does_not_merge);
   g_test_add_func("/oscscan/plain-text", test_plain_text_is_free);
+  g_test_add_func("/oscscan/bare-9c", test_bare_9c_is_payload);
   g_test_add_func("/oscscan/malformed", test_malformed_is_dropped);
   g_test_add_func("/oscscan/interleaved", test_interleaved_with_output);
   g_test_add_func("/oscscan/stream-untouched", test_stream_is_untouched);
