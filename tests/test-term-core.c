@@ -189,6 +189,82 @@ static void test_selection(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+/* ---- OSC 8 hyperlinks ---- */
+static void test_hyperlink_is_safe(void) {
+  g_assert_true(pt_term_core_hyperlink_is_safe("https://example.com/x"));
+  g_assert_true(pt_term_core_hyperlink_is_safe("http://example.com"));
+  g_assert_true(pt_term_core_hyperlink_is_safe("file:///tmp/a.txt"));
+  g_assert_true(pt_term_core_hyperlink_is_safe("mailto:a@example.com"));
+  /* The scheme is case-insensitive per RFC 3986, so the check has to be too —
+     otherwise "JavaScript:" walks straight past a lowercase-only blocklist. */
+  g_assert_true(pt_term_core_hyperlink_is_safe("HTTPS://example.com"));
+  g_assert_true(pt_term_core_hyperlink_is_safe("MailTo:a@example.com"));
+
+  g_assert_false(pt_term_core_hyperlink_is_safe("javascript:alert(1)"));
+  g_assert_false(pt_term_core_hyperlink_is_safe("JavaScript:alert(1)"));
+  g_assert_false(pt_term_core_hyperlink_is_safe("ssh://host/x"));
+  g_assert_false(pt_term_core_hyperlink_is_safe("vscode://x"));
+  g_assert_false(pt_term_core_hyperlink_is_safe("data:text/html,<script>"));
+  /* No scheme at all: nothing decides what opens it. */
+  g_assert_false(pt_term_core_hyperlink_is_safe("example.com"));
+  g_assert_false(pt_term_core_hyperlink_is_safe("://example.com"));
+  g_assert_false(pt_term_core_hyperlink_is_safe(""));
+  g_assert_false(pt_term_core_hyperlink_is_safe(NULL));
+  /* A prefix of an allowed scheme is not that scheme. */
+  g_assert_false(pt_term_core_hyperlink_is_safe("httpsx://example.com"));
+  g_assert_false(pt_term_core_hyperlink_is_safe("nothttp://example.com"));
+  /* Whitespace and control bytes are out, wherever they sit: leading space
+     would let " javascript:" through a scheme test that trims, and a newline
+     in the middle can carry a second line into whatever opens the URI. */
+  g_assert_false(pt_term_core_hyperlink_is_safe(" https://example.com"));
+  g_assert_false(pt_term_core_hyperlink_is_safe("https://example.com\nrm -rf ~"));
+  g_assert_false(pt_term_core_hyperlink_is_safe("https://exam ple.com"));
+  g_assert_false(pt_term_core_hyperlink_is_safe("https://example.com\x7f"));
+}
+
+static void test_hyperlink_at(void) {
+  /* Two OSC 8 links, one per row: an https one pt opens and a javascript: one
+     it must not. Cells are 8x16 inset by 20/18, so column N of row R spans
+     pixels [20 + 8N, 20 + 8N + 8) x [18 + 16R, 18 + 16R + 16). */
+  Ctx ctx = {0};
+  ctx.loop = g_main_loop_new(NULL, FALSE);
+  const char *argv[] = {"/bin/sh", "-c",
+    "printf '\\033]8;;https://example.com/x\\033\\\\GOOD\\033]8;;\\033\\\\\\n'; "
+    "printf '\\033]8;;javascript:alert(1)\\033\\\\EVIL\\033]8;;\\033\\\\\\n'; "
+    "printf 'done-marker\\n'; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .draw = on_draw_marker };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  guint to = g_timeout_add_seconds(10, on_timeout, &ctx);
+  g_main_loop_run(ctx.loop);
+  g_source_remove(to);
+  g_assert_true(ctx.found);
+
+  /* Row 0, anywhere across "GOOD" (columns 0..3). */
+  char *uri = pt_term_core_hyperlink_at(core, 21.0, 20.0);
+  g_assert_cmpstr(uri, ==, "https://example.com/x");
+  g_free(uri);
+  uri = pt_term_core_hyperlink_at(core, 45.0, 30.0);      /* column 3 */
+  g_assert_cmpstr(uri, ==, "https://example.com/x");
+  g_free(uri);
+
+  /* Column 4 of row 0 is past the link text. */
+  g_assert_null(pt_term_core_hyperlink_at(core, 53.0, 20.0));
+  /* Row 1 has a link, but not one pt will open. */
+  g_assert_null(pt_term_core_hyperlink_at(core, 21.0, 36.0));
+  /* The padding around the grid belongs to no cell, so the edge column's link
+     cannot be reached from outside it. */
+  g_assert_null(pt_term_core_hyperlink_at(core, 5.0, 20.0));
+  g_assert_null(pt_term_core_hyperlink_at(core, 21.0, 5.0));
+  g_assert_null(pt_term_core_hyperlink_at(core, 20.0 + 80 * 8 + 1, 20.0));
+  g_assert_null(pt_term_core_hyperlink_at(core, 21.0, 18.0 + 24 * 16 + 1));
+
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx.loop);
+}
+
 static void on_command_cb(PtTermCore *core, const char *comm, gpointer user) {
   (void)core;
   Ctx *ctx = user;
@@ -645,6 +721,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/keys", test_key_send_echoes);
   g_test_add_func("/termcore/long-grapheme", test_long_grapheme_cluster);
   g_test_add_func("/termcore/selection", test_selection);
+  g_test_add_func("/termcore/hyperlink-is-safe", test_hyperlink_is_safe);
+  g_test_add_func("/termcore/hyperlink-at", test_hyperlink_at);
   g_test_add_func("/termcore/foreground-command", test_foreground_command);
   g_test_add_func("/termcore/running-state-idle", test_running_state_idle);
   g_test_add_func("/termcore/running-state-job",

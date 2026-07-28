@@ -77,6 +77,7 @@ struct _PtTerminal {
   gboolean reporting_drag;   /* the app owns this drag, not the selection */
   gboolean button_down;      /* a button is held: ownership is already decided */
   gboolean report_mouse;     /* this pane's copy of `mouse-reporting` */
+  gboolean link_cursor;      /* the hand cursor is up: a link is under the pointer */
 };
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
@@ -205,6 +206,55 @@ static void flush_run(GtkSnapshot *snapshot, PangoFont *font,
     }
   }
   run->num_glyphs = 0;
+}
+
+/* ---- OSC 8 hyperlinks ----
+ *
+ * Linked cells get an underline, which is the only thing that tells a user a
+ * run of text is clickable at all. Rows carry a "something in here has a link"
+ * flag (with false positives, never false negatives), so the per-cell question
+ * is only asked on the few rows that answer yes — a screen of ordinary output
+ * costs one query per row. */
+static gboolean row_has_hyperlink(GhosttyRenderStateRowIterator iter) {
+  GhosttyRow row = 0;
+  if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
+                                   &row) != GHOSTTY_SUCCESS)
+    return FALSE;
+  bool linked = false;
+  ghostty_row_get(row, GHOSTTY_ROW_DATA_HYPERLINK, &linked);
+  return linked;
+}
+
+/* Drawn in a second pass over the row rather than inline with the text: the
+ * first pass paints each cell's background as it reaches it, which would cover
+ * a line already put down under it. */
+static void draw_row_underlines(PtTerminal *t, GtkSnapshot *snapshot,
+                                GhosttyRenderStateRowIterator iter, int y,
+                                GhosttyColorRgb fg_default) {
+  GhosttyRenderStateRowCells cells = pt_term_core_row_cells(t->core);
+  if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                   &cells) != GHOSTTY_SUCCESS)
+    return;
+  int uy = MIN(y + t->baseline + 2, y + t->cell_h - 1);
+  int x = PT_PAD_X;
+  while (ghostty_render_state_row_cells_next(cells)) {
+    GhosttyCell cell = 0;
+    bool linked = false;
+    if (ghostty_render_state_row_cells_get(cells,
+            GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &cell) == GHOSTTY_SUCCESS)
+      ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &linked);
+    if (linked) {
+      GhosttyColorRgb fg = fg_default;
+      if (ghostty_render_state_row_cells_get(cells,
+              GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR,
+              &fg) != GHOSTTY_SUCCESS)
+        fg = fg_default;
+      gtk_snapshot_append_color(snapshot,
+          &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1},
+          &GRAPHENE_RECT_INIT(x, uy, t->cell_w, 1));
+    }
+    x += t->cell_w;
+  }
 }
 
 /* ---- geometry ---- */
@@ -464,6 +514,8 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
       x += t->cell_w;
     }
     flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
+    if (row_has_hyperlink(iter))
+      draw_row_underlines(t, snapshot, iter, y, fg_default);
     y += t->cell_h;
   }
   pango_glyph_string_free(run);
@@ -648,18 +700,66 @@ static GhosttyMouseButton ghostty_button(guint gdk_button) {
   }
 }
 
+/* The hand cursor over a link, which is how a user finds out the underline
+ * means something. Latched so a pointer sitting still on a link is not setting
+ * the same cursor once per motion event. */
+static void set_link_cursor(PtTerminal *t, gboolean on) {
+  if (t->link_cursor == on) return;
+  t->link_cursor = on;
+  gtk_widget_set_cursor_from_name(GTK_WIDGET(t), on ? "pointer" : NULL);
+}
+
 static void on_motion(GtkEventControllerMotion *ctl, double x, double y,
                       gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
   t->mouse_x = x;
   t->mouse_y = y;
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
-  if (!pointer_reports(t, state)) return;
-  /* The core drops motion the app didn't ask for (press-only modes) and
-   * repeats within one cell, so this stays cheap on every pointer move. */
-  pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_MOTION,
-                            GHOSTTY_MOUSE_BUTTON_UNKNOWN, pt_keymap_mods(state),
-                            x, y);
+  if (pointer_reports(t, state)) {
+    /* The app owns the pointer, links included: ⌃click goes to it, so the
+     * cursor must not promise otherwise. */
+    set_link_cursor(t, FALSE);
+    /* The core drops motion the app didn't ask for (press-only modes) and
+     * repeats within one cell, so this stays cheap on every pointer move. */
+    pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_MOTION,
+                              GHOSTTY_MOUSE_BUTTON_UNKNOWN,
+                              pt_keymap_mods(state), x, y);
+    return;
+  }
+  char *uri = t->core != NULL ? pt_term_core_hyperlink_at(t->core, x, y) : NULL;
+  set_link_cursor(t, uri != NULL);
+  g_free(uri);
+}
+
+static void on_motion_leave(GtkEventControllerMotion *ctl, gpointer user) {
+  (void)ctl;
+  set_link_cursor(PT_TERMINAL(user), FALSE);
+}
+
+static void on_uri_launched(GObject *src, GAsyncResult *res, gpointer user) {
+  (void)user;
+  GError *err = NULL;
+  if (!gtk_uri_launcher_launch_finish(GTK_URI_LAUNCHER(src), res, &err))
+    g_warning("pt: could not open %s: %s",
+              gtk_uri_launcher_get_uri(GTK_URI_LAUNCHER(src)),
+              err != NULL ? err->message : "?");
+  g_clear_error(&err);
+}
+
+/* TRUE when there was a link under the pointer and it was handed to the
+ * desktop. The core only returns URIs with a scheme pt is willing to open, so
+ * this is the whole of the check. */
+static gboolean open_link_at(PtTerminal *t, double x, double y) {
+  char *uri = pt_term_core_hyperlink_at(t->core, x, y);
+  if (uri == NULL) return FALSE;
+  GtkRoot *root = gtk_widget_get_root(GTK_WIDGET(t));
+  GtkUriLauncher *launcher = gtk_uri_launcher_new(uri);
+  gtk_uri_launcher_launch(launcher,
+                          GTK_IS_WINDOW(root) ? GTK_WINDOW(root) : NULL,
+                          NULL, on_uri_launched, NULL);
+  g_object_unref(launcher);
+  g_free(uri);
+  return TRUE;
 }
 
 static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
@@ -762,6 +862,11 @@ static void on_click_pressed(GtkGestureClick *g, int n, double x, double y,
    * for the app's sake, and dropping them here keeps them from clearing a
    * selection the user just made. */
   if (button != GDK_BUTTON_PRIMARY) return;
+
+  /* ⌃click opens the link under the pointer. Ahead of the selection press so
+   * the click that opened something does not also start a drag, and behind the
+   * reporting branch above so an app that took the mouse still gets it. */
+  if ((state & GDK_CONTROL_MASK) != 0 && open_link_at(t, x, y)) return;
 
   /* controller event time is in milliseconds; the core wants nanoseconds */
   guint32 ms =
@@ -1074,6 +1179,7 @@ static void pt_terminal_init(PtTerminal *t) {
 
   GtkEventController *motion = gtk_event_controller_motion_new();
   g_signal_connect(motion, "motion", G_CALLBACK(on_motion), t);
+  g_signal_connect(motion, "leave", G_CALLBACK(on_motion_leave), t);
   gtk_widget_add_controller(GTK_WIDGET(t), motion);
 
   GtkGesture *drag = gtk_gesture_drag_new();
