@@ -1,0 +1,657 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+
+/* Tailwind ships for preflight and the odd utility. The document styles below
+   are plain CSS on element selectors, matching the layout used across the
+   other sites in this account. */
+
+:root {
+  --bg: #08090d;
+  --ink: #e6edf3;
+  --ink-muted: #7d8590;
+  --ink-subtle: #6e7681;
+  --ink-faint: #59636e;
+  --line: #1d232b;
+  --surface: #0d1117;
+  --accent: #58a6ff;
+  --success: #3fb950;
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --ink: #1f2328;
+  --ink-muted: #59636e;
+  --ink-subtle: #6e7781;
+  --ink-faint: #8c959f;
+  --line: #d1d9e0;
+  --surface: #f6f8fa;
+  --accent: #0969da;
+  --success: #1a7f37;
+  color-scheme: light;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+html {
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--ink-muted);
+  font-family: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.625;
+  font-feature-settings: 'ss01';
+  -webkit-font-smoothing: antialiased;
+}
+::selection {
+  background: color-mix(in oklab, var(--accent) 30%, transparent);
+  color: var(--ink);
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+nav {
+  max-width: 896px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 12px;
+}
+nav .brand {
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+  padding: 8px;
+  transition: opacity 0.15s;
+}
+nav .brand:hover {
+  opacity: 0.8;
+}
+nav .links {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+nav .links a {
+  color: var(--ink-subtle);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+nav .links a:hover {
+  color: var(--ink);
+}
+nav .links svg {
+  display: block;
+}
+
+main {
+  max-width: 672px;
+  margin: 0 auto;
+  padding: 64px 20px 96px;
+}
+
+h1 {
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+}
+.lede {
+  margin-top: 12px;
+  line-height: 1.625;
+  color: var(--ink-muted);
+}
+h2 {
+  margin-top: 48px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+h3 {
+  margin-top: 32px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+p {
+  margin-top: 8px;
+  font-size: 14px;
+  line-height: 1.625;
+  color: var(--ink-muted);
+}
+p + p {
+  margin-top: 12px;
+}
+.ink,
+strong {
+  color: var(--ink);
+  font-weight: 400;
+}
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+code {
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 0.92em;
+  color: var(--ink);
+}
+pre {
+  margin-top: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 16px;
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.625;
+  color: var(--ink-muted);
+}
+pre code {
+  font-size: 12px;
+  color: inherit;
+}
+pre .c {
+  color: var(--ink-faint);
+}
+pre .k {
+  color: var(--ink);
+}
+pre .g {
+  color: var(--success);
+}
+ul {
+  margin-top: 8px;
+  padding-left: 20px;
+  font-size: 14px;
+  line-height: 1.625;
+  color: var(--ink-muted);
+}
+li {
+  margin-top: 6px;
+}
+
+/* The caret that follows the tagline, echoing the app's own cursor. */
+.caret {
+  display: inline-block;
+  width: 7px;
+  height: 1.05em;
+  margin-left: 5px;
+  border-radius: 1px;
+  background: var(--accent);
+  vertical-align: -0.15em;
+  animation: pt-blink 1.1s step-end infinite;
+}
+
+/* Hero actions */
+.actions {
+  margin-top: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.actions a {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  padding: 7px 16px;
+  font-size: 14px;
+  color: var(--ink);
+  text-decoration: none;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.actions a:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+  text-decoration: none;
+}
+.actions svg {
+  display: block;
+  flex-shrink: 0;
+}
+
+.cmd {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 10px 12px;
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 12px;
+}
+.cmd code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--ink-muted);
+  /* The command overflows on narrow viewports and is still draggable, but a
+     permanent scrollbar in a one-line row reads as a rendering fault. */
+  scrollbar-width: none;
+}
+.cmd code::-webkit-scrollbar {
+  display: none;
+}
+.cmd .p {
+  color: var(--ink-faint);
+  user-select: none;
+}
+button.copy {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink-subtle);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+button.copy:hover {
+  color: var(--ink);
+  border-color: var(--ink-faint);
+}
+
+.pills {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--ink-subtle);
+}
+.pills span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+/* ---- window mockup (src/mock/AppMock.jsx) ----
+   Mirrors the real app chrome. pt's own accent is green, so the mock uses
+   --mock-accent rather than the site's blue --accent. */
+.mock {
+  --mock-accent: #3fb950;
+  margin-top: 24px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 10.5px;
+  line-height: 1.75;
+}
+:root[data-theme='light'] .mock {
+  --mock-accent: #1a7f37;
+}
+.mock .spacer {
+  margin-left: auto;
+}
+.mock .k {
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.mock .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ink-faint);
+  flex-shrink: 0;
+}
+.mock .dot.on {
+  background: var(--mock-accent);
+}
+.mock-body {
+  display: flex;
+  min-height: 460px;
+}
+
+/* sidebar */
+.mock-sidebar {
+  display: flex;
+  width: 158px;
+  flex-shrink: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--line);
+}
+.mock-search {
+  margin: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.mock-search .i {
+  margin-right: 4px;
+}
+.mock-projects {
+  margin: 0;
+  padding: 0 6px;
+  list-style: none;
+  font-size: 10.5px;
+  flex: 1;
+}
+.mock-projects li {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin: 0 0 1px;
+  padding: 4px 7px;
+  border-left: 2px solid transparent;
+  border-radius: 3px;
+  color: var(--ink-faint);
+  /* Longer names (gh-widgets, codexpass) must not wrap the row. */
+  white-space: nowrap;
+  overflow: hidden;
+}
+.mock-projects li.active {
+  background: color-mix(in oklab, var(--ink) 8%, transparent);
+  border-left-color: var(--mock-accent);
+}
+.mock-projects .nm {
+  color: var(--ink-muted);
+}
+.mock-projects li.active .nm {
+  color: var(--ink);
+  font-weight: 500;
+}
+.mock-projects .br {
+  color: var(--mock-accent);
+  opacity: 0.85;
+}
+.mock-projects .ah {
+  color: var(--mock-accent);
+}
+.mock-projects .ct {
+  margin-left: auto;
+  color: var(--ink-faint);
+}
+.mock-projects .ch {
+  color: var(--ink-faint);
+}
+.mock-add {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 8px 12px;
+  color: var(--ink-faint);
+}
+
+/* main column */
+.mock-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+.mock-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding: 7px 12px;
+}
+.mock-header .nm {
+  color: var(--ink);
+  font-weight: 600;
+}
+.mock-header .path {
+  color: var(--ink-faint);
+}
+.mock-header .pill {
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--mock-accent) 16%, transparent);
+  padding: 1px 6px;
+  color: var(--mock-accent);
+}
+.mock-header .wc {
+  color: var(--ink-faint);
+  padding-left: 2px;
+}
+.mock-tabs {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  padding-right: 10px;
+}
+.mock-tabs span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-right: 1px solid var(--line);
+  color: var(--ink-faint);
+}
+.mock-tabs span.spacer,
+.mock-tabs span.k {
+  border-right: 0;
+  padding: 6px 5px;
+}
+.mock-tabs span.active {
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+
+/* terminal body */
+.mock-pane {
+  flex: 1;
+  padding: 12px 14px;
+  overflow: hidden;
+}
+.mock-line {
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Separator above the prompt block, as the app draws it. */
+.mock-rule {
+  margin: 10px 0 8px;
+  border-top: 1px solid var(--line);
+}
+.mock-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding: 6px 12px;
+  color: var(--ink-faint);
+}
+.mock-status .k + .k {
+  margin-left: 4px;
+}
+
+/* tones shared by the mock pane */
+.t-i {
+  color: var(--ink);
+}
+.t-f {
+  color: var(--ink-faint);
+}
+.t-a {
+  color: var(--accent);
+}
+.t-g {
+  color: var(--mock-accent, #3fb950);
+}
+.t-w {
+  color: #e3b341;
+}
+.t-r {
+  color: #ff7b72;
+}
+:root[data-theme='light'] .t-w {
+  color: #bf8700;
+}
+:root[data-theme='light'] .t-r {
+  color: #cf222e;
+}
+@media (max-width: 560px) {
+  .mock-sidebar {
+    display: none;
+  }
+  .mock-header .path {
+    display: none;
+  }
+}
+
+.table-wrap {
+  margin-top: 12px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+tr {
+  border-bottom: 1px solid var(--line);
+}
+tr:last-child {
+  border-bottom: 0;
+}
+td {
+  padding: 8px 12px;
+  vertical-align: top;
+}
+td.name {
+  white-space: nowrap;
+  color: var(--ink);
+}
+td.key {
+  white-space: nowrap;
+  color: var(--accent);
+  width: 116px;
+}
+td.desc {
+  color: var(--ink-faint);
+  font-family: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  font-size: 12.5px;
+}
+
+button.theme-toggle {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--ink-subtle);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+button.theme-toggle:hover {
+  color: var(--ink);
+}
+:root[data-theme='light'] .icon-moon {
+  display: none;
+}
+:root:not([data-theme='light']) .icon-sun {
+  display: none;
+}
+
+footer {
+  max-width: 896px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding: 24px 20px 48px;
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--ink-subtle);
+}
+footer a {
+  color: var(--ink-subtle);
+}
+footer a:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+@keyframes pt-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caret {
+    animation: none;
+  }
+}
+
+/* Name gloss under the h1 — pt is short for "personal terminal". */
+.tagline {
+  margin-top: 6px;
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+.tagline code {
+  font-size: 12px;
+  color: var(--ink-subtle);
+}
+
+figure.shot {
+  margin-top: 24px;
+}
+/* The mockup breaks out of the 672px prose column to the 896px nav width, so
+   the chrome stays legible. Negative margins rather than 100vw: vw includes
+   the scrollbar and would cause a horizontal overflow. 632px content + 224px
+   = 856px, which is the nav's content width. */
+@media (min-width: 940px) {
+  figure.shot {
+    margin-inline: -112px;
+  }
+}
+figure.shot figcaption {
+  margin-top: 8px;
+  font-family: 'Geist Mono Variable', ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+}
+figure.shot .mock {
+  margin-top: 0;
+}

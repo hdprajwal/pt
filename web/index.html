@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#08090d" />
+    <meta
+      name="description"
+      content="pt (personal terminal) is a terminal workspace for Linux — projects, splits, tabs and git in one window. Built with GTK4 and libadwaita on libghostty-vt."
+    />
+    <meta property="og:site_name" content="pt" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="pt — personal terminal for Linux" />
+    <meta
+      property="og:description"
+      content="Projects, splits, tabs and git in one window. GTK4 + libadwaita on libghostty-vt. Free and open-source."
+    />
+    <meta name="twitter:card" content="summary" />
+    <title>pt — personal terminal for Linux</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <script>
+      // Set the theme before first paint: saved choice, else system preference.
+      ;(function () {
+        var saved = localStorage.getItem('theme')
+        var theme =
+          saved ||
+          (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        if (theme === 'light') document.documentElement.dataset.theme = 'light'
+      })()
+    </script>
+    <link rel="stylesheet" href="/src/styles/app.css" />
+  </head>
+
+  <body>
+    <nav>
+      <a class="brand" href="/">pt</a>
+      <div class="links">
+        <a href="#install">Install</a>
+        <a href="#config">Config</a>
+        <button class="theme-toggle" type="button" aria-label="Toggle color theme">
+          <svg
+            class="icon-moon"
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+          </svg>
+          <svg
+            class="icon-sun"
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2" />
+            <path d="M12 20v2" />
+            <path d="m4.93 4.93 1.41 1.41" />
+            <path d="m17.66 17.66 1.41 1.41" />
+            <path d="M2 12h2" />
+            <path d="M20 12h2" />
+            <path d="m6.34 17.66-1.41 1.41" />
+            <path d="m19.07 4.93-1.41 1.41" />
+          </svg>
+        </button>
+        <a
+          href="https://github.com/hdprajwal/pt"
+          target="_blank"
+          rel="noopener"
+          aria-label="pt on GitHub"
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"
+            />
+          </svg>
+        </a>
+      </div>
+    </nav>
+
+    <main>
+      <h1>pt</h1>
+      <p class="tagline">personal terminal · also written <code>pterm</code></p>
+      <p class="lede">
+        Your terminal, with the <span style="color: var(--accent)">whole project</span>
+        around it.<span class="caret" aria-hidden="true"></span>
+      </p>
+      <p class="lede">
+        A Linux terminal workspace — projects, splits, tabs and git in one
+        window, built on GTK4 and libghostty-vt.<br />
+        Free, no telemetry, no subscription.
+      </p>
+
+      <div class="actions">
+        <a href="https://github.com/hdprajwal/pt/releases/latest">Download</a>
+        <a href="https://github.com/hdprajwal/pt" target="_blank" rel="noopener">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"
+            />
+          </svg>
+          GitHub
+        </a>
+      </div>
+
+      <div class="cmd">
+        <span class="p">$</span>
+        <code id="install-cmd"
+          >curl -fsSL
+          https://github.com/hdprajwal/pt/releases/latest/download/install.sh |
+          sh</code
+        >
+        <button class="copy" type="button" id="copy-btn" aria-label="Copy install command">
+          copy
+        </button>
+      </div>
+
+      <div class="pills">
+        <span>Linux x86_64 &amp; aarch64</span>
+        <span>GTK4 + libadwaita</span>
+        <span>free &amp; open-source</span>
+      </div>
+
+      <!-- Mockup of the window, rendered by src/mock/AppMock.jsx. Swap this
+           for a real screenshot when there is one. -->
+      <figure class="shot">
+        <div id="app-mock"></div>
+        <figcaption>The project sidebar, shell tabs, and the keyboard hint bar.</figcaption>
+      </figure>
+
+      <h2>What it is</h2>
+      <p>
+        A terminal is usually one window per thing you are doing. pt turns that
+        around: each project is an entry in the sidebar, and it keeps its own
+        tabs, splits and working directories. Switch to a project and everything
+        is where you left it — nothing to reopen, nothing to <code>cd</code> back
+        into.
+      </p>
+      <p>
+        The VT layer is
+        <a href="https://github.com/ghostty-org/ghostty" target="_blank" rel="noopener"
+          >libghostty-vt</a
+        >, so escape-sequence handling is someone else's solved problem. The rest
+        is GTK4 and libadwaita.
+      </p>
+
+      <h2>Features</h2>
+      <div class="table-wrap">
+        <table>
+          <tr>
+            <td class="name">projects</td>
+            <td class="key">Ctrl 1–9</td>
+            <td class="desc">
+              Each project keeps its own tabs, splits and directories. The layout
+              is written to disk and restored on next launch.
+            </td>
+          </tr>
+          <tr>
+            <td class="name">palette</td>
+            <td class="key">Ctrl K</td>
+            <td class="desc">
+              Projects, shells and commands, fuzzy-matched. Keyboard only.
+            </td>
+          </tr>
+          <tr>
+            <td class="name">splits</td>
+            <td class="key"></td>
+            <td class="desc">
+              Divide a tab as far as you need. New panes inherit the directory
+              you were already in.
+            </td>
+          </tr>
+          <tr>
+            <td class="name">selection</td>
+            <td class="key">Ctrl ⇧ C</td>
+            <td class="desc">
+              Click and drag to select, with no modifier, even inside full-screen
+              apps. Double-click a word, triple-click a line.
+            </td>
+          </tr>
+          <tr>
+            <td class="name">git</td>
+            <td class="key"></td>
+            <td class="desc">
+              Branch, dirty count and last exit code in the statusline; the
+              detail in the info panel.
+            </td>
+          </tr>
+          <tr>
+            <td class="name">themes</td>
+            <td class="key"></td>
+            <td class="desc">
+              Config and the active theme are watched on disk and applied live —
+              no restart, no reload command.
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <h2 id="install">Install</h2>
+      <p>
+        Prebuilt tarballs for Linux x86_64 and aarch64 are published on
+        <a href="https://github.com/hdprajwal/pt/releases" target="_blank" rel="noopener"
+          >GitHub Releases</a
+        >. The installer puts <code>pt</code> in <code>~/.local/bin</code>, adds
+        the prompt snippets, and registers a desktop entry and icon so it shows
+        up in your launcher.
+      </p>
+      <pre><code>curl -fsSL https://github.com/hdprajwal/pt/releases/latest/download/install.sh | sh</code></pre>
+      <p>
+        Set <code>PT_PREFIX</code> to change the prefix, or pass a tag as an
+        argument to pin a version. The runtime libraries still come from your
+        package manager — GTK4 4.16 or newer, libadwaita and json-glib:
+      </p>
+      <pre><code><span class="c"># Arch-based</span>
+sudo pacman -S --needed base-devel cmake pkgconf gtk4 libadwaita json-glib</code></pre>
+      <p>
+        Fonts are not bundled. The defaults are JetBrains Mono for the terminal
+        and IBM Plex Sans for the UI — install them, or point the config at
+        fonts you already have.
+      </p>
+
+      <h3>Build from source</h3>
+      <p>
+        You also need Zig 0.15.x, CMake 3.19 or newer, and network access on the
+        first configure — ghostty's <code>lib-vt</code> is fetched at a pinned
+        commit and built, so the first build takes a while. Later builds are
+        incremental.
+      </p>
+      <pre><code>cmake -B build
+cmake --build build
+./build/pt
+
+ctest --test-dir build   <span class="c"># tests</span></code></pre>
+
+      <h2>Selecting and copying text</h2>
+      <p>
+        Left-click and drag selects. Double-click selects a word, triple-click
+        selects a line, and <code>Ctrl+Shift+C</code> copies
+        (<code>Ctrl+Shift+V</code> pastes). Typing clears the selection and snaps
+        the view back to the prompt.
+      </p>
+      <p>
+        That holds inside full-screen apps too — Claude Code, vim, htop, lazygit,
+        fzf. Those apps normally ask the terminal for the mouse, and pt does not
+        hand it over: <code>mouse-reporting</code> ships off, which is the one
+        place pt deliberately differs from ghostty's defaults. The cost is that
+        mouse-driven features inside those apps do nothing.
+      </p>
+      <p>
+        Set <code>mouse-reporting = true</code> for the usual behaviour. A plain
+        drag then goes to the app, and holding <code>Shift</code> takes the
+        pointer back for one gesture. Either way, "Toggle mouse reporting" in the
+        palette flips the focused pane for the rest of the session without
+        touching the config.
+      </p>
+
+      <h2 id="config">Configuration</h2>
+      <p>
+        pt reads <code>~/.config/pt/config</code>, a <code>key = value</code> file
+        where <code>#</code> starts a comment. Those six keys, plus
+        <code>app-*</code> colour-token overrides such as
+        <code>app-background = #101010</code>, are the entire config surface.
+      </p>
+      <pre><code><span class="k">theme</span> = pt-dark
+<span class="k">font-size</span> = 9
+<span class="k">font-family</span> = JetBrains Mono
+<span class="k">ui-font-size</span> = 12.5
+<span class="k">ui-font-family</span> = IBM Plex Sans
+<span class="k">mouse-reporting</span> = false</code></pre>
+      <p>
+        Booleans accept <code>true</code>/<code>false</code>,
+        <code>yes</code>/<code>no</code>, <code>on</code>/<code>off</code> or
+        <code>1</code>/<code>0</code>. Custom themes go in
+        <code>~/.config/pt/themes/</code>; both the config and the active theme
+        are watched and applied live.
+      </p>
+
+      <h2>Shell prompt integration</h2>
+      <p>
+        Source the snippet for your shell from its rc file. Bash and fish
+        variants live next to the zsh one in <code>share/prompt/</code>.
+      </p>
+      <pre><code><span class="c"># ~/.zshrc</span>
+source ~/.local/share/pt/prompt/pt-prompt.zsh</code></pre>
+      <p>
+        The snippet is a no-op outside pt, so sourcing it unconditionally is
+        safe. Inside pt it reports each command's exit code back to the app and
+        prints an identity line — path, branch, dirty count — in the project's
+        accent colour. If a repository with a huge untracked tree makes the
+        prompt slow, set <code>PT_PROMPT_GIT_UNTRACKED=no</code> to count only
+        tracked changes.
+      </p>
+    </main>
+
+    <footer>
+      <span>free &amp; open-source · no telemetry</span>
+      <span
+        >built by
+        <a href="https://hdprajwal.dev" target="_blank" rel="noopener">Prajwal HD</a></span
+      >
+    </footer>
+
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
