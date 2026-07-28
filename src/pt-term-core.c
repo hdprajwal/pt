@@ -641,6 +641,63 @@ char *pt_term_core_selection_text(PtTermCore *c) {
   return out;
 }
 
+/* ---- OSC 8 hyperlinks ----
+ *
+ * libghostty already parses OSC 8 and hangs the URI off every cell the program
+ * wrote between the start and end sequences, so this is a lookup: pixel ->
+ * viewport cell -> a fresh grid ref -> the URI stored against it. Nothing here
+ * detects links in plain text; a program has to say a run of cells is one. */
+
+gboolean pt_term_core_hyperlink_is_safe(const char *uri) {
+  if (uri == NULL) return FALSE;
+  /* Whitespace and control bytes never appear in a URI that was written
+   * properly (a space belongs percent-encoded), and a scheme test alone would
+   * happily pass "http://x\nrm -rf ~" to whatever opens it. */
+  for (const char *p = uri; *p != '\0'; p++)
+    if ((unsigned char)*p <= 0x20 || (unsigned char)*p == 0x7F) return FALSE;
+  const char *colon = strchr(uri, ':');
+  if (colon == NULL) return FALSE;          /* no scheme: nothing to open it */
+  gsize len = (gsize)(colon - uri);
+  static const char *const allowed[] = { "http", "https", "file", "mailto" };
+  for (gsize i = 0; i < G_N_ELEMENTS(allowed); i++)
+    if (strlen(allowed[i]) == len &&
+        g_ascii_strncasecmp(uri, allowed[i], len) == 0)
+      return TRUE;
+  return FALSE;
+}
+
+char *pt_term_core_hyperlink_at(PtTermCore *c, double px, double py) {
+  /* Not clamped to the grid the way a selection drag is: the padding around it
+   * is not part of any cell, and clamping there would make the edge column's
+   * link openable from outside it. */
+  double cx = (px - PT_CORE_PAD_X) / (double)c->cell_w;
+  double cy = (py - PT_CORE_PAD_Y) / (double)c->cell_h;
+  if (cx < 0 || cy < 0 || cx >= c->cols || cy >= c->rows) return NULL;
+
+  GhosttyGridRef ref;
+  if (!sel_ref_at(c, (uint16_t)cx, (uint16_t)cy, &ref)) return NULL;
+  /* A NULL buffer only asks for the length; no link at all reports zero. */
+  size_t need = 0;
+  if (ghostty_grid_ref_hyperlink_uri(&ref, NULL, 0, &need) !=
+          GHOSTTY_OUT_OF_SPACE || need == 0)
+    return NULL;
+  char *uri = g_malloc(need + 1);
+  size_t written = 0;
+  if (ghostty_grid_ref_hyperlink_uri(&ref, (uint8_t *)uri, need,
+                                     &written) != GHOSTTY_SUCCESS) {
+    g_free(uri);
+    return NULL;
+  }
+  uri[written] = '\0';                       /* the URI is not NUL-terminated */
+  /* An embedded NUL would leave the tail of the URI outside every check below
+   * while some consumers still read past it. */
+  if (strlen(uri) != written || !pt_term_core_hyperlink_is_safe(uri)) {
+    g_free(uri);
+    return NULL;
+  }
+  return uri;
+}
+
 gboolean pt_term_core_mouse_tracking(PtTermCore *c) {
   bool tracking = false;
   ghostty_terminal_get(c->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING,

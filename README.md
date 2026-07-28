@@ -105,6 +105,20 @@ the length of one gesture so you can still select. Either way, "Toggle mouse
 reporting" in the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) flips the
 focused pane for the rest of the session without touching the config.
 
+## Opening links
+
+A program can mark a piece of its output as a link (`ls --hyperlink=auto` does,
+and so do a lot of test runners and build tools). pt underlines those and opens
+them on <kbd>Ctrl</kbd>+click; the pointer turns into a hand when there is one
+under it. Only `http`, `https`, `file` and `mailto` links open — anything else
+is left alone, because the link text and the address behind it are both written
+by whatever is running in the pane.
+
+A URL printed as ordinary text is not a link. The program has to say it is.
+
+Inside an app that has the mouse, <kbd>Ctrl</kbd>+click goes to the app instead,
+and holding <kbd>Shift</kbd> takes it back, exactly as with selection.
+
 ## Configuration
 
 pt reads `~/.config/pt/config`, a `key = value` file (`#` starts a comment):

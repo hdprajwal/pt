@@ -49,6 +49,20 @@ void pt_term_core_selection_release(PtTermCore *c, double px, double py);
 void pt_term_core_selection_clear(PtTermCore *c);
 char *pt_term_core_selection_text(PtTermCore *c);  /* NULL when no selection; caller g_free */
 
+/* ---- OSC 8 hyperlinks (same pixel space as the selection calls) ----
+ *
+ * The URI a program attached to the cell under the pointer, or NULL when there
+ * is no cell there, no link on it, or the link is not one pt opens. Caller
+ * g_free's it. Only the schemes below come back, so a URI from here is always
+ * safe to hand to the desktop. */
+char *pt_term_core_hyperlink_at(PtTermCore *c, double px, double py);
+/* http, https, file and mailto, case-insensitively, and nothing else: the URI
+ * comes from whatever wrote to the pty, so anything that hands a shell command
+ * or a local helper its arguments (ssh:, smb:, and every scheme some installed
+ * app claims) stays unopenable. Control bytes are rejected too — a URI is
+ * never allowed to carry a newline into whatever runs it. */
+gboolean pt_term_core_hyperlink_is_safe(const char *uri);
+
 /* ---- mouse reporting (modes 9/1000/1002/1003; same pixel space as above) ----
  *
  * When an app tracks the mouse it owns the pointer: wheel, buttons and motion
