@@ -2,6 +2,7 @@
 #include "pt-block.h"
 #include "pt-keymap.h"
 #include "pt-session.h"      /* PT_FONT_SIZE_DEFAULT, shared with persistence */
+#include <adwaita.h>         /* paste confirmation dialog */
 #include <math.h>
 
 #define PT_FONT_FAMILY_DEFAULT "JetBrains Mono"
@@ -56,6 +57,7 @@ struct _PtTerminal {
   gboolean exited;
   int exit_status;
   gboolean focused;
+  gboolean paste_confirm_open;   /* a repeated ⌃⇧V must not stack dialogs */
 
   /* mouse: last known pointer position (wheel events report at the cursor,
    * and GTK scroll events carry no coordinates), plus the sub-row remainder
@@ -776,24 +778,86 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
   gtk_widget_queue_draw(GTK_WIDGET(t));
 }
 
+/* Clipboard text held across the confirmation dialog. */
+typedef struct {
+  PtTerminal *term;   /* owned ref */
+  char *text;         /* owned */
+} PtPasteCtx;
+
+static void paste_ctx_free(gpointer data, GClosure *closure) {
+  (void)closure;
+  PtPasteCtx *p = data;
+  p->term->paste_confirm_open = FALSE;
+  g_object_unref(p->term);
+  g_free(p->text);
+  g_free(p);
+}
+
+static void on_paste_confirm_response(AdwAlertDialog *dlg, const char *response,
+                                      gpointer user) {
+  (void)dlg;
+  PtPasteCtx *p = user;
+  if (g_strcmp0(response, "paste") == 0 && p->term->core != NULL)
+    pt_term_core_paste(p->term->core, p->text, -1);
+  /* Cancelled or pasted, the keyboard belongs back in the pane. */
+  if (gtk_widget_get_root(GTK_WIDGET(p->term)) != NULL)
+    gtk_widget_grab_focus(GTK_WIDGET(p->term));
+}
+
+/* Text with a line break (or its own end-of-paste sequence) runs the moment it
+ * lands in a shell, so it gets a look first. Takes ownership of `text` and of
+ * the reference on `t`. */
+static void present_paste_confirm(PtTerminal *t, char *text) {
+  gboolean multiline = strchr(text, '\n') != NULL;
+  guint lines = 1;
+  for (const char *p = text; *p != '\0'; p++)
+    if (*p == '\n' && p[1] != '\0') lines++;   /* a trailing newline ends the
+                                                  last line, it does not start
+                                                  another */
+  char *heading = g_strdup_printf(lines == 1 ? "Paste %u line?"
+                                             : "Paste %u lines?", lines);
+  AdwDialog *dlg = adw_alert_dialog_new(
+      heading,
+      multiline ? "The shell runs each line as soon as it is pasted."
+                : "This text ends a bracketed paste partway through, which "
+                  "lets the rest of it run as a command.");
+  g_free(heading);
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dlg),
+                                 "cancel", "Cancel", "paste", "Paste", NULL);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dlg), "paste",
+                                           ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dlg), "cancel");
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dlg), "cancel");
+  PtPasteCtx *p = g_new0(PtPasteCtx, 1);
+  p->term = t;
+  p->text = text;
+  t->paste_confirm_open = TRUE;
+  g_signal_connect_data(dlg, "response", G_CALLBACK(on_paste_confirm_response),
+                        p, paste_ctx_free, 0);
+  adw_dialog_present(dlg, GTK_WIDGET(t));
+}
+
 static void on_paste_text(GObject *src, GAsyncResult *res, gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
   char *text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(src), res, NULL);
-  if (text == NULL) { g_object_unref(t); return; }
-  if (t->core != NULL) {
-    if (pt_term_core_bracketed_paste(t->core)) {
-      pt_term_core_write(t->core, "\x1b[200~", 6);
-      pt_term_core_write(t->core, text, -1);
-      pt_term_core_write(t->core, "\x1b[201~", 6);
-    } else {
-      pt_term_core_write(t->core, text, -1);
-    }
+  if (text == NULL || t->core == NULL) {
+    g_free(text);
+    g_object_unref(t);
+    return;
   }
+  /* The core sanitizes either way; the dialog is about what the text will do
+   * once it gets there, not about what bytes reach the pty. */
+  if (!pt_term_core_paste_is_safe(text, -1)) {
+    present_paste_confirm(t, text);   /* takes both */
+    return;
+  }
+  pt_term_core_paste(t->core, text, -1);
   g_free(text);
   g_object_unref(t);
 }
 
 void pt_terminal_paste(PtTerminal *t) {
+  if (t->paste_confirm_open) return;   /* the open dialog owns this paste */
   GdkClipboard *cb = gtk_widget_get_clipboard(GTK_WIDGET(t));
   gdk_clipboard_read_text_async(cb, NULL, on_paste_text, g_object_ref(t));
 }
