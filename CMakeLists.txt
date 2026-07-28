@@ -115,6 +115,10 @@ add_executable(test-block tests/test-block.c)
 target_link_libraries(test-block PRIVATE ptcore)
 add_test(NAME block COMMAND test-block)
 
+add_executable(test-osc-scan tests/test-osc-scan.c)
+target_link_libraries(test-osc-scan PRIVATE ptcore)
+add_test(NAME osc-scan COMMAND test-osc-scan)
+
 add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
 target_include_directories(test-keymap PRIVATE src)
 target_link_libraries(test-keymap PRIVATE PkgConfig::GTK ghostty-vt PkgConfig::GLIB)

@@ -1,4 +1,5 @@
 #include "pt-term-core.h"
+#include "pt-term-core-internal.h"
 #include "pt-status-parse.h"
 #include <glib-unix.h>
 #include <errno.h>
@@ -145,6 +146,125 @@ static gboolean poll_foreground_command(gpointer ud) {
   }
   g_free(comm);
   return G_SOURCE_CONTINUE;
+}
+
+/* ---- OSC scanner (see pt-term-core-internal.h for why pt needs its own) ---- */
+#define PT_ESC 0x1B
+#define PT_BEL 0x07
+
+static void osc_buf_reset(PtOscScan *s) {
+  if (s->buf == NULL) return;
+  g_string_truncate(s->buf, 0);
+  /* One OSC 52 can leave a megabyte parked on a pane for the rest of the
+   * session. Hand it back rather than keeping the high-water mark. */
+  if (s->buf->allocated_len > PT_OSC_MAX) {
+    g_string_free(s->buf, TRUE);
+    s->buf = NULL;
+  }
+}
+
+static void osc_begin(PtOscScan *s) {
+  if (s->buf == NULL) s->buf = g_string_sized_new(64);
+  else g_string_truncate(s->buf, 0);
+  s->state = PT_OSC_PAYLOAD;
+}
+
+/* The cap depends on the code, which is the digits before the first ';' — so
+ * it can only be known once that much has been buffered. Checked only after
+ * the general cap is already reached, so the common path stays one compare. */
+static gsize osc_cap(const GString *b) {
+  return (b->len >= 3 && memcmp(b->str, "52;", 3) == 0) ? PT_OSC_52_MAX
+                                                        : PT_OSC_MAX;
+}
+
+static void osc_append(PtOscScan *s, guint8 b) {
+  if (G_UNLIKELY(s->buf->len >= PT_OSC_MAX && s->buf->len >= osc_cap(s->buf))) {
+    /* Over budget. Keep tracking the sequence so the scanner stays in sync
+     * with the stream, but throw the payload away. */
+    osc_buf_reset(s);
+    s->state = PT_OSC_DROP;
+    return;
+  }
+  g_string_append_c(s->buf, (char)b);
+}
+
+static void osc_dispatch(PtOscScan *s, PtOscScanFn fn, gpointer user) {
+  const GString *b = s->buf;
+  const char *sep = memchr(b->str, ';', b->len);
+  gsize digits = sep != NULL ? (gsize)(sep - b->str) : b->len;
+  /* No digits, non-digits, or a code no OSC uses: not ours, drop it. */
+  if (digits > 0 && digits <= 5 && fn != NULL) {
+    int code = 0;
+    gsize i;
+    for (i = 0; i < digits; i++) {
+      char ch = b->str[i];
+      if (ch < '0' || ch > '9') break;
+      code = code * 10 + (ch - '0');
+    }
+    if (i == digits)
+      fn(code, sep != NULL ? sep + 1 : b->str + b->len,
+         sep != NULL ? b->len - digits - 1 : 0, user);
+  }
+  osc_buf_reset(s);
+  s->state = PT_OSC_GROUND;
+}
+
+/* An ESC that is not ST ends the sequence with nothing to show for it. `b` is
+ * the byte that followed the ESC, and may itself start something. */
+static void osc_abandon(PtOscScan *s, guint8 b) {
+  osc_buf_reset(s);
+  if (b == ']') osc_begin(s);
+  else if (b == PT_ESC) s->state = PT_OSC_ESC;
+  else s->state = PT_OSC_GROUND;
+}
+
+void pt_osc_scan_feed(PtOscScan *s, const guint8 *data, gsize len,
+                      PtOscScanFn fn, gpointer user) {
+  gsize i = 0;
+  while (i < len) {
+    if (s->state == PT_OSC_GROUND) {
+      /* The hot path, and almost all of every read: with nothing in progress
+       * only ESC matters, so skip straight to the next one instead of running
+       * the state machine per byte. */
+      const guint8 *esc = memchr(data + i, PT_ESC, len - i);
+      if (esc == NULL) return;
+      i = (gsize)(esc - data) + 1;
+      s->state = PT_OSC_ESC;
+      continue;
+    }
+    guint8 b = data[i++];
+    switch (s->state) {
+      case PT_OSC_ESC:
+        if (b == ']') osc_begin(s);
+        else if (b != PT_ESC) s->state = PT_OSC_GROUND;
+        break;                       /* ESC ESC: keep waiting for the ']' */
+      case PT_OSC_PAYLOAD:
+        if (b == PT_BEL) osc_dispatch(s, fn, user);
+        else if (b == PT_ESC) s->state = PT_OSC_PAYLOAD_ESC;
+        else osc_append(s, b);
+        break;
+      case PT_OSC_PAYLOAD_ESC:
+        if (b == '\\') osc_dispatch(s, fn, user);          /* ST */
+        else osc_abandon(s, b);
+        break;
+      case PT_OSC_DROP:
+        if (b == PT_BEL) s->state = PT_OSC_GROUND;
+        else if (b == PT_ESC) s->state = PT_OSC_DROP_ESC;
+        break;
+      case PT_OSC_DROP_ESC:
+        if (b == '\\') s->state = PT_OSC_GROUND;
+        else osc_abandon(s, b);
+        break;
+      case PT_OSC_GROUND:
+        break;                       /* handled above */
+    }
+  }
+}
+
+void pt_osc_scan_clear(PtOscScan *s) {
+  if (s->buf != NULL) g_string_free(s->buf, TRUE);
+  s->buf = NULL;
+  s->state = PT_OSC_GROUND;
 }
 
 /* ---- child + fd sources ---- */
@@ -627,14 +747,15 @@ static int utf8_encode_cp(guint32 cp, char out[4]) {
   return 4;
 }
 
-char *pt_term_core_grid_text(PtTermCore *c) {
+static char *grid_text(GhosttyRenderState rs, GhosttyRenderStateRowIterator it,
+                       GhosttyRenderStateRowCells rc) {
   GString *out = g_string_new(NULL);
-  GhosttyRenderStateRowIterator iter = c->row_iter;
-  if (ghostty_render_state_get(c->render_state,
-          GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &iter) != GHOSTTY_SUCCESS)
+  GhosttyRenderStateRowIterator iter = it;
+  if (ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                               &iter) != GHOSTTY_SUCCESS)
     return g_string_free(out, FALSE);
   while (ghostty_render_state_row_iterator_next(iter)) {
-    GhosttyRenderStateRowCells cells = c->row_cells;
+    GhosttyRenderStateRowCells cells = rc;
     if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                                      &cells) != GHOSTTY_SUCCESS)
       continue;
@@ -662,6 +783,27 @@ char *pt_term_core_grid_text(PtTermCore *c) {
     g_string_append_c(out, '\n');
   }
   return g_string_free(out, FALSE);
+}
+
+char *pt_term_core_grid_text(PtTermCore *c) {
+  return grid_text(c->render_state, c->row_iter, c->row_cells);
+}
+
+char *pt_term_grid_text_raw(GhosttyTerminal t) {
+  GhosttyRenderState rs = NULL;
+  GhosttyRenderStateRowIterator iter = NULL;
+  GhosttyRenderStateRowCells cells = NULL;
+  char *out = NULL;
+  if (ghostty_render_state_new(NULL, &rs) == GHOSTTY_SUCCESS &&
+      ghostty_render_state_row_iterator_new(NULL, &iter) == GHOSTTY_SUCCESS &&
+      ghostty_render_state_row_cells_new(NULL, &cells) == GHOSTTY_SUCCESS) {
+    ghostty_render_state_update(rs, t);
+    out = grid_text(rs, iter, cells);
+  }
+  if (cells != NULL) ghostty_render_state_row_cells_free(cells);
+  if (iter != NULL) ghostty_render_state_row_iterator_free(iter);
+  if (rs != NULL) ghostty_render_state_free(rs);
+  return out;
 }
 
 gboolean pt_term_core_exited(PtTermCore *c, int *status) {
