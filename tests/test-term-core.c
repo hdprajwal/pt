@@ -544,6 +544,88 @@ static void test_osc_consumer_can_unregister(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+/* ---- paste ----
+ *
+ * Same `stty -echo -icanon; cat -v` trick as the mouse tests: whatever we write
+ * to the pty comes back printably, so the bytes the paste path produced are
+ * visible in the grid (ESC as "^[", CR as "^M"). */
+static gboolean bracketed_on(PtTermCore *c) {
+  return pt_term_core_bracketed_paste(c);
+}
+
+static void test_paste_bracketed_strips_end_sequence(void) {
+  /* The attack the sanitizer exists for: clipboard text carrying its own
+     ESC [ 201 ~ would close bracketed paste early and hand the rest to the
+     shell as typed input. The ESC must come out as a space, leaving exactly
+     one opening and one closing marker with no escape between them. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?2004h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(bracketed_on, core));
+
+  const char payload[] = "AAA\x1b[201~BBB";
+  pt_term_core_paste(core, payload, sizeof(payload) - 1);
+  g_assert_true(wait_for_text(core, "^[[201~"));
+
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+
+  char *open = strstr(text, "^[[200~");
+  g_assert_nonnull(open);
+  char *body = open + strlen("^[[200~");
+  g_assert_null(strstr(body, "^[[200~"));        /* exactly one opener */
+  char *close = strstr(body, "^[[201~");
+  g_assert_nonnull(close);
+  g_assert_null(strstr(close + strlen("^[[201~"), "^[[201~"));  /* one closer */
+
+  char *inner = g_strndup(body, (gsize)(close - body));
+  g_assert_null(strstr(inner, "^["));            /* no escape inside the paste */
+  g_assert_cmpstr(inner, ==, "AAA [201~BBB");    /* ESC replaced by a space */
+  g_free(inner);
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
+static void test_paste_unbracketed_newline_becomes_cr(void) {
+  /* Without mode 2004 there are no markers, and newlines become carriage
+     returns — one line submitted, not two. */
+  /* -icrnl as well: the line discipline turns an input CR into NL by default,
+     which would hide the very byte under test. No mode change to wait on
+     here either, so the child announces when the tty is configured — pasting
+     before `stty` lands would be echoed back and the CR would just move the
+     cursor. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon -icrnl; printf 'ready-marker\\n'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready-marker"));
+  g_assert_false(pt_term_core_bracketed_paste(core));
+
+  pt_term_core_paste(core, "a\nb", 3);
+  g_assert_true(wait_for_text(core, "a^Mb"));
+
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "^[[200~"));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
+static void test_paste_is_safe(void) {
+  g_assert_true(pt_term_core_paste_is_safe("ls", 2));
+  g_assert_false(pt_term_core_paste_is_safe("ls\nrm -rf /", 11));
+  /* An embedded end sequence is unsafe too, newline or not. */
+  g_assert_false(pt_term_core_paste_is_safe("ls\x1b[201~rm -rf /", 16));
+  g_assert_true(pt_term_core_paste_is_safe("ls", -1));   /* NUL-terminated */
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
@@ -563,5 +645,10 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
   g_test_add_func("/termcore/osc-callback", test_osc_reaches_callback);
   g_test_add_func("/termcore/osc-unregister", test_osc_consumer_can_unregister);
+  g_test_add_func("/termcore/paste-bracketed",
+                  test_paste_bracketed_strips_end_sequence);
+  g_test_add_func("/termcore/paste-unbracketed",
+                  test_paste_unbracketed_newline_becomes_cr);
+  g_test_add_func("/termcore/paste-is-safe", test_paste_is_safe);
   return g_test_run();
 }

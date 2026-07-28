@@ -69,6 +69,18 @@ gboolean pt_term_core_alt_scroll(PtTermCore *c);   /* mode 1007, default on */
 void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count);
 
 gboolean pt_term_core_bracketed_paste(PtTermCore *c);
+/* ---- paste ----
+ *
+ * The only place bracketed paste is written. `text` is sanitized before it
+ * reaches the pty: control bytes (NUL, ESC, DEL, the tty's own signal
+ * characters) become spaces, so clipboard text carrying its own ESC [ 201 ~
+ * cannot end the paste early and have the rest run as typed input. With mode
+ * 2004 off, newlines become carriage returns instead. len < 0 → NUL-terminated.
+ * The caller keeps ownership of `text` and it is not modified. */
+void pt_term_core_paste(PtTermCore *c, const char *text, gssize len);
+/* FALSE when the text holds a newline or an end-of-paste sequence, i.e. when
+ * pasting it into a shell can run a command. Worth a confirmation. */
+gboolean pt_term_core_paste_is_safe(const char *text, gssize len);
 void pt_term_core_sync(PtTermCore *c);              /* render_state_update */
 GhosttyTerminal pt_term_core_terminal(PtTermCore *c);
 GhosttyRenderState pt_term_core_render_state(PtTermCore *c);

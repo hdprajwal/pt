@@ -741,6 +741,33 @@ gboolean pt_term_core_bracketed_paste(PtTermCore *c) {
   return on;
 }
 
+void pt_term_core_paste(PtTermCore *c, const char *text, gssize len) {
+  if (c->pty_fd < 0 || c->child_exited || text == NULL) return;
+  size_t n = len < 0 ? strlen(text) : (size_t)len;
+  if (n == 0) return;
+
+  /* ghostty_paste_encode rewrites the unsafe bytes in place, so it gets a
+   * copy — the caller's string comes from the clipboard and is not ours. */
+  char *data = g_memdup2(text, n);
+  bool bracketed = pt_term_core_bracketed_paste(c);
+  /* A NULL buffer only asks for the size (markers included). The in-place
+   * pass is idempotent, so encoding twice over the same copy is safe. */
+  size_t need = 0;
+  ghostty_paste_encode(data, n, bracketed, NULL, 0, &need);
+  char *out = g_malloc(need);
+  size_t written = 0;
+  if (ghostty_paste_encode(data, n, bracketed, out, need,
+                           &written) == GHOSTTY_SUCCESS)
+    pty_write_raw(c->pty_fd, out, written);
+  g_free(out);
+  g_free(data);
+}
+
+gboolean pt_term_core_paste_is_safe(const char *text, gssize len) {
+  if (text == NULL) return TRUE;
+  return ghostty_paste_is_safe(text, len < 0 ? strlen(text) : (size_t)len);
+}
+
 void pt_term_core_sync(PtTermCore *c) {
   ghostty_render_state_update(c->render_state, c->terminal);
 }
