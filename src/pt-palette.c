@@ -126,7 +126,8 @@ static void rebuild(PtPalette *p) {
     gtk_widget_add_css_class(detail, "pt-palette-detail");
     gtk_box_append(GTK_BOX(row), detail);
 
-    GtkWidget *kind = gtk_label_new(it->is_shell ? "SHELL" : "PROJECT");
+    GtkWidget *kind = gtk_label_new(it->is_command ? "COMMAND"
+                                    : it->is_shell ? "SHELL" : "PROJECT");
     gtk_widget_set_valign(kind, GTK_ALIGN_CENTER);
     gtk_widget_add_css_class(kind, "pt-palette-kind");
     gtk_box_append(GTK_BOX(row), kind);

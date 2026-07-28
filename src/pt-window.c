@@ -898,6 +898,23 @@ static void action_copy(PtWindow *w) {
   if (term != NULL) pt_terminal_copy(term);
 }
 
+/* ghostty's toggle_mouse_reporting, one pane at a time: swap who owns the
+ * pointer without editing the config or restarting. No accelerator — it lives
+ * in the palette, where the row also says which way it is pointing. */
+static void action_toggle_mouse_reporting(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  PtTerminal *term =
+      t != NULL ? pt_pane_grid_focused_terminal(PT_PANE_GRID(t->grid)) : NULL;
+  if (term != NULL) pt_terminal_toggle_mouse_reporting(term);
+}
+
+static gboolean active_mouse_reporting(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  PtTerminal *term =
+      t != NULL ? pt_pane_grid_focused_terminal(PT_PANE_GRID(t->grid)) : NULL;
+  return term != NULL && pt_terminal_mouse_reporting(term);
+}
+
 /* ---------- project add/remove ---------- */
 static void on_folder_chosen(GObject *src, GAsyncResult *res, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
@@ -1055,8 +1072,13 @@ static void on_info_refresh(PtInfoPanel *ip, gpointer user) {
 }
 
 /* ---------- command palette ---------- */
-/* Every project, each followed by its shells. The palette ranks this flat list
- * and hands back the (project, tab) pair the user picked. */
+/* Commands ride the same list as projects and shells, marked by a project_idx
+ * of -1; tab_idx then carries which command it is. */
+enum { PT_CMD_TOGGLE_MOUSE_REPORTING };
+
+/* Every project, each followed by its shells, then the commands. The palette
+ * ranks this flat list and hands back the (project, tab) pair the user
+ * picked. */
 static void action_open_palette(PtWindow *w) {
   GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtPaletteItem));
   for (guint i = 0; i < w->projects->len; i++) {
@@ -1086,6 +1108,18 @@ static void action_open_palette(PtWindow *w) {
       g_array_append_val(arr, sh);
     }
   }
+  /* The row says which way it is currently pointing, so the toggle is not a
+   * coin flip. */
+  PtPaletteItem mr = {
+    .name = g_strdup("Toggle mouse reporting"),
+    .detail = g_strdup(active_mouse_reporting(w)
+        ? "on · apps own the mouse, shift+drag selects"
+        : "off · click and drag selects"),
+    .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
+    .project_idx = -1, .tab_idx = PT_CMD_TOGGLE_MOUSE_REPORTING,
+  };
+  g_array_append_val(arr, mr);
+
   int n = (int)arr->len;
   pt_palette_open(PT_PALETTE(w->palette),
                   (PtPaletteItem *)g_array_free(arr, FALSE), n);
@@ -1095,6 +1129,13 @@ static void on_palette_activated(PtPalette *pal, int project_idx, int tab_idx,
                                  gpointer user) {
   (void)pal;
   PtWindow *w = PT_WINDOW(user);
+  if (project_idx < 0) {
+    switch (tab_idx) {
+    case PT_CMD_TOGGLE_MOUSE_REPORTING: action_toggle_mouse_reporting(w); break;
+    default: break;
+    }
+    return;
+  }
   action_switch_project(w, project_idx);
   if (tab_idx >= 0) action_switch_tab(w, tab_idx);
 }

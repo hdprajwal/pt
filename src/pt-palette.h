@@ -9,8 +9,9 @@ typedef struct {
   char *shortcut;   /* "^3" for the first 9 projects, else NULL */
   int accent;
   gboolean is_shell;
-  int project_idx;
-  int tab_idx;      /* -1 for project items */
+  gboolean is_command;  /* a window command, not somewhere to switch to */
+  int project_idx;      /* -1 on commands; tab_idx then carries the command id */
+  int tab_idx;          /* -1 for project items */
 } PtPaletteItem;
 
 #define PT_TYPE_PALETTE (pt_palette_get_type())
