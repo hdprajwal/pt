@@ -330,7 +330,7 @@ static void pt_palette_init(PtPalette *p) {
   gtk_widget_set_hexpand(p->entry, TRUE);
   g_signal_connect(p->entry, "changed", G_CALLBACK(on_query_changed), p);
   gtk_box_append(GTK_BOX(query), p->entry);
-  GtkWidget *scope = gtk_label_new("projects · shells");
+  GtkWidget *scope = gtk_label_new("projects · shells · commands");
   gtk_widget_set_valign(scope, GTK_ALIGN_CENTER);
   gtk_widget_add_css_class(scope, "pt-palette-scope");
   gtk_box_append(GTK_BOX(query), scope);
