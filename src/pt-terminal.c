@@ -699,7 +699,10 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
 
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
 
-  if (mouse_reporting(t, state)) {
+  /* Latched like motion is: a wheel turn in the middle of a drag belongs to
+   * whoever took the press, so scrolling to extend a selection past the
+   * viewport moves pt's scrollback instead of landing in the app. */
+  if (pointer_reports(t, state)) {
     if (notches == 0) return TRUE;
     /* One button-4/5 press per notch, reported at the pointer: GTK scroll
      * events carry no coordinates of their own. */
