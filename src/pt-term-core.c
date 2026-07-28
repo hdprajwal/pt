@@ -350,6 +350,15 @@ char *pt_osc52_decode(const char *payload, gsize len, gboolean *primary,
     g_free(raw);
     return NULL;
   }
+  /* And the bytes have to be text. A clipboard is offered to the rest of the
+   * desktop as UTF-8, so arbitrary bytes from a remote program would be
+   * advertised as text and come back mangled wherever they were pasted. This
+   * is the last content check rather than the first because it is the only one
+   * that has to walk the whole decoded string. */
+  if (!g_utf8_validate((const char *)raw, (gssize)decoded_len, NULL)) {
+    g_free(raw);
+    return NULL;
+  }
   raw = g_realloc(raw, decoded_len + 1);   /* the decoder does not terminate */
   raw[decoded_len] = '\0';
   if (primary != NULL) *primary = want_primary;
