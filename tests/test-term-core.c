@@ -528,6 +528,39 @@ static void test_alt_screen_arrows(void) {
   pt_term_core_free(core);
 }
 
+static void test_alt_screen_tracking_wheel(void) {
+  /* Claude Code's startup set, captured from a real session: alt screen, all
+     three tracking modes, SGR encoding. This is the shape that made the wheel
+     dead — there is no alternate-scroll fallback here (the app *is* tracking)
+     and the alt screen has no scrollback to move, so a wheel notch the widget
+     keeps to itself goes nowhere. It has to be reported. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; "
+    "printf '\\033[?1049h\\033[?1000h\\033[?1002h\\033[?1003h\\033[?1006h'; "
+    "cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(alt_screen_on, core));
+  g_assert_true(wait_until(tracking_on, core));
+
+  pt_term_core_sync(core);
+  char *before = pt_term_core_grid_text(core);
+  pt_term_core_scroll_delta(core, -3);   /* nothing above: the view cannot move */
+  pt_term_core_sync(core);
+  char *after = pt_term_core_grid_text(core);
+  g_assert_cmpstr(before, ==, after);
+  g_free(before);
+  g_free(after);
+
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_FOUR, 0,
+                                          29.0, 36.0));
+  g_assert_true(wait_for_text(core, "^[[<64;2;2M"));
+
+  pt_term_core_free(core);
+}
+
 static void test_scroll_bottom(void) {
   /* Typing while scrolled up must snap back to the prompt. Fill the scrollback
      past one screen, scroll up until the last line is off-view, then assert
@@ -732,6 +765,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
   g_test_add_func("/termcore/mouse-report-off", test_mouse_report_needs_tracking);
   g_test_add_func("/termcore/alt-screen-arrows", test_alt_screen_arrows);
+  g_test_add_func("/termcore/alt-screen-tracking-wheel",
+                  test_alt_screen_tracking_wheel);
   g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
   g_test_add_func("/termcore/osc-callback", test_osc_reaches_callback);
   g_test_add_func("/termcore/osc-unregister", test_osc_consumer_can_unregister);

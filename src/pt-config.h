@@ -13,10 +13,13 @@
 #define PT_CONFIG_FONT_FAMILY_DEFAULT "JetBrains Mono"
 #define PT_CONFIG_UI_FONT_FAMILY_DEFAULT "IBM Plex Sans"
 #define PT_CONFIG_THEME_DEFAULT "pt-dark"
-/* Whether apps that ask for the mouse get it. ghostty ships this ON; pt ships
- * it OFF on purpose, so a plain click and drag selects text out of a
- * full-screen TUI without anyone having to learn a modifier first. Turn it on
- * to get the usual terminal behaviour (and shift to override it per gesture). */
+/* Whether apps that ask for the mouse get the pointer: clicks, drags and
+ * motion. ghostty ships this ON; pt ships it OFF on purpose, so a plain click
+ * and drag selects text out of a full-screen TUI without anyone having to
+ * learn a modifier first. Turn it on to get the usual terminal behaviour (and
+ * shift to override it per gesture). The wheel is not covered either way: an
+ * app that tracks the mouse always gets it, since scrolling selects nothing.
+ * See wheel_reports() in pt-terminal.c. */
 #define PT_CONFIG_MOUSE_REPORTING_DEFAULT FALSE
 
 typedef struct {
