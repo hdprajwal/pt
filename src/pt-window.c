@@ -106,6 +106,7 @@ static void render_config(const PtConfig *cfg) {
   pt_style_apply(&rt, cfg);
   pt_terminal_set_theme(&rt);
   pt_terminal_set_font(cfg->font_family, cfg->font_size);
+  pt_terminal_set_mouse_reporting(cfg->mouse_reporting);
   /* Prompts read PT_ACCENT, so it has to track the theme the chrome uses.
    * Accents always resolve opaque, so the css form is "#rrggbb". */
   for (int i = 0; i < PT_ACCENT_COUNT; i++) {

@@ -1,5 +1,6 @@
 #include "pt-terminal.h"
 #include "pt-block.h"
+#include "pt-config.h"       /* PT_CONFIG_MOUSE_REPORTING_DEFAULT */
 #include "pt-keymap.h"
 #include "pt-session.h"      /* PT_FONT_SIZE_DEFAULT, shared with persistence */
 #include <adwaita.h>         /* paste confirmation dialog */
@@ -36,6 +37,10 @@ static gboolean th_pal_set[16] = {
 };
 static char *font_family;   /* NULL -> PT_FONT_FAMILY_DEFAULT */
 
+/* The `mouse-reporting` config key, mirrored into every terminal made after
+ * it is set. Off by default: see PT_CONFIG_MOUSE_REPORTING_DEFAULT. */
+static gboolean mouse_reporting_default = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
+
 /* Env applied by pt_terminal_new when the caller has no project context
  * (pane grids build terminals straight from split-tree leaves). */
 static char **default_env;
@@ -70,6 +75,8 @@ struct _PtTerminal {
   double scroll_pending;    /* sub-row remainder, local viewport scrolling */
   double report_pending;    /* sub-notch remainder, wheel reports to the app */
   gboolean reporting_drag;   /* the app owns this drag, not the selection */
+  gboolean button_down;      /* a button is held: ownership is already decided */
+  gboolean report_mouse;     /* this pane's copy of `mouse-reporting` */
 };
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
@@ -594,11 +601,14 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
 
 /* ---- mouse ----
  *
- * An app that enables mouse tracking (Claude Code, vim, htop, lazygit) owns
+ * An app that enables mouse tracking (Claude Code, vim, htop, lazygit) can own
  * the pointer: wheel, buttons and motion are encoded to the pty instead of
- * driving selection or the viewport. Holding shift takes the pointer back for
- * the length of that event, which is how every other terminal lets you select
- * text out of a full-screen app.
+ * driving selection or the viewport. Two things have to agree before that
+ * happens, exactly as in ghostty: the app must have asked for the mouse, and
+ * `mouse-reporting` must be on. pt ships it off, so a plain drag selects text
+ * even inside a full-screen TUI. With it on, holding shift takes the pointer
+ * back for the length of one gesture, which is the escape hatch every other
+ * terminal offers.
  */
 /* Rows per wheel notch, as before. Pixel-unit deltas (touchpads, and wheels
  * whose driver reports high-resolution scrolling) already carry the distance
@@ -613,8 +623,18 @@ static GdkModifierType controller_mods(GtkEventController *ctl) {
 }
 
 static gboolean mouse_reporting(PtTerminal *t, GdkModifierType state) {
-  return t->core != NULL && (state & GDK_SHIFT_MASK) == 0 &&
+  return t->core != NULL && t->report_mouse && (state & GDK_SHIFT_MASK) == 0 &&
          pt_term_core_mouse_tracking(t->core);
+}
+
+/* Who owns the pointer *right now*. While a button is held the answer was
+ * settled at press time and does not change: letting go of shift halfway
+ * through a selection must not start feeding the app the rest of the drag,
+ * and pressing it mid-drag must not strand the app with a button that never
+ * comes back up. With no button down (plain hover under mode 1003) there is
+ * no gesture to be consistent with, so the current modifiers decide. */
+static gboolean pointer_reports(PtTerminal *t, GdkModifierType state) {
+  return t->button_down ? t->reporting_drag : mouse_reporting(t, state);
 }
 
 static GhosttyMouseButton ghostty_button(guint gdk_button) {
@@ -634,9 +654,7 @@ static void on_motion(GtkEventControllerMotion *ctl, double x, double y,
   t->mouse_x = x;
   t->mouse_y = y;
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
-  g_debug("pt motion: x=%.1f y=%.1f mods=0x%x reporting=%d drag=%d",
-          x, y, (unsigned)state, mouse_reporting(t, state), t->reporting_drag);
-  if (!mouse_reporting(t, state)) return;
+  if (!pointer_reports(t, state)) return;
   /* The core drops motion the app didn't ask for (press-only modes) and
    * repeats within one cell, so this stays cheap on every pointer move. */
   pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_MOTION,
@@ -725,10 +743,10 @@ static void on_click_pressed(GtkGestureClick *g, int n, double x, double y,
   guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(g));
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(g));
   t->reporting_drag = mouse_reporting(t, state);
-  g_debug("pt press: btn=%u n=%d x=%.1f y=%.1f mods=0x%x tracking=%d -> %s",
-          button, n, x, y, (unsigned)state,
-          pt_term_core_mouse_tracking(t->core),
-          t->reporting_drag ? "report" : "select");
+  t->button_down = TRUE;
+  g_debug("pt press: btn=%u n=%d mods=0x%x tracking=%d report=%d -> %s",
+          button, n, (unsigned)state, pt_term_core_mouse_tracking(t->core),
+          t->report_mouse, t->reporting_drag ? "app" : "selection");
   if (t->reporting_drag) {
     pt_term_core_selection_clear(t->core);
     pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_PRESS,
@@ -758,6 +776,7 @@ static void on_click_released(GtkGestureClick *g, int n, double x, double y,
   t->mouse_y = y;
 
   guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(g));
+  t->button_down = FALSE;   /* the gesture is over; ownership is open again */
   /* Release follows whichever owner took the press, so an app that stops
    * tracking mid-drag still sees the button go up. */
   if (t->reporting_drag) {
@@ -781,8 +800,6 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
   /* Drags the app owns are reported from the motion controller, which fires
    * with the button held too; building a selection here as well would paint
    * one over the app's own. */
-  g_debug("pt drag-update: off=%.1f,%.1f reporting=%d", ox, oy,
-          t->reporting_drag);
   if (t->reporting_drag) return;
   double sx = 0, sy = 0;
   gtk_gesture_drag_get_start_point(g, &sx, &sy);
@@ -973,6 +990,25 @@ void pt_terminal_set_font(const char *family, int pts) {
   }
 }
 
+void pt_terminal_set_mouse_reporting(gboolean on) {
+  mouse_reporting_default = on;
+  /* The file is the source of truth: a pane the user toggled by hand goes
+   * back in step the next time the config is applied, same as the theme. */
+  for (GSList *l = live_terminals; l != NULL; l = l->next)
+    ((PtTerminal *)l->data)->report_mouse = on;
+}
+
+gboolean pt_terminal_mouse_reporting(PtTerminal *t) { return t->report_mouse; }
+
+gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t) {
+  t->report_mouse = !t->report_mouse;
+  /* Handing the pointer to the app mid-selection would leave a highlight
+   * nothing can clear. */
+  if (t->report_mouse && t->core != NULL) pt_term_core_selection_clear(t->core);
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+  return t->report_mouse;
+}
+
 /* ---- boilerplate ---- */
 static void pt_terminal_dispose(GObject *obj) {
   PtTerminal *t = PT_TERMINAL(obj);
@@ -1014,6 +1050,7 @@ static void pt_terminal_init(PtTerminal *t) {
   pango_font_description_set_size(t->font_desc, font_size_pts * PANGO_SCALE);
   t->layout = gtk_widget_create_pango_layout(GTK_WIDGET(t), NULL);
   pango_layout_set_font_description(t->layout, t->font_desc);
+  t->report_mouse = mouse_reporting_default;
   live_terminals = g_slist_prepend(live_terminals, t);
 
   GtkEventController *key = gtk_event_controller_key_new();

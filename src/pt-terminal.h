@@ -27,5 +27,13 @@ void pt_terminal_set_font_size(int pts);    /* clamped; re-measures all panes */
 void pt_terminal_set_theme(const PtResolvedTheme *rt);
 /* Family+size together; NULL family keeps the current one. */
 void pt_terminal_set_font(const char *family, int pts);
+/* Module-level mouse-reporting default (the `mouse-reporting` config key).
+ * Applying a config re-arms every live terminal, so a pane toggled by hand
+ * follows the file again the next time it changes. */
+void pt_terminal_set_mouse_reporting(gboolean on);
+gboolean pt_terminal_mouse_reporting(PtTerminal *t);
+/* Flips this pane only — ghostty's toggle_mouse_reporting. Returns the new
+ * state. */
+gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t);
 /* GObject signals: "exited" (int), "title-changed" (const char*), "activity" (void),
  *                  "command-changed" (const char*) — fg program of the pane changed */
