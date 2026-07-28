@@ -13,6 +13,11 @@
 #define PT_CONFIG_FONT_FAMILY_DEFAULT "JetBrains Mono"
 #define PT_CONFIG_UI_FONT_FAMILY_DEFAULT "IBM Plex Sans"
 #define PT_CONFIG_THEME_DEFAULT "pt-dark"
+/* Whether apps that ask for the mouse get it. ghostty ships this ON; pt ships
+ * it OFF on purpose, so a plain click and drag selects text out of a
+ * full-screen TUI without anyone having to learn a modifier first. Turn it on
+ * to get the usual terminal behaviour (and shift to override it per gesture). */
+#define PT_CONFIG_MOUSE_REPORTING_DEFAULT FALSE
 
 typedef struct {
   char *theme;             /* never NULL */
@@ -20,6 +25,7 @@ typedef struct {
   char *font_family;       /* never NULL */
   double ui_font_size;     /* chrome base, px */
   char *ui_font_family;    /* never NULL */
+  gboolean mouse_reporting;  /* forward mouse events to tracking apps */
   GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
 } PtConfig;
 

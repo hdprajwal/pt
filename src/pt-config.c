@@ -31,6 +31,7 @@ PtConfig *pt_config_new(void) {
   c->font_family = g_strdup(PT_CONFIG_FONT_FAMILY_DEFAULT);
   c->ui_font_size = PT_CONFIG_UI_FONT_SIZE_DEFAULT;
   c->ui_font_family = g_strdup(PT_CONFIG_UI_FONT_FAMILY_DEFAULT);
+  c->mouse_reporting = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
   c->app_overrides = g_hash_table_new_full(g_str_hash, g_str_equal,
                                            g_free, g_free);
   return c;
@@ -52,6 +53,7 @@ PtConfig *pt_config_copy(const PtConfig *c) {
   g_free(n->ui_font_family); n->ui_font_family = g_strdup(c->ui_font_family);
   n->font_size = c->font_size;
   n->ui_font_size = c->ui_font_size;
+  n->mouse_reporting = c->mouse_reporting;
   GHashTableIter it;
   gpointer k, v;
   g_hash_table_iter_init(&it, c->app_overrides);
@@ -76,7 +78,20 @@ gboolean pt_config_equal(const PtConfig *a, const PtConfig *b) {
          g_strcmp0(a->font_family, b->font_family) == 0 &&
          a->ui_font_size == b->ui_font_size &&
          g_strcmp0(a->ui_font_family, b->ui_font_family) == 0 &&
+         a->mouse_reporting == b->mouse_reporting &&
          tables_equal(a->app_overrides, b->app_overrides);
+}
+
+/* Booleans are spelled the way people already spell them in dotfiles; anything
+ * else warns and keeps the default, like every other value here. */
+static gboolean parse_bool(const char *value, gboolean *out) {
+  static const char *yes[] = { "true", "yes", "on", "1" };
+  static const char *no[]  = { "false", "no", "off", "0" };
+  for (gsize i = 0; i < G_N_ELEMENTS(yes); i++)
+    if (g_ascii_strcasecmp(value, yes[i]) == 0) { *out = TRUE; return TRUE; }
+  for (gsize i = 0; i < G_N_ELEMENTS(no); i++)
+    if (g_ascii_strcasecmp(value, no[i]) == 0) { *out = FALSE; return TRUE; }
+  return FALSE;
 }
 
 static void on_kv(const char *key, const char *value, int lineno,
@@ -110,6 +125,11 @@ static void on_kv(const char *key, const char *value, int lineno,
   } else if (g_strcmp0(key, "ui-font-family") == 0 && value[0] != '\0') {
     g_free(c->ui_font_family);
     c->ui_font_family = g_strdup(value);
+  } else if (g_strcmp0(key, "mouse-reporting") == 0) {
+    gboolean v = FALSE;
+    if (parse_bool(value, &v)) c->mouse_reporting = v;
+    else g_warning("pt: config line %d: bad mouse-reporting '%s'", lineno,
+                   value);
   } else if (g_str_has_prefix(key, "app-") && key[4] != '\0') {
     g_hash_table_insert(c->app_overrides, g_strdup(key + 4), g_strdup(value));
   }
@@ -140,17 +160,18 @@ static char *managed_value(const PtConfig *c, int i) {
       return g_strdup(buf);
     }
     case 4: return g_strdup(c->ui_font_family);
+    case 5: return g_strdup(c->mouse_reporting ? "true" : "false");
   }
   return NULL;
 }
 
 char *pt_config_rewrite(const char *old_text, const PtConfig *c) {
-  Managed keys[5] = {
+  Managed keys[6] = {
     { "theme", NULL, FALSE },      { "font-size", NULL, FALSE },
     { "font-family", NULL, FALSE },{ "ui-font-size", NULL, FALSE },
-    { "ui-font-family", NULL, FALSE },
+    { "ui-font-family", NULL, FALSE }, { "mouse-reporting", NULL, FALSE },
   };
-  for (int i = 0; i < 5; i++) keys[i].value = managed_value(c, i);
+  for (int i = 0; i < 6; i++) keys[i].value = managed_value(c, i);
 
   GString *out = g_string_new(NULL);
   char **lines = g_strsplit(old_text != NULL ? old_text : "", "\n", -1);
@@ -168,7 +189,7 @@ char *pt_config_rewrite(const char *old_text, const PtConfig *c) {
       if (eq != NULL) {
         *eq = '\0';
         char *key = g_strstrip(probe);
-        for (int k = 0; k < 5; k++) {
+        for (int k = 0; k < 6; k++) {
           if (g_strcmp0(key, keys[k].key) == 0) {
             g_string_append_printf(out, "%s = %s\n",
                                    keys[k].key, keys[k].value);
@@ -183,7 +204,7 @@ char *pt_config_rewrite(const char *old_text, const PtConfig *c) {
     g_free(probe);
   }
   g_strfreev(lines);
-  for (int k = 0; k < 5; k++) {
+  for (int k = 0; k < 6; k++) {
     if (!keys[k].written)
       g_string_append_printf(out, "%s = %s\n", keys[k].key, keys[k].value);
     g_free(keys[k].value);

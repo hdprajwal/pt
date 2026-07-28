@@ -9,6 +9,63 @@ static void test_defaults(void) {
   g_assert_cmpfloat(c->ui_font_size, ==, 12.5);
   g_assert_cmpstr(c->ui_font_family, ==, "IBM Plex Sans");
   g_assert_cmpuint(g_hash_table_size(c->app_overrides), ==, 0);
+  /* pt diverges from ghostty here: mouse reporting is off out of the box so
+   * click+drag selects. */
+  g_assert_false(c->mouse_reporting);
+  pt_config_free(c);
+}
+
+static void test_parse_mouse_reporting(void) {
+  const char *on[] = { "mouse-reporting = true\n", "mouse-reporting = yes\n",
+                       "mouse-reporting = on\n",   "mouse-reporting = 1\n",
+                       "mouse-reporting =  TRUE \n" };
+  for (gsize i = 0; i < G_N_ELEMENTS(on); i++) {
+    PtConfig *c = pt_config_parse(on[i]);
+    g_assert_true(c->mouse_reporting);
+    pt_config_free(c);
+  }
+  const char *off[] = { "mouse-reporting = false\n", "mouse-reporting = no\n",
+                        "mouse-reporting = off\n",   "mouse-reporting = 0\n" };
+  for (gsize i = 0; i < G_N_ELEMENTS(off); i++) {
+    PtConfig *c = pt_config_parse(off[i]);
+    g_assert_false(c->mouse_reporting);
+    pt_config_free(c);
+  }
+  /* Junk keeps the default, like every other key. */
+  PtConfig *bad = pt_config_parse("mouse-reporting = sometimes\n");
+  g_assert_false(bad->mouse_reporting);
+  pt_config_free(bad);
+
+  /* It takes part in copy/equal like the rest. */
+  PtConfig *a = pt_config_parse("mouse-reporting = true\n");
+  PtConfig *b = pt_config_copy(a);
+  g_assert_true(b->mouse_reporting);
+  g_assert_true(pt_config_equal(a, b));
+  b->mouse_reporting = FALSE;
+  g_assert_false(pt_config_equal(a, b));
+  pt_config_free(a);
+  pt_config_free(b);
+}
+
+static void test_rewrite_mouse_reporting(void) {
+  /* Absent from the old text: appended, and round-trips back to the same
+   * value in both directions. */
+  PtConfig *c = pt_config_new();
+  c->mouse_reporting = TRUE;
+  char *out = pt_config_rewrite("theme = pt-dark\n", c);
+  g_assert_nonnull(strstr(out, "mouse-reporting = true\n"));
+  PtConfig *back = pt_config_parse(out);
+  g_assert_true(back->mouse_reporting);
+  g_assert_true(pt_config_equal(c, back));
+  g_free(out);
+  pt_config_free(back);
+
+  c->mouse_reporting = FALSE;
+  out = pt_config_rewrite("mouse-reporting = true\n# tail\n", c);
+  g_assert_nonnull(strstr(out, "mouse-reporting = false\n"));
+  g_assert_null(strstr(out, "mouse-reporting = true\n"));
+  g_assert_nonnull(strstr(out, "# tail\n"));
+  g_free(out);
   pt_config_free(c);
 }
 
@@ -137,6 +194,8 @@ int main(void) {
   test_defaults();
   test_parse();
   test_parse_bad_values();
+  test_parse_mouse_reporting();
+  test_rewrite_mouse_reporting();
   test_parse_out_of_range_font_size();
   test_copy_equal();
   test_rewrite_preserves();

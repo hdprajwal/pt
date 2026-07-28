@@ -539,7 +539,11 @@ static void sel_install_linear(PtTermCore *c,
                                uint16_t c0, uint16_t r0,
                                uint16_t c1, uint16_t r1) {
   GhosttyGridRef start, end;
-  if (!sel_ref_at(c, c0, r0, &start) || !sel_ref_at(c, c1, r1, &end)) return;
+  g_debug("pt sel linear: %u,%u -> %u,%u", c0, r0, c1, r1);
+  if (!sel_ref_at(c, c0, r0, &start) || !sel_ref_at(c, c1, r1, &end)) {
+    g_debug("pt sel linear: grid_ref FAILED");
+    return;
+  }
   GhosttySelection sel = GHOSTTY_INIT_SIZED(GhosttySelection);
   sel.start = start;
   sel.end = end;

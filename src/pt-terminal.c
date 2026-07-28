@@ -634,6 +634,8 @@ static void on_motion(GtkEventControllerMotion *ctl, double x, double y,
   t->mouse_x = x;
   t->mouse_y = y;
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
+  g_debug("pt motion: x=%.1f y=%.1f mods=0x%x reporting=%d drag=%d",
+          x, y, (unsigned)state, mouse_reporting(t, state), t->reporting_drag);
   if (!mouse_reporting(t, state)) return;
   /* The core drops motion the app didn't ask for (press-only modes) and
    * repeats within one cell, so this stays cheap on every pointer move. */
@@ -723,6 +725,10 @@ static void on_click_pressed(GtkGestureClick *g, int n, double x, double y,
   guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(g));
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(g));
   t->reporting_drag = mouse_reporting(t, state);
+  g_debug("pt press: btn=%u n=%d x=%.1f y=%.1f mods=0x%x tracking=%d -> %s",
+          button, n, x, y, (unsigned)state,
+          pt_term_core_mouse_tracking(t->core),
+          t->reporting_drag ? "report" : "select");
   if (t->reporting_drag) {
     pt_term_core_selection_clear(t->core);
     pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_PRESS,
@@ -775,6 +781,8 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
   /* Drags the app owns are reported from the motion controller, which fires
    * with the button held too; building a selection here as well would paint
    * one over the app's own. */
+  g_debug("pt drag-update: off=%.1f,%.1f reporting=%d", ox, oy,
+          t->reporting_drag);
   if (t->reporting_drag) return;
   double sx = 0, sy = 0;
   gtk_gesture_drag_get_start_point(g, &sx, &sy);
