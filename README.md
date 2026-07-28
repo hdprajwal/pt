@@ -86,6 +86,25 @@ reports each command's exit code back to the app and prints an identity line
 If a repository with a huge untracked tree makes the prompt slow, set
 `PT_PROMPT_GIT_UNTRACKED=no` to count only tracked changes.
 
+## Selecting and copying text
+
+Left-click and drag selects. Double-click selects a word, triple-click selects
+a line, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies the selection
+(<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> pastes). Typing clears the
+selection and snaps the view back to the prompt.
+
+That holds inside full-screen apps too — Claude Code, vim, htop, lazygit, fzf.
+Those apps normally ask the terminal for the mouse, and pt does not hand it
+over: `mouse-reporting` ships off, which is the one place pt deliberately
+differs from ghostty's defaults. The cost is that mouse-driven features inside
+those apps (clicking a vim buffer, dragging a pane divider) do nothing.
+
+Set `mouse-reporting = true` for the usual terminal behaviour. A plain drag
+then goes to the app, and holding <kbd>Shift</kbd> takes the pointer back for
+the length of one gesture so you can still select. Either way, "Toggle mouse
+reporting" in the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) flips the
+focused pane for the rest of the session without touching the config.
+
 ## Configuration
 
 pt reads `~/.config/pt/config`, a `key = value` file (`#` starts a comment):
@@ -96,9 +115,11 @@ font-size = 9
 font-family = JetBrains Mono
 ui-font-size = 12.5
 ui-font-family = IBM Plex Sans
+mouse-reporting = false
 ```
 
-Those five keys plus `app-*` color-token overrides (e.g.
-`app-background = #101010`) are the entire config surface. Custom themes go
-in `~/.config/pt/themes/<name>`; both the config and the active theme are
-watched and applied live.
+Those six keys plus `app-*` color-token overrides (e.g.
+`app-background = #101010`) are the entire config surface. Booleans accept
+`true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`. Custom themes go in
+`~/.config/pt/themes/<name>`; both the config and the active theme are watched
+and applied live.
