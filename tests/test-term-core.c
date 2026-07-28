@@ -5,7 +5,7 @@
 typedef struct { GMainLoop *loop; PtTermCore *core;
                  gboolean found; int exit_status; gboolean exited;
                  char comm[64]; char title[128];
-                 int osc_code; char osc_payload[128]; } Ctx;
+                 int osc_code; char osc_payload[128]; int osc_count; } Ctx;
 
 static void on_draw(PtTermCore *core, gpointer user) {
   Ctx *ctx = user;
@@ -513,6 +513,37 @@ static void test_osc_reaches_callback(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+static void on_osc_unregister(PtTermCore *core, int code, const char *payload,
+                              gsize len, gpointer user) {
+  (void)code; (void)payload; (void)len;
+  Ctx *ctx = user;
+  ctx->osc_count++;
+  /* Drop the osc callback from inside the handler. Both sequences arrive in
+     one write and so, normally, one read — the second dispatch of that read
+     must notice and not call through the NULL. */
+  PtTermCoreCallbacks cbs = { .draw = on_draw_marker };
+  pt_term_core_set_callbacks(core, &cbs, ctx);
+}
+
+static void test_osc_consumer_can_unregister(void) {
+  Ctx ctx = {0};
+  ctx.loop = g_main_loop_new(NULL, FALSE);
+  const char *argv[] = {"/bin/sh", "-c",
+    "printf '\\033]9;one\\007\\033]9;two\\007done-marker\\n'; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .draw = on_draw_marker, .osc = on_osc_unregister };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  guint to = g_timeout_add_seconds(10, on_timeout, &ctx);
+  g_main_loop_run(ctx.loop);
+  g_source_remove(to);
+  g_assert_true(ctx.found);
+  g_assert_cmpint(ctx.osc_count, ==, 1);   /* and no crash on the second */
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx.loop);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
@@ -531,5 +562,6 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/alt-screen-arrows", test_alt_screen_arrows);
   g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
   g_test_add_func("/termcore/osc-callback", test_osc_reaches_callback);
+  g_test_add_func("/termcore/osc-unregister", test_osc_consumer_can_unregister);
   return g_test_run();
 }

@@ -240,6 +240,13 @@ void pt_osc_scan_feed(PtOscScan *s, const guint8 *data, gsize len,
         if (b == ']') osc_begin(s);
         else if (b != PT_ESC) s->state = PT_OSC_GROUND;
         break;                       /* ESC ESC: keep waiting for the ']' */
+      /* BEL and ESC \ are the only terminators, deliberately. A bare 0x9C is
+       * payload, not single-byte ST: libghostty's osc_string table maps
+       * 0x20..0xFF to osc_put, and that write lands after the "anywhere"
+       * 0x9C => ground rule in genTable(), so the parser appends it too.
+       * It has to — inside an OSC ghostty consumes raw bytes rather than
+       * decoded codepoints, and 0x9C is a UTF-8 continuation byte (U+011C
+       * is C4 9C), so terminating on it would cut payloads mid-character. */
       case PT_OSC_PAYLOAD:
         if (b == PT_BEL) osc_dispatch(s, fn, user);
         else if (b == PT_ESC) s->state = PT_OSC_PAYLOAD_ESC;
@@ -272,7 +279,11 @@ void pt_osc_scan_clear(PtOscScan *s) {
 static void core_osc_dispatch(int code, const char *payload, gsize len,
                               gpointer user) {
   PtTermCore *c = user;
-  c->cbs.osc(c, code, payload, len, c->cbs_user);
+  /* Rechecked per dispatch, not just once per read: a single read can carry
+   * several sequences, and a consumer is allowed to unregister itself from
+   * inside its own handler. Without this the next sequence in the same read
+   * would call through a NULL pointer. */
+  if (c->cbs.osc != NULL) c->cbs.osc(c, code, payload, len, c->cbs_user);
 }
 
 /* ---- child + fd sources ---- */
