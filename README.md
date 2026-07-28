@@ -128,6 +128,29 @@ the length of one gesture so you can still select. Either way, "Toggle mouse
 reporting" in the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) flips the
 focused pane for the rest of the session without touching the config.
 
+## When a program copies for you
+
+A program can put text on your clipboard by printing an escape sequence
+(OSC 52). That is how a yank in nvim over ssh, tmux's copy mode, and selecting
+text inside Claude Code all reach the clipboard on the machine you are sitting
+at. pt allows it out of the box.
+
+The same sequence has a second form that asks the terminal what is on the
+clipboard instead. pt never answers it, at any setting. Anything running in a
+pane could use it to read what you last copied, including something on the far
+end of an ssh session, and a password manager's clipboard is a bad thing to
+hand out on request.
+
+Set `osc52 = ask` if you would rather approve each one. The dialog says which
+pane asked and how many bytes it wants to copy, and saying no leaves the
+clipboard as it was. `osc52 = off` ignores clipboard writes completely.
+
+Text that arrives this way is put on the clipboard as it is. Nothing is
+stripped from it, because it is text you are going to paste somewhere, and its
+newlines and tabs are the point. The checks happen when it comes back the other
+way: pasting into a pane still rewrites control bytes and still asks first if
+the text could run on its own.
+
 ## Opening links
 
 A program can mark a piece of its output as a link (`ls --hyperlink=auto` does,
@@ -153,10 +176,12 @@ font-family = JetBrains Mono
 ui-font-size = 12.5
 ui-font-family = IBM Plex Sans
 mouse-reporting = false
+osc52 = write
 ```
 
-Those six keys plus `app-*` color-token overrides (e.g.
+Those seven keys plus `app-*` color-token overrides (e.g.
 `app-background = #101010`) are the entire config surface. Booleans accept
-`true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`. Custom themes go in
+`true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`. `osc52` takes `write`, `ask`
+or `off` (see above). Custom themes go in
 `~/.config/pt/themes/<name>`; both the config and the active theme are watched
 and applied live.

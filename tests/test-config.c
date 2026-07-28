@@ -12,6 +12,9 @@ static void test_defaults(void) {
   /* pt diverges from ghostty here: mouse reporting is off out of the box so
    * click+drag selects. */
   g_assert_false(c->mouse_reporting);
+  /* Clipboard writes from programs ship on: a yank on the far end of an ssh
+   * session is meant to land on the local clipboard without setup. */
+  g_assert_cmpint(c->osc52, ==, PT_OSC52_WRITE);
   pt_config_free(c);
 }
 
@@ -64,6 +67,60 @@ static void test_rewrite_mouse_reporting(void) {
   out = pt_config_rewrite("mouse-reporting = true\n# tail\n", c);
   g_assert_nonnull(strstr(out, "mouse-reporting = false\n"));
   g_assert_null(strstr(out, "mouse-reporting = true\n"));
+  g_assert_nonnull(strstr(out, "# tail\n"));
+  g_free(out);
+  pt_config_free(c);
+}
+
+static void test_parse_osc52(void) {
+  const struct { const char *text; PtOsc52Mode want; } ok[] = {
+    { "osc52 = off\n",   PT_OSC52_OFF },
+    { "osc52 = write\n", PT_OSC52_WRITE },
+    { "osc52 = ask\n",   PT_OSC52_ASK },
+    { "osc52 =  ASK \n", PT_OSC52_ASK },   /* trimmed and case-insensitive */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(ok); i++) {
+    PtConfig *c = pt_config_parse(ok[i].text);
+    g_assert_cmpint(c->osc52, ==, ok[i].want);
+    pt_config_free(c);
+  }
+  /* Junk keeps the default. `true` is junk here: this key is a mode, and a
+   * typo must not be read as "turn something off" either. */
+  const char *bad[] = { "osc52 = sometimes\n", "osc52 = true\n",
+                        "osc52 = \n" };
+  for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
+    PtConfig *c = pt_config_parse(bad[i]);
+    g_assert_cmpint(c->osc52, ==, PT_OSC52_WRITE);
+    pt_config_free(c);
+  }
+
+  /* It takes part in copy/equal like the rest. */
+  PtConfig *a = pt_config_parse("osc52 = ask\n");
+  PtConfig *b = pt_config_copy(a);
+  g_assert_cmpint(b->osc52, ==, PT_OSC52_ASK);
+  g_assert_true(pt_config_equal(a, b));
+  b->osc52 = PT_OSC52_OFF;
+  g_assert_false(pt_config_equal(a, b));
+  pt_config_free(a);
+  pt_config_free(b);
+}
+
+static void test_rewrite_osc52(void) {
+  /* Absent from the old text: appended, and round-trips. */
+  PtConfig *c = pt_config_new();
+  c->osc52 = PT_OSC52_ASK;
+  char *out = pt_config_rewrite("theme = pt-dark\n", c);
+  g_assert_nonnull(strstr(out, "osc52 = ask\n"));
+  PtConfig *back = pt_config_parse(out);
+  g_assert_cmpint(back->osc52, ==, PT_OSC52_ASK);
+  g_assert_true(pt_config_equal(c, back));
+  g_free(out);
+  pt_config_free(back);
+
+  c->osc52 = PT_OSC52_OFF;
+  out = pt_config_rewrite("osc52 = ask\n# tail\n", c);
+  g_assert_nonnull(strstr(out, "osc52 = off\n"));
+  g_assert_null(strstr(out, "osc52 = ask\n"));
   g_assert_nonnull(strstr(out, "# tail\n"));
   g_free(out);
   pt_config_free(c);
@@ -196,6 +253,8 @@ int main(void) {
   test_parse_bad_values();
   test_parse_mouse_reporting();
   test_rewrite_mouse_reporting();
+  test_parse_osc52();
+  test_rewrite_osc52();
   test_parse_out_of_range_font_size();
   test_copy_equal();
   test_rewrite_preserves();

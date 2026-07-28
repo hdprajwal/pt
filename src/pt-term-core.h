@@ -2,6 +2,7 @@
 #include <glib.h>
 #include <ghostty/vt.h>
 #include <sys/types.h>
+#include "pt-config.h"   /* PtOsc52Mode: what OSC 52 may do to the clipboard */
 
 typedef struct PtTermCore PtTermCore;
 
@@ -15,9 +16,18 @@ typedef struct {
    * the number before the first ';', `payload` everything after it (NUL-
    * terminated as well as counted, valid for the call only). Every code pt
    * sees arrives here — switch on the ones you want and ignore the rest.
-   * Set to NULL and the scanner does not run at all. */
+   * With this and clipboard_write both NULL the scanner does not run at all. */
   void (*osc)(PtTermCore *core, int code, const char *payload, gsize len,
               gpointer user);
+  /* A program asked to put `text` on the clipboard with OSC 52 (`primary`
+   * TRUE when it asked for the primary selection rather than the clipboard
+   * proper). Already decoded, size-capped and checked: `text` is NUL-
+   * terminated, `len` bytes long, holds no NUL of its own, and is valid for
+   * the call only. Nothing has touched the real clipboard yet — that is the
+   * consumer's call, and so is asking the user first. Never fires for the
+   * read form of OSC 52; see pt_term_core_set_osc52(). */
+  void (*clipboard_write)(PtTermCore *core, const char *text, gsize len,
+                          gboolean primary, gpointer user);
 } PtTermCoreCallbacks;
 
 /* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh).
@@ -81,6 +91,17 @@ gboolean pt_term_core_alt_scroll(PtTermCore *c);   /* mode 1007, default on */
 /* Wheel on the alt screen with alt-scroll on: `count` cursor-key arrows,
  * application or normal form per DECCKM. */
 void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count);
+
+/* ---- clipboard writes from programs (OSC 52) ----
+ *
+ * PT_OSC52_OFF drops them; every other mode decodes and hands them to the
+ * clipboard_write callback, which decides what to do with them. Defaults to
+ * PT_CONFIG_OSC52_DEFAULT so a core nobody configures behaves like the shipped
+ * config. Nothing here answers the *read* form (`ESC ] 52 ; c ; ? BEL`) at any
+ * setting: replying means writing whatever the user has copied back down a pty
+ * that some remote program is reading, which is exfiltration with extra steps.
+ * A query is dropped in silence — no callback, and not one byte to the pty. */
+void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode);
 
 gboolean pt_term_core_bracketed_paste(PtTermCore *c);
 /* ---- paste ----

@@ -23,6 +23,13 @@
  * memory without limit. */
 #define PT_OSC_MAX     (8u * 1024u)
 #define PT_OSC_52_MAX  (1024u * 1024u)
+/* And the same megabyte again on the far side of the decode. The two caps do
+ * not stack: PT_OSC_52_MAX bounds the base64 *as it arrives*, and base64 is
+ * four characters per three bytes, so a sequence that clears the scanner can
+ * never decode to more than ~768K. This one is the backstop for a payload that
+ * reaches the decoder another way — it is checked against the encoded length,
+ * before anything is allocated, so an oversized clipboard costs nothing. */
+#define PT_OSC_52_TEXT_MAX  (1024u * 1024u)
 
 typedef enum {
   PT_OSC_GROUND = 0,      /* outside a sequence; the overwhelmingly common case */
@@ -49,6 +56,20 @@ void pt_osc_scan_feed(PtOscScan *s, const guint8 *data, gsize len,
                       PtOscScanFn fn, gpointer user);
 /* Release the buffer and return to the ground state. */
 void pt_osc_scan_clear(PtOscScan *s);
+
+/* ---- OSC 52 payloads ----
+ *
+ * `<targets>;<base64>`, as it arrives from the scanner. Returns the decoded
+ * text (caller g_free's it, NUL-terminated, *out_len bytes) and sets *primary
+ * when the program asked for the primary selection instead of the clipboard.
+ *
+ * NULL for everything else, and there is a lot of everything else: a read
+ * request (`?` in place of the data), a payload with no ';' in it, text that
+ * is not valid base64 — g_base64_decode() answers junk rather than failing, so
+ * the alphabet is checked first — an empty clipboard, one over the cap, or one
+ * whose decoded bytes contain a NUL. */
+char *pt_osc52_decode(const char *payload, gsize len, gboolean *primary,
+                      gsize *out_len);
 
 /* The visible grid of a bare terminal, as pt_term_core_grid_text() renders it
  * for a live core. Lets a test compare grids without spawning anything. */

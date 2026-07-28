@@ -49,6 +49,7 @@ struct PtTermCore {
   uint16_t last_press_col, last_press_row;
 
   PtOscScan osc;            /* OSC scanner state, carried across reads */
+  PtOsc52Mode osc52;        /* what OSC 52 may do to the clipboard */
 
   PtTermCoreCallbacks cbs;
   gpointer cbs_user;
@@ -276,6 +277,86 @@ void pt_osc_scan_clear(PtOscScan *s) {
   s->state = PT_OSC_GROUND;
 }
 
+/* ---- OSC 52 clipboard writes ----
+ *
+ * `ESC ] 52 ; <targets> ; <base64> BEL` is how anything on the far side of an
+ * ssh session copies to the local clipboard. What arrives here is a payload a
+ * remote program chose, so every part of it is checked before a byte of it can
+ * reach the clipboard. */
+
+/* g_base64_decode() has no failure mode: characters outside the alphabet are
+ * skipped and it returns the bytes it managed to assemble, so "not base64"
+ * comes back as plausible-looking garbage rather than an error. */
+static gboolean b64_valid(const char *s, gsize len) {
+  if (len == 0) return FALSE;
+  gsize pad = 0;
+  for (gsize i = 0; i < len; i++) {
+    char ch = s[i];
+    if (ch == '=') { pad++; continue; }
+    if (pad > 0) return FALSE;          /* padding belongs at the end, only */
+    if (!g_ascii_isalnum(ch) && ch != '+' && ch != '/') return FALSE;
+  }
+  /* A single leftover character encodes nothing, so a group of one is broken
+   * whatever the padding says. Two or three are a short but unambiguous tail:
+   * emitters that leave the padding off are common enough that rejecting them
+   * would just look like a clipboard that sometimes does nothing. */
+  return pad <= 2 && (len - pad) % 4 != 1;
+}
+
+char *pt_osc52_decode(const char *payload, gsize len, gboolean *primary,
+                      gsize *out_len) {
+  const char *sep = memchr(payload, ';', len);
+  if (sep == NULL) return NULL;      /* no targets/data split: not for us */
+  const char *data = sep + 1;
+  gsize n = len - (gsize)(data - payload);
+
+  /* The read form. Never answered — see pt_term_core_set_osc52(). Dropping it
+   * here means no callback fires and nothing is written to the pty. */
+  if (n == 1 && data[0] == '?') return NULL;
+  if (!b64_valid(data, n)) return NULL;
+  /* Judged on the encoded length, so an oversized clipboard is refused before
+   * anything is allocated: four characters carry three bytes. */
+  if (n / 4 * 3 > PT_OSC_52_TEXT_MAX) return NULL;
+
+  /* Targets can name several selections at once ("pc"). pt has one clipboard
+   * and one primary selection, so the clipboard wins when both are asked for,
+   * and everything else — "s", a cut-buffer digit, or no target at all, which
+   * is what an emitter that names nothing means — lands on the clipboard. */
+  gboolean want_primary = FALSE;
+  for (const char *p = payload; p < sep; p++) {
+    if (*p == 'c') { want_primary = FALSE; break; }
+    if (*p == 'p') want_primary = TRUE;
+  }
+
+  /* g_base64_decode() wants a NUL-terminated string, and only flushes whole
+   * four-character groups, so a payload that left its padding off gets it
+   * back here rather than losing its last byte or two. */
+  gsize padded_len = n % 4 == 0 ? n : n + (4 - n % 4);
+  char *padded = g_malloc(padded_len + 1);
+  memcpy(padded, data, n);
+  memset(padded + n, '=', padded_len - n);
+  padded[padded_len] = '\0';
+  gsize decoded_len = 0;
+  guchar *raw = g_base64_decode(padded, &decoded_len);
+  g_free(padded);
+  if (raw == NULL || decoded_len == 0 || decoded_len > PT_OSC_52_TEXT_MAX) {
+    g_free(raw);
+    return NULL;
+  }
+  /* An embedded NUL would leave everything past it outside every length the
+   * consumers work with while the clipboard itself, which takes a C string,
+   * quietly keeps only the head. */
+  if (memchr(raw, '\0', decoded_len) != NULL) {
+    g_free(raw);
+    return NULL;
+  }
+  raw = g_realloc(raw, decoded_len + 1);   /* the decoder does not terminate */
+  raw[decoded_len] = '\0';
+  if (primary != NULL) *primary = want_primary;
+  if (out_len != NULL) *out_len = decoded_len;
+  return (char *)raw;
+}
+
 static void core_osc_dispatch(int code, const char *payload, gsize len,
                               gpointer user) {
   PtTermCore *c = user;
@@ -283,6 +364,16 @@ static void core_osc_dispatch(int code, const char *payload, gsize len,
    * several sequences, and a consumer is allowed to unregister itself from
    * inside its own handler. Without this the next sequence in the same read
    * would call through a NULL pointer. */
+  if (code == 52 && c->osc52 != PT_OSC52_OFF &&
+      c->cbs.clipboard_write != NULL) {
+    gboolean primary = FALSE;
+    gsize text_len = 0;
+    char *text = pt_osc52_decode(payload, len, &primary, &text_len);
+    if (text != NULL) {
+      c->cbs.clipboard_write(c, text, text_len, primary, c->cbs_user);
+      g_free(text);
+    }
+  }
   if (c->cbs.osc != NULL) c->cbs.osc(c, code, payload, len, c->cbs_user);
 }
 
@@ -310,7 +401,7 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
         /* After the parser, so an OSC consumer sees terminal state that
          * already includes the bytes it is reacting to. Skipped entirely
          * when nobody is listening. */
-        if (c->cbs.osc != NULL)
+        if (c->cbs.osc != NULL || c->cbs.clipboard_write != NULL)
           pt_osc_scan_feed(&c->osc, buf, (size_t)n, core_osc_dispatch, c);
         got_data = TRUE;
       } else if (n == 0) { c->eof = TRUE; break; }
@@ -377,6 +468,7 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   c->cols = cols; c->rows = rows; c->cell_w = cell_w; c->cell_h = cell_h;
   c->pty_fd = -1;
   c->last_exit = -1;
+  c->osc52 = PT_CONFIG_OSC52_DEFAULT;
   if (env_pairs != NULL) c->env_pairs = g_strdupv((char **)env_pairs);
 
   GhosttyTerminalOptions opts = { .cols = cols, .rows = rows,
@@ -430,6 +522,10 @@ void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
                                 gpointer user) {
   c->cbs = *cbs;
   c->cbs_user = user;
+}
+
+void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode) {
+  c->osc52 = mode;
 }
 
 void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,

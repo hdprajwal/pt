@@ -22,6 +22,17 @@
  * See wheel_reports() in pt-terminal.c. */
 #define PT_CONFIG_MOUSE_REPORTING_DEFAULT FALSE
 
+/* What a program in a pane may do to the system clipboard with OSC 52. The
+ * write half is how anything on the far end of an ssh session copies — tmux,
+ * nvim's clipboard fallback, Claude Code's own selection — so it ships on. The
+ * read half is not offered at any setting: see pt_term_core_set_osc52(). */
+typedef enum {
+  PT_OSC52_OFF = 0,   /* ignore clipboard writes entirely */
+  PT_OSC52_WRITE,     /* set the clipboard, no questions asked */
+  PT_OSC52_ASK,       /* confirm each write first */
+} PtOsc52Mode;
+#define PT_CONFIG_OSC52_DEFAULT PT_OSC52_WRITE
+
 typedef struct {
   char *theme;             /* never NULL */
   int font_size;           /* terminal, points */
@@ -29,6 +40,7 @@ typedef struct {
   double ui_font_size;     /* chrome base, px */
   char *ui_font_family;    /* never NULL */
   gboolean mouse_reporting;  /* forward mouse events to tracking apps */
+  PtOsc52Mode osc52;         /* clipboard writes from programs (OSC 52) */
   GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
 } PtConfig;
 

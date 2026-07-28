@@ -32,6 +32,7 @@ PtConfig *pt_config_new(void) {
   c->ui_font_size = PT_CONFIG_UI_FONT_SIZE_DEFAULT;
   c->ui_font_family = g_strdup(PT_CONFIG_UI_FONT_FAMILY_DEFAULT);
   c->mouse_reporting = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
+  c->osc52 = PT_CONFIG_OSC52_DEFAULT;
   c->app_overrides = g_hash_table_new_full(g_str_hash, g_str_equal,
                                            g_free, g_free);
   return c;
@@ -54,6 +55,7 @@ PtConfig *pt_config_copy(const PtConfig *c) {
   n->font_size = c->font_size;
   n->ui_font_size = c->ui_font_size;
   n->mouse_reporting = c->mouse_reporting;
+  n->osc52 = c->osc52;
   GHashTableIter it;
   gpointer k, v;
   g_hash_table_iter_init(&it, c->app_overrides);
@@ -79,6 +81,7 @@ gboolean pt_config_equal(const PtConfig *a, const PtConfig *b) {
          a->ui_font_size == b->ui_font_size &&
          g_strcmp0(a->ui_font_family, b->ui_font_family) == 0 &&
          a->mouse_reporting == b->mouse_reporting &&
+         a->osc52 == b->osc52 &&
          tables_equal(a->app_overrides, b->app_overrides);
 }
 
@@ -91,6 +94,17 @@ static gboolean parse_bool(const char *value, gboolean *out) {
     if (g_ascii_strcasecmp(value, yes[i]) == 0) { *out = TRUE; return TRUE; }
   for (gsize i = 0; i < G_N_ELEMENTS(no); i++)
     if (g_ascii_strcasecmp(value, no[i]) == 0) { *out = FALSE; return TRUE; }
+  return FALSE;
+}
+
+static const char *const osc52_names[] = { "off", "write", "ask" };
+
+static gboolean parse_osc52(const char *value, PtOsc52Mode *out) {
+  for (gsize i = 0; i < G_N_ELEMENTS(osc52_names); i++)
+    if (g_ascii_strcasecmp(value, osc52_names[i]) == 0) {
+      *out = (PtOsc52Mode)i;
+      return TRUE;
+    }
   return FALSE;
 }
 
@@ -130,6 +144,11 @@ static void on_kv(const char *key, const char *value, int lineno,
     if (parse_bool(value, &v)) c->mouse_reporting = v;
     else g_warning("pt: config line %d: bad mouse-reporting '%s'", lineno,
                    value);
+  } else if (g_strcmp0(key, "osc52") == 0) {
+    PtOsc52Mode m = PT_CONFIG_OSC52_DEFAULT;
+    if (parse_osc52(value, &m)) c->osc52 = m;
+    else g_warning("pt: config line %d: bad osc52 '%s' (off, write or ask)",
+                   lineno, value);
   } else if (g_str_has_prefix(key, "app-") && key[4] != '\0') {
     g_hash_table_insert(c->app_overrides, g_strdup(key + 4), g_strdup(value));
   }
@@ -149,6 +168,9 @@ char *pt_config_default_path(void) {
 /* ---- in-place rewrite ---- */
 typedef struct { const char *key; char *value; gboolean written; } Managed;
 
+/* Keys the app writes back. managed_value() must cover every index. */
+#define PT_MANAGED_KEYS 7
+
 static char *managed_value(const PtConfig *c, int i) {
   switch (i) {
     case 0: return g_strdup(c->theme);
@@ -161,17 +183,19 @@ static char *managed_value(const PtConfig *c, int i) {
     }
     case 4: return g_strdup(c->ui_font_family);
     case 5: return g_strdup(c->mouse_reporting ? "true" : "false");
+    case 6: return g_strdup(osc52_names[c->osc52]);
   }
   return NULL;
 }
 
 char *pt_config_rewrite(const char *old_text, const PtConfig *c) {
-  Managed keys[6] = {
+  Managed keys[PT_MANAGED_KEYS] = {
     { "theme", NULL, FALSE },      { "font-size", NULL, FALSE },
     { "font-family", NULL, FALSE },{ "ui-font-size", NULL, FALSE },
     { "ui-font-family", NULL, FALSE }, { "mouse-reporting", NULL, FALSE },
+    { "osc52", NULL, FALSE },
   };
-  for (int i = 0; i < 6; i++) keys[i].value = managed_value(c, i);
+  for (int i = 0; i < PT_MANAGED_KEYS; i++) keys[i].value = managed_value(c, i);
 
   GString *out = g_string_new(NULL);
   char **lines = g_strsplit(old_text != NULL ? old_text : "", "\n", -1);
@@ -189,7 +213,7 @@ char *pt_config_rewrite(const char *old_text, const PtConfig *c) {
       if (eq != NULL) {
         *eq = '\0';
         char *key = g_strstrip(probe);
-        for (int k = 0; k < 6; k++) {
+        for (int k = 0; k < PT_MANAGED_KEYS; k++) {
           if (g_strcmp0(key, keys[k].key) == 0) {
             g_string_append_printf(out, "%s = %s\n",
                                    keys[k].key, keys[k].value);
@@ -204,7 +228,7 @@ char *pt_config_rewrite(const char *old_text, const PtConfig *c) {
     g_free(probe);
   }
   g_strfreev(lines);
-  for (int k = 0; k < 6; k++) {
+  for (int k = 0; k < PT_MANAGED_KEYS; k++) {
     if (!keys[k].written)
       g_string_append_printf(out, "%s = %s\n", keys[k].key, keys[k].value);
     g_free(keys[k].value);

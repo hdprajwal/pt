@@ -1,11 +1,15 @@
 #include "pt-term-core.h"
+#include "pt-term-core-internal.h"   /* pt_osc52_decode, the OSC 52 caps */
+#include "pt-config.h"
 #include <stdio.h>
 #include <string.h>
 
 typedef struct { GMainLoop *loop; PtTermCore *core;
                  gboolean found; int exit_status; gboolean exited;
                  char comm[64]; char title[128];
-                 int osc_code; char osc_payload[128]; int osc_count; } Ctx;
+                 int osc_code; char osc_payload[128]; int osc_count;
+                 char clip[256]; gsize clip_len; gboolean clip_primary;
+                 int clip_count; } Ctx;
 
 static void on_draw(PtTermCore *core, gpointer user) {
   Ctx *ctx = user;
@@ -653,6 +657,223 @@ static void test_osc_consumer_can_unregister(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+/* ---- OSC 52 clipboard writes ----
+ *
+ * The payload decoder first, on its own, then the whole path on a real pty. */
+static void test_osc52_decode(void) {
+  gboolean primary = TRUE;
+  gsize len = 0;
+  char *out = pt_osc52_decode("c;aGVsbG8=", 10, &primary, &len);
+  g_assert_cmpstr(out, ==, "hello");
+  g_assert_cmpuint(len, ==, 5);
+  g_assert_false(primary);
+  g_free(out);
+
+  /* The target says which selection. */
+  out = pt_osc52_decode("p;aGVsbG8=", 10, &primary, &len);
+  g_assert_cmpstr(out, ==, "hello");
+  g_assert_true(primary);
+  g_free(out);
+  /* Several at once: pt has one of each, and the clipboard wins. */
+  out = pt_osc52_decode("pc;aGVsbG8=", 11, &primary, &len);
+  g_assert_cmpstr(out, ==, "hello");
+  g_assert_false(primary);
+  g_free(out);
+  /* Anything else, including naming nothing, means the clipboard. */
+  out = pt_osc52_decode("s0;aGVsbG8=", 11, &primary, &len);
+  g_assert_cmpstr(out, ==, "hello");
+  g_assert_false(primary);
+  g_free(out);
+  primary = TRUE;
+  out = pt_osc52_decode(";aGVsbG8=", 9, &primary, &len);
+  g_assert_cmpstr(out, ==, "hello");
+  g_assert_false(primary);
+  g_free(out);
+
+  /* Padding left off is still unambiguous, so it decodes whole rather than
+     losing the tail. */
+  out = pt_osc52_decode("c;aGVsbG8", 9, NULL, &len);
+  g_assert_cmpstr(out, ==, "hello");
+  g_assert_cmpuint(len, ==, 5);
+  g_free(out);
+
+  /* The read form: nothing comes back, at any setting. */
+  g_assert_null(pt_osc52_decode("c;?", 3, NULL, NULL));
+  g_assert_null(pt_osc52_decode("p;?", 3, NULL, NULL));
+  g_assert_null(pt_osc52_decode(";?", 2, NULL, NULL));
+
+  /* Not base64. g_base64_decode() would answer garbage for every one of
+     these rather than fail, which is exactly why they are checked first. */
+  g_assert_null(pt_osc52_decode("c;!!!!", 6, NULL, NULL));
+  g_assert_null(pt_osc52_decode("c;aGVsbG8!", 10, NULL, NULL));
+  g_assert_null(pt_osc52_decode("c;aGVs bG8=", 11, NULL, NULL));  /* space */
+  g_assert_null(pt_osc52_decode("c;aGV=sbG8=", 11, NULL, NULL));  /* pad inside */
+  g_assert_null(pt_osc52_decode("c;aGVsbG8===", 12, NULL, NULL)); /* 3 pad */
+  g_assert_null(pt_osc52_decode("c;a", 3, NULL, NULL));      /* lone character */
+  g_assert_null(pt_osc52_decode("c;aGVsbG8=a", 11, NULL, NULL));
+  g_assert_null(pt_osc52_decode("c;", 2, NULL, NULL));       /* nothing to copy */
+  g_assert_null(pt_osc52_decode("c", 1, NULL, NULL));        /* no ';' at all */
+
+  /* An embedded NUL would put only the head of the text on the clipboard
+     while every length here still counted the rest. "YQBi" is "a\0b". */
+  g_assert_null(pt_osc52_decode("c;YQBi", 6, NULL, NULL));
+}
+
+static void test_osc52_decode_cap(void) {
+  /* Judged on the encoded length, before anything is allocated: four
+     characters carry three bytes, so this is a hair over the cap. */
+  gsize n = (PT_OSC_52_TEXT_MAX / 3 + 4) * 4;
+  GString *s = g_string_new("c;");
+  for (gsize i = 0; i < n; i++) g_string_append_c(s, 'A');
+  g_assert_null(pt_osc52_decode(s->str, s->len, NULL, NULL));
+  g_string_free(s, TRUE);
+
+  /* A large but allowed clipboard still comes through whole. */
+  gsize body = 600u * 1024u;
+  char *big = g_malloc(body);
+  memset(big, 'x', body);
+  char *b64 = g_base64_encode((const guchar *)big, body);
+  char *payload = g_strconcat("c;", b64, NULL);
+  gsize out_len = 0;
+  char *out = pt_osc52_decode(payload, strlen(payload), NULL, &out_len);
+  g_assert_nonnull(out);
+  g_assert_cmpuint(out_len, ==, body);
+  g_assert_cmpint(memcmp(out, big, body), ==, 0);
+  g_free(out);
+  g_free(payload);
+  g_free(b64);
+  g_free(big);
+}
+
+static void on_clipboard_write(PtTermCore *core, const char *text, gsize len,
+                               gboolean primary, gpointer user) {
+  (void)core;
+  Ctx *ctx = user;
+  ctx->clip_count++;
+  ctx->clip_len = len;
+  ctx->clip_primary = primary;
+  g_strlcpy(ctx->clip, text, sizeof(ctx->clip));
+}
+
+/* Run `cmd` in a pane with only the clipboard consumer registered — which is
+ * also what proves the scanner runs off that callback alone — and return once
+ * the marker the command prints after the sequence is on the grid. The pty is
+ * in order, so by then the sequence has been through the scanner. */
+static void run_osc52(Ctx *ctx, const char *cmd, PtOsc52Mode mode) {
+  ctx->loop = g_main_loop_new(NULL, FALSE);
+  const char *argv[] = {"/bin/sh", "-c", cmd, NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .draw = on_draw_marker,
+                              .clipboard_write = on_clipboard_write };
+  pt_term_core_set_callbacks(core, &cbs, ctx);
+  pt_term_core_set_osc52(core, mode);
+  guint to = g_timeout_add_seconds(10, on_timeout, ctx);
+  g_main_loop_run(ctx->loop);
+  g_source_remove(to);
+  g_assert_true(ctx->found);      /* the marker arrived; so did the sequence */
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx->loop);
+}
+
+static void test_osc52_clipboard(void) {
+  Ctx ctx = {0};
+  run_osc52(&ctx,
+            "printf '\\033]52;c;aGVsbG8=\\007'; printf 'done-marker\\n'; "
+            "sleep 30", PT_OSC52_WRITE);
+  g_assert_cmpint(ctx.clip_count, ==, 1);
+  g_assert_cmpstr(ctx.clip, ==, "hello");
+  g_assert_cmpuint(ctx.clip_len, ==, 5);
+  g_assert_false(ctx.clip_primary);
+}
+
+static void test_osc52_primary(void) {
+  Ctx ctx = {0};
+  run_osc52(&ctx,
+            "printf '\\033]52;p;aGVsbG8=\\007'; printf 'done-marker\\n'; "
+            "sleep 30", PT_OSC52_WRITE);
+  g_assert_cmpint(ctx.clip_count, ==, 1);
+  g_assert_cmpstr(ctx.clip, ==, "hello");
+  g_assert_true(ctx.clip_primary);
+}
+
+static void test_osc52_invalid_base64(void) {
+  Ctx ctx = {0};
+  run_osc52(&ctx,
+            "printf '\\033]52;c;not base64!\\007'; printf 'done-marker\\n'; "
+            "sleep 30", PT_OSC52_WRITE);
+  g_assert_cmpint(ctx.clip_count, ==, 0);
+}
+
+static void test_osc52_over_cap(void) {
+  /* Past PT_OSC_52_MAX the scanner drops the sequence outright, so the decoder
+     never sees it and nothing is allocated for it. The filler is 'B' rather
+     than 'A' on purpose: "AAAA" decodes to NUL bytes, which the decoder throws
+     out for its own reasons, and this has to fail on the cap. */
+  Ctx ctx = {0};
+  run_osc52(&ctx,
+            "printf '\\033]52;c;'; head -c 1100000 /dev/zero | tr '\\0' 'B'; "
+            "printf '\\007'; printf 'done-marker\\n'; sleep 30",
+            PT_OSC52_WRITE);
+  g_assert_cmpint(ctx.clip_count, ==, 0);
+
+  /* The same clipboard a size down arrives whole — so the drop above was the
+     cap doing its job, not a megabyte of output getting lost on the way. */
+  Ctx under = {0};
+  run_osc52(&under,
+            "printf '\\033]52;c;'; head -c 900000 /dev/zero | tr '\\0' 'B'; "
+            "printf '\\007'; printf 'done-marker\\n'; sleep 30",
+            PT_OSC52_WRITE);
+  g_assert_cmpint(under.clip_count, ==, 1);
+  g_assert_cmpuint(under.clip_len, ==, 900000 / 4 * 3);
+}
+
+static void test_osc52_off_in_config(void) {
+  /* The `osc52` config key, end to end: parsed from a file's text, handed to
+     the core, and a perfectly good sequence does nothing. */
+  PtConfig *cfg = pt_config_parse("osc52 = off\n");
+  g_assert_cmpint(cfg->osc52, ==, PT_OSC52_OFF);
+  Ctx ctx = {0};
+  run_osc52(&ctx,
+            "printf '\\033]52;c;aGVsbG8=\\007'; printf 'done-marker\\n'; "
+            "sleep 30", cfg->osc52);
+  g_assert_cmpint(ctx.clip_count, ==, 0);
+  pt_config_free(cfg);
+}
+
+static void test_osc52_query_is_never_answered(void) {
+  /* The read form lets whatever is running in the pane — or on the far end of
+     an ssh session — read the clipboard, so pt answers nothing at all: no
+     callback, and not one byte to the pty. `cat -v` prints everything pt
+     writes, so a reply would land in the grid. The probe afterwards is the
+     proof that a reply had its chance: the pty is FIFO, so anything written
+     before it would already be echoed by the time the probe shows up. */
+  Ctx ctx = {0};
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033]52;c;?\\007'; printf 'sent-marker\\n'; "
+    "cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .clipboard_write = on_clipboard_write };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  g_assert_true(wait_for_text(core, "sent-marker"));   /* query scanned */
+
+  pt_term_core_write(core, "PROBE\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE"));
+
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "]52"));        /* no reply came back */
+  g_assert_null(strstr(text, "^["));         /* nor anything else escaped */
+  g_free(text);
+  g_assert_cmpint(ctx.clip_count, ==, 0);
+
+  pt_term_core_free(core);
+}
+
 /* ---- paste ----
  *
  * Same `stty -echo -icanon; cat -v` trick as the mouse tests: whatever we write
@@ -770,6 +991,14 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
   g_test_add_func("/termcore/osc-callback", test_osc_reaches_callback);
   g_test_add_func("/termcore/osc-unregister", test_osc_consumer_can_unregister);
+  g_test_add_func("/termcore/osc52-decode", test_osc52_decode);
+  g_test_add_func("/termcore/osc52-decode-cap", test_osc52_decode_cap);
+  g_test_add_func("/termcore/osc52-clipboard", test_osc52_clipboard);
+  g_test_add_func("/termcore/osc52-primary", test_osc52_primary);
+  g_test_add_func("/termcore/osc52-invalid-base64", test_osc52_invalid_base64);
+  g_test_add_func("/termcore/osc52-over-cap", test_osc52_over_cap);
+  g_test_add_func("/termcore/osc52-off", test_osc52_off_in_config);
+  g_test_add_func("/termcore/osc52-query", test_osc52_query_is_never_answered);
   g_test_add_func("/termcore/paste-bracketed",
                   test_paste_bracketed_strips_end_sequence);
   g_test_add_func("/termcore/paste-unbracketed",
