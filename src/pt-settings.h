@@ -8,7 +8,10 @@ G_DECLARE_FINAL_TYPE(PtSettings, pt_settings, PT, SETTINGS, GtkWidget)
 GtkWidget *pt_settings_new(void);
 
 /* Deep-copies `current`. `themes` is a NULL-terminated name list (copied);
- * NULL or empty simply pins the theme row. */
+ * NULL or empty simply pins the theme row. The names must be entries of
+ * pt_theme_dir(), which the dialog resolves itself and classifies them against
+ * to split the list into dark and light: a name from anywhere else does not
+ * load, counts as dark, and leaves the Appearance row with one side empty. */
 void pt_settings_open(PtSettings *s, const PtConfig *current,
                       const char *const *themes);
 void pt_settings_close(PtSettings *s);

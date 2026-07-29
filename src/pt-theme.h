@@ -63,9 +63,12 @@ gboolean    pt_theme_is_dark(const char *dir, const char *name);
  * can be tested without touching the disk. */
 typedef gboolean (*PtThemeDarkFn)(const char *name, gpointer user);
 
-/* The entries of `names` (NULL-terminated) that `classify` puts on the `dark`
- * side, in the input order. Never NULL: with nothing matching, the result is a
+/* Partitions `names` (NULL-terminated) by appearance in one walk: exactly one
+ * classify() call per name, so a caller whose classifier reads the disk pays
+ * for each theme file once. Both out-vectors are required, both keep the input
+ * order, and neither is ever NULL: with nothing on a side, that side is a
  * vector holding only the terminator — callers pick appearances to offer by
- * asking whether it is empty. g_strfreev. */
-char      **pt_theme_filter_appearance(const char *const *names, gboolean dark,
-                                       PtThemeDarkFn classify, gpointer user);
+ * asking whether it is empty. Both are g_strfreev'd by the caller. */
+void        pt_theme_filter_appearance(const char *const *names,
+                                       PtThemeDarkFn classify, gpointer user,
+                                       char ***out_dark, char ***out_light);

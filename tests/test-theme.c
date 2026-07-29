@@ -304,38 +304,46 @@ static void test_filter_appearance(void) {
   const char *const names[] = { "ayu", "one-dark", "github-light", "pt-dark",
                                 "vercel", NULL };
   int calls = 0;
-  char **dark = pt_theme_filter_appearance(names, TRUE, classify_by_suffix,
-                                           &calls);
-  char **light = pt_theme_filter_appearance(names, FALSE, classify_by_suffix,
-                                            &calls);
+  char **dark = NULL, **light = NULL;
+  pt_theme_filter_appearance(names, classify_by_suffix, &calls, &dark, &light);
   /* Input order survives, and the two subsets partition the list. */
   assert_names(dark, (const char *const[]){ "one-dark", "pt-dark", NULL });
   assert_names(light,
                (const char *const[]){ "ayu", "github-light", "vercel", NULL });
-  /* One classify call per name per pass — no rescanning, nothing skipped. */
-  g_assert_cmpint(calls, ==, 10);
+  /* Exactly one classify call per name for both sides together — the whole
+   * point of partitioning in one walk. A second pass would read every theme
+   * file twice per dialog open. */
+  g_assert_cmpint(calls, ==, 5);
   g_strfreev(dark);
   g_strfreev(light);
 
   /* An appearance nothing matches is an empty vector, never NULL: the caller
    * tests it to know the appearance is not worth offering. */
   const char *const only_dark[] = { "pt-dark", NULL };
-  char **none = pt_theme_filter_appearance(only_dark, FALSE, classify_by_suffix,
-                                           NULL);
-  g_assert_nonnull(none);
-  g_assert_null(none[0]);
-  g_strfreev(none);
+  pt_theme_filter_appearance(only_dark, classify_by_suffix, NULL,
+                             &dark, &light);
+  g_assert_nonnull(light);
+  g_assert_null(light[0]);
+  g_assert_cmpstr(dark[0], ==, "pt-dark");
+  g_strfreev(dark);
+  g_strfreev(light);
 
   /* Empty and NULL lists behave the same way. */
   const char *const empty[] = { NULL };
-  char **from_empty = pt_theme_filter_appearance(empty, TRUE,
-                                                 classify_by_suffix, NULL);
-  char **from_null = pt_theme_filter_appearance(NULL, TRUE, classify_by_suffix,
-                                                NULL);
-  g_assert_null(from_empty[0]);
-  g_assert_null(from_null[0]);
-  g_strfreev(from_empty);
-  g_strfreev(from_null);
+  char **empty_dark = NULL, **empty_light = NULL;
+  char **null_dark = NULL, **null_light = NULL;
+  pt_theme_filter_appearance(empty, classify_by_suffix, NULL,
+                             &empty_dark, &empty_light);
+  pt_theme_filter_appearance(NULL, classify_by_suffix, NULL,
+                             &null_dark, &null_light);
+  g_assert_null(empty_dark[0]);
+  g_assert_null(empty_light[0]);
+  g_assert_null(null_dark[0]);
+  g_assert_null(null_light[0]);
+  g_strfreev(empty_dark);
+  g_strfreev(empty_light);
+  g_strfreev(null_dark);
+  g_strfreev(null_light);
 }
 
 /* The same split, driven by the real classifier over real theme files: a light
@@ -348,10 +356,9 @@ static void test_filter_appearance_on_disk(void) {
   g_file_set_contents(darkf, "background = #15141b\n", -1, NULL);
 
   char **names = pt_theme_list_names(dir);   /* midnight, pt-dark, sunny */
-  char **dark = pt_theme_filter_appearance((const char *const *)names, TRUE,
-                                           classify_on_disk, dir);
-  char **light = pt_theme_filter_appearance((const char *const *)names, FALSE,
-                                            classify_on_disk, dir);
+  char **dark = NULL, **light = NULL;
+  pt_theme_filter_appearance((const char *const *)names, classify_on_disk, dir,
+                             &dark, &light);
   assert_names(dark, (const char *const[]){ "midnight", "pt-dark", NULL });
   assert_names(light, (const char *const[]){ "sunny", NULL });
 
