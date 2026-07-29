@@ -787,33 +787,41 @@ static gboolean activate_pane(PtWindow *w, guint64 pane_id) {
   return FALSE;
 }
 
+/* Pane ids are handed out by a counter that starts over at 1 every launch, and
+ * a notification can outlive the process that sent it: notification daemons
+ * keep what they are showing, and pt does not withdraw its own on the way out.
+ * So a click on yesterday's notification could name a pane id that today's
+ * process has since handed to something else, and land the user in an
+ * unrelated shell — worse than doing nothing.
+ *
+ * The target carries this alongside the pane id, and a target from any other
+ * process is dropped on sight. Random rather than a pid, which the kernel
+ * reuses within a session. */
+static guint64 session_nonce(void) {
+  static guint64 nonce;
+  if (nonce == 0)
+    nonce = ((guint64)g_random_int() << 32) | g_random_int() | 1;
+  return nonce;
+}
+
 /* The notification's default action, i.e. what clicking the body does. It
  * lives on the application rather than the window because that is where the
- * desktop can reach it: the shell activates `app.activate-pane` on a process
- * that may have been started by the click itself. The window is found through
- * the application for the same reason — nothing here holds a window pointer
- * that could outlive the window. */
+ * desktop can reach it: the shell activates `app.activate-pane` by name, and
+ * the process it reaches need not be the one that sent the notification. The
+ * window is found through the application for the same reason — nothing here
+ * holds a window pointer that could outlive the window. */
 static void on_activate_pane_action(GSimpleAction *action, GVariant *param,
                                     gpointer user) {
   (void)action;
   GtkApplication *app = user;
   if (param == NULL) return;
-  guint64 pane_id = g_variant_get_uint64(param);
+  guint64 nonce = 0, pane_id = 0;
+  g_variant_get(param, "(tt)", &nonce, &pane_id);
+  if (nonce != session_nonce()) return;    /* an earlier process's pane */
   for (GList *l = gtk_application_get_windows(app); l != NULL; l = l->next) {
     if (!PT_IS_WINDOW(l->data)) continue;
     if (activate_pane(PT_WINDOW(l->data), pane_id)) return;
   }
-}
-
-/* Registered once per application, from pt_window_new. */
-static void install_notification_action(GtkApplication *app) {
-  if (g_action_map_lookup_action(G_ACTION_MAP(app), "activate-pane") != NULL)
-    return;
-  GSimpleAction *act =
-      g_simple_action_new("activate-pane", G_VARIANT_TYPE_UINT64);
-  g_signal_connect(act, "activate", G_CALLBACK(on_activate_pane_action), app);
-  g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(act));
-  g_object_unref(act);
 }
 
 static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
@@ -845,8 +853,8 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
   GIcon *icon = g_themed_icon_new("dev.hdprajwal.pt");
   g_notification_set_icon(n, icon);
   g_object_unref(icon);
-  g_notification_set_default_action_and_target(n, "app.activate-pane", "t",
-                                               pane_id);
+  g_notification_set_default_action_and_target(n, "app.activate-pane", "(tt)",
+                                               session_nonce(), pane_id);
   /* Keyed per pane, so a pane that notifies twice replaces its own earlier
    * notification instead of stacking a second one the user has to dismiss.
    * Ghostty keys on the body text instead (apprt/gtk/class/surface.zig), which
@@ -1847,10 +1855,17 @@ static void pt_window_init(PtWindow *w) {
   w->status_source = g_timeout_add(500, tick_statusline, w);
 }
 
+void pt_window_install_app_actions(AdwApplication *app) {
+  if (g_action_map_lookup_action(G_ACTION_MAP(app), "activate-pane") != NULL)
+    return;
+  GSimpleAction *act =
+      g_simple_action_new("activate-pane", G_VARIANT_TYPE("(tt)"));
+  g_signal_connect(act, "activate", G_CALLBACK(on_activate_pane_action), app);
+  g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(act));
+  g_object_unref(act);
+}
+
 GtkWidget *pt_window_new(AdwApplication *app) {
-  /* Before the window: a notification clicked while pt was not running
-   * activates the app, and the action has to be there when it does. */
-  install_notification_action(GTK_APPLICATION(app));
   return g_object_new(PT_TYPE_WINDOW, "application", app,
                       "title", "pt",
                       "default-width", 1100, "default-height", 700, NULL);
