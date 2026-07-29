@@ -552,7 +552,8 @@ static void core_notification(PtTermCore *c, int code, const char *payload,
    * loop must not spend the budget that an unfocused pane's one real
    * notification needs. c->focused follows the widget's focus, and GTK takes
    * focus away from the pane when the window itself goes inactive, so this is
-   * "the focused pane of the focused window" and not just "the focused pane". */
+   * "the focused pane of the focused window" and not just "the focused pane" —
+   * see the leave handler in pt-terminal.c for why that second part holds. */
   if (c->focused) return;
   char title[PT_NOTIFY_TITLE_MAX + 1];
   char body[PT_NOTIFY_BODY_MAX + 1];

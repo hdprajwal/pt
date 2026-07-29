@@ -26,6 +26,10 @@ int main(int argc, char *argv[]) {
   AdwApplication *app =
       adw_application_new("dev.hdprajwal.pt", G_APPLICATION_DEFAULT_FLAGS);
   g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);
+  /* Before the run loop, not from the window: a click on a notification can
+   * reach this process as a bare action activation, with no "activate" signal
+   * and so no window, and an action that is not there yet is dropped. */
+  pt_window_install_app_actions(app);
   int status = g_application_run(G_APPLICATION(app), argc, argv);
   g_object_unref(app);
   return status;

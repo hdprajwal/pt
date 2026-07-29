@@ -1086,7 +1086,15 @@ static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
   sync_blink_timer(t);         /* and the timer goes with the focus */
   /* Also fires when the pane is unparented on a tab or project switch, and
    * when the window itself goes inactive, both by way of GTK's own crossing
-   * events — so a backgrounded pane counts as unfocused with no code here. */
+   * events — so a backgrounded pane counts as unfocused with no code here.
+   *
+   * The second of those is easy to doubt, because GtkWindow keeps its focus
+   * widget across deactivation. It holds anyway: _gtk_window_set_is_active
+   * synthesizes a focus-out crossing of type GTK_CROSSING_ACTIVE from the
+   * focus widget (gtkwindow.c), and GtkEventControllerFocus handles ACTIVE
+   * crossings exactly as it handles FOCUS ones (gtkeventcontrollerfocus.c),
+   * so "leave" is emitted. Everything that reads t->focused depends on this —
+   * mode 1004 focus reports, and the notification suppression in the core. */
   if (t->core != NULL) pt_term_core_focus_report(t->core, FALSE, FALSE);
   gtk_widget_remove_css_class(GTK_WIDGET(t), "focused");
   gtk_widget_queue_draw(GTK_WIDGET(t));
