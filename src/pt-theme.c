@@ -342,20 +342,25 @@ gboolean pt_theme_is_dark(const char *dir, const char *name) {
   return dark;
 }
 
-char **pt_theme_filter_appearance(const char *const *names, gboolean dark,
-                                  PtThemeDarkFn classify, gpointer user) {
-  GPtrArray *arr = g_ptr_array_new_with_free_func(g_free);
-  /* One classify() call per name, in order: the caller pays for reading and
-   * parsing each theme file once, and the two subsets it builds keep the same
-   * order as the list it started from. */
+void pt_theme_filter_appearance(const char *const *names,
+                                PtThemeDarkFn classify, gpointer user,
+                                char ***out_dark, char ***out_light) {
+  g_return_if_fail(out_dark != NULL && out_light != NULL);
+  GPtrArray *dark = g_ptr_array_new_with_free_func(g_free);
+  GPtrArray *light = g_ptr_array_new_with_free_func(g_free);
+  /* One walk, one classify() call per name: both sides are built together so a
+   * classifier that reads and parses a theme file is never asked twice about
+   * the same name, and both keep the order of the list they came from. */
   if (names != NULL && classify != NULL) {
     for (int i = 0; names[i] != NULL; i++) {
-      /* Compared as truths, not as ints: a classifier is free to answer with
+      /* Taken as a truth, not as an int: a classifier is free to answer with
        * any non-zero value for dark. */
-      if (!classify(names[i], user) == !dark)
-        g_ptr_array_add(arr, g_strdup(names[i]));
+      GPtrArray *side = classify(names[i], user) ? dark : light;
+      g_ptr_array_add(side, g_strdup(names[i]));
     }
   }
-  g_ptr_array_add(arr, NULL);
-  return (char **)g_ptr_array_free(arr, FALSE);
+  g_ptr_array_add(dark, NULL);
+  g_ptr_array_add(light, NULL);
+  *out_dark = (char **)g_ptr_array_free(dark, FALSE);
+  *out_light = (char **)g_ptr_array_free(light, FALSE);
 }

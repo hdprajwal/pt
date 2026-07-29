@@ -37,8 +37,9 @@ struct _PtSettings {
   GtkWidget *list;    /* vertical box of the six rows, built once */
   GtkWidget *value_labels[N_ROWS];
   PtConfig *candidate;  /* live-edited copy; kept until the next open */
-  char **themes;        /* NULL-terminated, owned */
-  char **dark_themes;   /* themes split by appearance, classified once per open */
+  /* The open-time theme list, already split by appearance: the whole list is
+   * never wanted again, only the side the chosen appearance walks. */
+  char **dark_themes;
   char **light_themes;
   /* Dialog-local and deliberately not persisted: the config surface stays at
    * `theme`, and the appearance shown is just what the selected theme is. */
@@ -339,23 +340,20 @@ void pt_settings_open(PtSettings *s, const PtConfig *current,
   g_return_if_fail(current != NULL);
 
   g_clear_pointer(&s->candidate, pt_config_free);
-  g_clear_pointer(&s->themes, g_strfreev);
   g_clear_pointer(&s->dark_themes, g_strfreev);
   g_clear_pointer(&s->light_themes, g_strfreev);
   s->candidate = pt_config_copy(current);
-  s->themes = themes != NULL ? g_strdupv((char **)themes) : NULL;
   /* Fonts can be installed while pt runs; a snapshot per open is cheap. */
   collect_families(s);
 
   /* Classify every theme once, here: it reads and parses each theme file, which
    * is fine per open (they are tiny and there are a handful) and would not be
-   * per keypress. Same helper the terminal answers CSI ? 996 n from, so the
-   * picker and what apps are told can never disagree. */
+   * per keypress. One partitioning walk, so no name is read twice. Same helper
+   * the terminal answers CSI ? 996 n from, so the picker and what apps are told
+   * can never disagree. */
   char *tdir = pt_theme_dir();
-  s->dark_themes = pt_theme_filter_appearance((const char *const *)s->themes,
-                                              TRUE, classify_in_dir, tdir);
-  s->light_themes = pt_theme_filter_appearance((const char *const *)s->themes,
-                                               FALSE, classify_in_dir, tdir);
+  pt_theme_filter_appearance(themes, classify_in_dir, tdir,
+                             &s->dark_themes, &s->light_themes);
   s->appearance_dark = pt_theme_is_dark(tdir, s->candidate->theme);
   g_free(tdir);
   /* A theme that is no longer on disk classifies dark without being in the dark
@@ -406,7 +404,6 @@ static void pt_settings_dispose(GObject *obj) {
   PtSettings *s = PT_SETTINGS(obj);
   s->open = FALSE;
   g_clear_pointer(&s->candidate, pt_config_free);
-  g_clear_pointer(&s->themes, g_strfreev);
   g_clear_pointer(&s->dark_themes, g_strfreev);
   g_clear_pointer(&s->light_themes, g_strfreev);
   g_clear_pointer(&s->mono_fams, g_strfreev);
