@@ -1,5 +1,6 @@
 #include "pt-info-panel.h"
 #include "pt-accent.h"
+#include "pt-rowlist.h"
 
 #include <string.h>
 
@@ -17,8 +18,11 @@ struct _PtInfoPanel {
   /* The git section's header row IS the branch line: icon, branch, count,
    * ahead/behind — or the icon and `not_repo` when there is no repo. */
   GtkWidget *branch_icon, *branch, *count, *ab, *not_repo;
-  GtkWidget *scroller, *files_box;
-  GPtrArray *files;                /* PtGitFile*, the list currently rendered */
+  GtkWidget *scroller;
+  /* The file rows. The row list holds the PtGitFile* array they were built
+   * from — a reference to it, not a copy — and skips the rebuild when the list
+   * has not moved. */
+  PtRowList *files;
   int accent;                      /* -1 until the first set_info */
 };
 
@@ -58,64 +62,61 @@ static const char *status_class(const char *xy) {
   }
 }
 
-static void rebuild_files(PtInfoPanel *ip) {
-  GtkWidget *child;
-  while ((child = gtk_widget_get_first_child(ip->files_box)) != NULL)
-    gtk_box_remove(GTK_BOX(ip->files_box), child);
+/* One file row: status, directory, name, the two line counts. Nothing here is
+ * clickable, so the row carries no gesture. */
+static GtkWidget *build_file_row(gpointer items, guint idx, gpointer u) {
+  (void)u;
+  const PtGitFile *f = g_ptr_array_index((GPtrArray *)items, idx);
+  GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+  gtk_widget_add_css_class(row, "pt-info-file");
 
-  for (guint i = 0; i < ip->files->len; i++) {
-    const PtGitFile *f = g_ptr_array_index(ip->files, i);
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    gtk_widget_add_css_class(row, "pt-info-file");
+  GtkWidget *st = gtk_label_new(f->xy);
+  gtk_widget_add_css_class(st, "pt-info-st");
+  gtk_widget_add_css_class(st, status_class(f->xy));
+  gtk_label_set_xalign(GTK_LABEL(st), 0.5f);
+  gtk_box_append(GTK_BOX(row), st);
 
-    GtkWidget *st = gtk_label_new(f->xy);
-    gtk_widget_add_css_class(st, "pt-info-st");
-    gtk_widget_add_css_class(st, status_class(f->xy));
-    gtk_label_set_xalign(GTK_LABEL(st), 0.5f);
-    gtk_box_append(GTK_BOX(row), st);
-
-    const char *slash = strrchr(f->path, '/');
-    if (slash != NULL) {
-      char *dir = g_strndup(f->path, (gsize)(slash - f->path) + 1);
-      GtkWidget *dl = gtk_label_new(dir);
-      g_free(dir);
-      gtk_widget_add_css_class(dl, "pt-info-fdir");
-      gtk_label_set_ellipsize(GTK_LABEL(dl), PANGO_ELLIPSIZE_START);
-      gtk_box_append(GTK_BOX(row), dl);
-    }
-    /* The name takes the slack and ellipsizes: the counts must keep their
-     * place at the right edge of a 266px rail, whatever the path length. */
-    GtkWidget *name = gtk_label_new(slash != NULL ? slash + 1 : f->path);
-    gtk_widget_add_css_class(name, "pt-info-fname");
-    gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
-    gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_MIDDLE);
-    gtk_widget_set_hexpand(name, TRUE);
-    gtk_box_append(GTK_BOX(row), name);
-
-    /* Untracked files never reach the diff, and binary ones report no lines:
-     * both leave the counts off entirely rather than printing a fake 0. */
-    if (f->add >= 0 && f->del >= 0) {
-      char buf[24];
-      g_snprintf(buf, sizeof(buf), "+%d", f->add);
-      GtkWidget *add = gtk_label_new(buf);
-      gtk_widget_add_css_class(add, "pt-info-add");
-      gtk_box_append(GTK_BOX(row), add);
-      g_snprintf(buf, sizeof(buf), "−%d", f->del);
-      GtkWidget *del = gtk_label_new(buf);
-      gtk_widget_add_css_class(del, "pt-info-del");
-      gtk_box_append(GTK_BOX(row), del);
-    }
-
-    gtk_box_append(GTK_BOX(ip->files_box), row);
+  const char *slash = strrchr(f->path, '/');
+  if (slash != NULL) {
+    char *dir = g_strndup(f->path, (gsize)(slash - f->path) + 1);
+    GtkWidget *dl = gtk_label_new(dir);
+    g_free(dir);
+    gtk_widget_add_css_class(dl, "pt-info-fdir");
+    gtk_label_set_ellipsize(GTK_LABEL(dl), PANGO_ELLIPSIZE_START);
+    gtk_box_append(GTK_BOX(row), dl);
   }
+  /* The name takes the slack and ellipsizes: the counts must keep their
+   * place at the right edge of a 266px rail, whatever the path length. */
+  GtkWidget *name = gtk_label_new(slash != NULL ? slash + 1 : f->path);
+  gtk_widget_add_css_class(name, "pt-info-fname");
+  gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
+  gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_MIDDLE);
+  gtk_widget_set_hexpand(name, TRUE);
+  gtk_box_append(GTK_BOX(row), name);
+
+  /* Untracked files never reach the diff, and binary ones report no lines:
+   * both leave the counts off entirely rather than printing a fake 0. */
+  if (f->add >= 0 && f->del >= 0) {
+    char buf[24];
+    g_snprintf(buf, sizeof(buf), "+%d", f->add);
+    GtkWidget *add = gtk_label_new(buf);
+    gtk_widget_add_css_class(add, "pt-info-add");
+    gtk_box_append(GTK_BOX(row), add);
+    g_snprintf(buf, sizeof(buf), "−%d", f->del);
+    GtkWidget *del = gtk_label_new(buf);
+    gtk_widget_add_css_class(del, "pt-info-del");
+    gtk_box_append(GTK_BOX(row), del);
+  }
+  return row;
 }
 
-static gboolean same_files(PtInfoPanel *ip, GPtrArray *files) {
-  guint n = files != NULL ? files->len : 0;
-  if (n != ip->files->len) return FALSE;
-  for (guint i = 0; i < n; i++) {
-    const PtGitFile *a = g_ptr_array_index(ip->files, i);
-    const PtGitFile *b = g_ptr_array_index(files, i);
+static gboolean files_equal(gpointer ap, guint na, gpointer bp, guint nb,
+                            gpointer u) {
+  (void)u;
+  if (na != nb) return FALSE;
+  for (guint i = 0; i < na; i++) {
+    const PtGitFile *a = g_ptr_array_index((GPtrArray *)ap, i);
+    const PtGitFile *b = g_ptr_array_index((GPtrArray *)bp, i);
     /* Counts too: they arrive one poll behind the paths, and skipping the
      * rebuild for them would leave every row blank forever. */
     if (strcmp(a->xy, b->xy) != 0 || g_strcmp0(a->path, b->path) != 0 ||
@@ -168,13 +169,13 @@ void pt_info_panel_set_git(PtInfoPanel *ip, const PtGitStatus *st,
   gtk_widget_set_visible(ip->ab, ab[0] != '\0');
 
   if (!is_repo) files = NULL;
-  if (files == ip->files) return;   /* the very array already shown */
-  if (same_files(ip, files)) return;
-  g_ptr_array_unref(ip->files);
   /* A reference, not a copy: git updates always deliver a fresh array, so the
-   * one shown here is never mutated behind the panel's back. */
-  ip->files = files != NULL ? g_ptr_array_ref(files) : g_ptr_array_new();
-  rebuild_files(ip);
+   * one shown here is never mutated behind the panel's back. The row list drops
+   * this reference again when the list turns out not to have moved — including
+   * when it is handed the very array already on screen. */
+  pt_rowlist_set(ip->files, files != NULL ? g_ptr_array_ref(files) : NULL,
+                 files != NULL ? files->len : 0, build_file_row, files_equal,
+                 ip, (GDestroyNotify)g_ptr_array_unref);
 }
 
 void pt_info_panel_set_has_zed(PtInfoPanel *ip, gboolean has_zed) {
@@ -184,8 +185,8 @@ void pt_info_panel_set_has_zed(PtInfoPanel *ip, gboolean has_zed) {
 /* ---------- GObject ---------- */
 static void pt_info_panel_dispose(GObject *obj) {
   PtInfoPanel *ip = PT_INFO_PANEL(obj);
-  g_clear_pointer(&ip->files, g_ptr_array_unref);
   g_clear_pointer(&ip->box, gtk_widget_unparent);
+  g_clear_object(&ip->files);   /* drops the file array's reference too */
   G_OBJECT_CLASS(pt_info_panel_parent_class)->dispose(obj);
 }
 
@@ -264,7 +265,6 @@ static void pt_info_panel_init(PtInfoPanel *ip) {
   gtk_widget_add_css_class(GTK_WIDGET(ip), "pt-infopanel");
   gtk_widget_set_size_request(GTK_WIDGET(ip), PT_INFO_PANEL_WIDTH, -1);
   ip->accent = -1;
-  ip->files = g_ptr_array_new();   /* empty; parsed arrays free their own */
 
   ip->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_parent(ip->box, GTK_WIDGET(ip));
@@ -361,9 +361,9 @@ static void pt_info_panel_init(PtInfoPanel *ip) {
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(ip->scroller),
                                  GTK_POLICY_EXTERNAL, GTK_POLICY_AUTOMATIC);
   gtk_widget_set_vexpand(ip->scroller, TRUE);
-  ip->files_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(ip->scroller),
-                                ip->files_box);
+  GtkWidget *files_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(ip->scroller), files_box);
+  ip->files = pt_rowlist_new(GTK_BOX(files_box));
   gtk_box_append(GTK_BOX(git), ip->scroller);
   gtk_box_append(GTK_BOX(ip->box), git);
 }

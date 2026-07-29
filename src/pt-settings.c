@@ -1,5 +1,7 @@
 #include "pt-settings.h"
 
+#include "pt-overlay.h"
+#include "pt-rowlist.h"
 #include "pt-theme.h"
 
 #include <math.h>
@@ -33,8 +35,7 @@ static guint signals[N_SIGNALS];
 
 struct _PtSettings {
   GtkWidget parent_instance;
-  GtkWidget *scrim;   /* sole child of the widget; .pt-palette-scrim */
-  GtkWidget *panel;   /* .pt-settings */
+  PtOverlay *overlay; /* scrim, panel, keys, dismiss, open/closed state */
   GtkWidget *list;    /* vertical box of the six rows, built once */
   GtkWidget *value_labels[N_ROWS];
   PtConfig *candidate;  /* live-edited copy; kept until the next open */
@@ -48,10 +49,13 @@ struct _PtSettings {
   char **mono_fams;     /* installed monospace families, sorted */
   char **all_fams;      /* all installed families, sorted */
   int selected;         /* row index */
-  gboolean open;
 };
 
 G_DEFINE_FINAL_TYPE(PtSettings, pt_settings, GTK_TYPE_WIDGET)
+
+static gboolean is_open(PtSettings *s) {
+  return s->overlay != NULL && pt_overlay_is_open(s->overlay);
+}
 
 /* ---------- installed families ---------- */
 /* Collation is sorted on precomputed keys (a Schwartzian transform): qsort
@@ -136,15 +140,12 @@ static gboolean classify_in_dir(const char *name, gpointer user) {
 }
 
 /* ---------- rows ---------- */
-/* Highlight without rebuilding: the value labels are cached by pointer, so the
- * rows must outlive every keystroke. */
+/* The six rows are built once and never rebuilt — the value labels are cached
+ * by pointer, so they must outlive every keystroke — which is why they are
+ * hand-built here rather than handed to a PtRowList. Only the highlight moves,
+ * and that walk is the row list's. */
 static void apply_selection(PtSettings *s) {
-  int i = 0;
-  for (GtkWidget *row = gtk_widget_get_first_child(s->list); row != NULL;
-       row = gtk_widget_get_next_sibling(row), i++) {
-    if (i == s->selected) gtk_widget_add_css_class(row, "selected");
-    else gtk_widget_remove_css_class(row, "selected");
-  }
+  pt_rowlist_mark_selected(s->list, s->selected);
 }
 
 static void add_row(PtSettings *s, int row, const char *name_text) {
@@ -223,7 +224,7 @@ static gboolean replace_str(char **field, const char *next) {
 }
 
 static void adjust(PtSettings *s, int dir) {
-  if (!s->open || s->candidate == NULL) return;
+  if (!is_open(s) || s->candidate == NULL) return;
   PtConfig *c = s->candidate;
   gboolean moved = FALSE;
 
@@ -284,23 +285,21 @@ static void move_selection(PtSettings *s, int delta) {
 }
 
 static void commit_and_close(PtSettings *s) {
-  if (!s->open) return;
+  if (!is_open(s)) return;
   g_signal_emit(s, signals[SIG_COMMITTED], 0);
   pt_settings_close(s);
 }
 
 static void revert_and_close(PtSettings *s) {
-  if (!s->open) return;
+  if (!is_open(s)) return;
   g_signal_emit(s, signals[SIG_REVERTED], 0);
   pt_settings_close(s);
 }
 
 /* ---------- input ---------- */
-static gboolean on_key(GtkEventControllerKey *ctl, guint keyval, guint keycode,
-                       GdkModifierType state, gpointer user) {
-  (void)ctl; (void)keycode;
+/* Runs in the overlay's CAPTURE phase, and only while the dialog is open. */
+static gboolean on_key(guint keyval, GdkModifierType state, gpointer user) {
   PtSettings *s = user;
-  if (!s->open) return FALSE;
 
   switch (keyval) {
     case GDK_KEY_Down:
@@ -311,9 +310,8 @@ static gboolean on_key(GtkEventControllerKey *ctl, guint keyval, guint keycode,
     case GDK_KEY_KP_Up:
       move_selection(s, -1);
       return TRUE;
-    /* Tab must never fall through: nothing inside the dialog is focusable
-     * besides the widget itself, so GTK would hand focus to the terminal
-     * underneath and every later keystroke would land there instead. */
+    /* Tab steps the selection rather than moving focus; the overlay traps it
+     * either way, so it can never reach the terminal underneath. */
     case GDK_KEY_Tab:
     case GDK_KEY_KP_Tab:
       move_selection(s, (state & GDK_SHIFT_MASK) != 0 ? -1 : 1);
@@ -342,16 +340,17 @@ static gboolean on_key(GtkEventControllerKey *ctl, guint keyval, guint keycode,
   }
 }
 
-/* Anything outside the panel dismisses, and dismissing is a cancel. */
-static void on_scrim_pressed(GtkGestureClick *g, int n, double x, double y,
-                             gpointer user) {
-  (void)g; (void)n;
-  PtSettings *s = user;
-  if (!s->open) return;
-  GtkWidget *hit = gtk_widget_pick(s->scrim, x, y, GTK_PICK_DEFAULT);
-  for (GtkWidget *a = hit; a != NULL; a = gtk_widget_get_parent(a))
-    if (a == s->panel) return;
-  revert_and_close(s);
+/* A press outside the panel dismisses, and dismissing is a cancel. */
+static void on_dismissed(PtOverlay *o, gpointer user) {
+  (void)o;
+  revert_and_close(PT_SETTINGS(user));
+}
+
+/* The overlay is hidden by here; the candidate deliberately is not freed — a
+ * "closed" handler still wants to read what was on screen. */
+static void on_overlay_closed(PtOverlay *o, gpointer user) {
+  (void)o;
+  g_signal_emit(PT_SETTINGS(user), signals[SIG_CLOSED], 0);
 }
 
 /* ---------- public API ---------- */
@@ -385,9 +384,7 @@ void pt_settings_open(PtSettings *s, const PtConfig *current,
     s->appearance_dark = !s->appearance_dark;
 
   s->selected = 0;
-  s->open = TRUE;
-  gtk_widget_set_visible(GTK_WIDGET(s), TRUE);
-  gtk_widget_set_can_target(GTK_WIDGET(s), TRUE);
+  pt_overlay_open(s->overlay);
   refresh_values(s);
   apply_selection(s);
   /* The widget itself takes focus: the key controller is on it, and there is
@@ -397,20 +394,12 @@ void pt_settings_open(PtSettings *s, const PtConfig *current,
 
 void pt_settings_close(PtSettings *s) {
   g_return_if_fail(PT_IS_SETTINGS(s));
-  if (!s->open) return;
-  s->open = FALSE;
-  gtk_widget_set_visible(GTK_WIDGET(s), FALSE);
-  /* Belt and braces: an invisible widget is not picked, but this also keeps the
-   * overlay from swallowing clicks meant for the terminal underneath. */
-  gtk_widget_set_can_target(GTK_WIDGET(s), FALSE);
-  /* The candidate survives until the next open: a "closed" handler still wants
-   * to read what was on screen. */
-  g_signal_emit(s, signals[SIG_CLOSED], 0);
+  if (s->overlay != NULL) pt_overlay_close(s->overlay);
 }
 
 gboolean pt_settings_is_open(PtSettings *s) {
   g_return_val_if_fail(PT_IS_SETTINGS(s), FALSE);
-  return s->open;
+  return is_open(s);
 }
 
 const PtConfig *pt_settings_config(PtSettings *s) {
@@ -420,17 +409,17 @@ const PtConfig *pt_settings_config(PtSettings *s) {
 
 /* ---------- GObject ---------- */
 /* No "closed" here on purpose: the window is on its way out too, and its
- * handler would reach for state that dispose has already dropped. */
+ * handler would reach for state that dispose has already dropped. Dropping the
+ * overlay is what takes the scrim down, and it emits nothing either. */
 static void pt_settings_dispose(GObject *obj) {
   PtSettings *s = PT_SETTINGS(obj);
-  s->open = FALSE;
+  g_clear_object(&s->overlay);
   g_clear_pointer(&s->candidate, pt_config_free);
   g_clear_pointer(&s->dark_themes, g_strfreev);
   g_clear_pointer(&s->light_themes, g_strfreev);
   g_clear_pointer(&s->mono_fams, g_strfreev);
   g_clear_pointer(&s->all_fams, g_strfreev);
-  g_clear_pointer(&s->scrim, gtk_widget_unparent);
-  s->panel = s->list = NULL;
+  s->list = NULL;
   for (int i = 0; i < N_ROWS; i++) s->value_labels[i] = NULL;
   G_OBJECT_CLASS(pt_settings_parent_class)->dispose(obj);
 }
@@ -450,32 +439,24 @@ static void pt_settings_class_init(PtSettingsClass *klass) {
 }
 
 static void pt_settings_init(PtSettings *s) {
-  gtk_widget_set_visible(GTK_WIDGET(s), FALSE);
-  gtk_widget_set_can_target(GTK_WIDGET(s), FALSE);
-  /* Focusable so the CAPTURE key controller below actually sees keys. */
+  /* Focusable so the overlay's CAPTURE key controller actually sees keys: the
+   * widget itself is what takes focus, nothing in here wants them. */
   gtk_widget_set_focusable(GTK_WIDGET(s), TRUE);
 
-  s->scrim = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_widget_add_css_class(s->scrim, "pt-palette-scrim");
-  gtk_widget_set_hexpand(s->scrim, TRUE);
-  gtk_widget_set_vexpand(s->scrim, TRUE);
-  gtk_widget_set_parent(s->scrim, GTK_WIDGET(s));
-
-  s->panel = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_widget_add_css_class(s->panel, "pt-settings");
-  gtk_widget_set_halign(s->panel, GTK_ALIGN_CENTER);
-  gtk_widget_set_valign(s->panel, GTK_ALIGN_START);
-  gtk_widget_set_margin_top(s->panel, 90);
-  gtk_widget_set_size_request(s->panel, PT_SETTINGS_WIDTH, -1);
-  gtk_box_append(GTK_BOX(s->scrim), s->panel);
+  s->overlay = pt_overlay_new(GTK_WIDGET(s), "pt-settings");
+  GtkBox *panel = pt_overlay_panel(s->overlay);
+  gtk_widget_set_size_request(GTK_WIDGET(panel), PT_SETTINGS_WIDTH, -1);
+  pt_overlay_set_key_handler(s->overlay, on_key, s);
+  g_signal_connect(s->overlay, "dismissed", G_CALLBACK(on_dismissed), s);
+  g_signal_connect(s->overlay, "closed", G_CALLBACK(on_overlay_closed), s);
 
   GtkWidget *title = gtk_label_new("Settings");
   gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
   gtk_widget_add_css_class(title, "pt-settings-title");
-  gtk_box_append(GTK_BOX(s->panel), title);
+  gtk_box_append(panel, title);
 
   s->list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_box_append(GTK_BOX(s->panel), s->list);
+  gtk_box_append(panel, s->list);
   /* The six rows never change shape, only their values and highlight. */
   rebuild_rows(s);
 
@@ -483,18 +464,7 @@ static void pt_settings_init(PtSettings *s) {
       "↑↓ select · ←→ adjust · Enter save · Esc cancel");
   gtk_label_set_xalign(GTK_LABEL(hint), 0.0f);
   gtk_widget_add_css_class(hint, "pt-settings-hint");
-  gtk_box_append(GTK_BOX(s->panel), hint);
-
-  /* CAPTURE, like the palette: intercept on the way down so no child (and no
-   * default focus handling) gets to the arrows, Enter, Escape or Tab first. */
-  GtkEventController *keys = gtk_event_controller_key_new();
-  gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
-  g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key), s);
-  gtk_widget_add_controller(GTK_WIDGET(s), keys);
-
-  GtkGesture *click = gtk_gesture_click_new();
-  g_signal_connect(click, "pressed", G_CALLBACK(on_scrim_pressed), s);
-  gtk_widget_add_controller(s->scrim, GTK_EVENT_CONTROLLER(click));
+  gtk_box_append(panel, hint);
 }
 
 GtkWidget *pt_settings_new(void) {

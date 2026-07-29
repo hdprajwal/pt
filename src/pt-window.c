@@ -1537,28 +1537,22 @@ static void action_zoom(PtWindow *w, int delta) {
 /* ---------- shortcuts ---------- */
 
 /* The shortcut controller below runs in the CAPTURE phase on the window, so it
- * sees every accelerator before the palette's own key controller does. Letting
- * one through while the palette is up would strand it: almost all of these
+ * sees every accelerator before an overlay's own key controller does. Letting
+ * one through while an overlay is up would strand it: almost all of these
  * actions end in pt_pane_grid_focus_terminal, focus would land on a terminal in
- * a sibling subtree, the palette would drop out of the key propagation path
- * entirely, and the overlay would sit there visible with Escape dead. So while
- * the palette is open every accelerator reports "not handled" and falls through
- * to it — ⌃K alone still acts, as a toggle.
- *
- * The settings dialog is the same story with the same overlay stack and the
- * same CAPTURE-phase problem, so it blocks here too; ⌃, is its toggle. */
-static gboolean palette_blocks(PtWindow *w) {
-  if (w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette)))
-    return TRUE;
-  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)))
-    return TRUE;
-  return FALSE;
+ * a sibling subtree, the overlay would drop out of the key propagation path
+ * entirely, and it would sit there visible with Escape dead. So while either
+ * overlay is open every accelerator reports "not handled" and falls through to
+ * it — each overlay's own toggle (⌃K, ⌃,) still acts. */
+static gboolean overlay_open(PtWindow *w) {
+  return (w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette))) ||
+         (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)));
 }
 
 /* Two accelerators stay live, each a toggle for its own overlay. Both test
- * their own widget first — otherwise palette_blocks(), which now covers the
- * other overlay too, would eat the toggle — and only then defer to whatever
- * else is up. */
+ * their own widget first — otherwise overlay_open(), which covers the other
+ * overlay too, would eat the toggle — and only then defer to whatever else is
+ * up. */
 static gboolean sc_palette(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
   PtWindow *w = PT_WINDOW(u);
@@ -1566,7 +1560,7 @@ static gboolean sc_palette(GtkWidget *wg, GVariant *a, gpointer u) {
     pt_palette_close(PT_PALETTE(w->palette));
     return TRUE;
   }
-  if (palette_blocks(w)) return FALSE;   /* settings dialog is up */
+  if (overlay_open(w)) return FALSE;   /* settings dialog is up */
   action_open_palette(w);
   return TRUE;
 }
@@ -1581,7 +1575,7 @@ static gboolean sc_settings(GtkWidget *wg, GVariant *a, gpointer u) {
     if (w->config != NULL) apply_config(w);
     return TRUE;
   }
-  if (palette_blocks(w)) return FALSE;   /* palette is up */
+  if (overlay_open(w)) return FALSE;   /* palette is up */
   action_open_settings(w);
   return TRUE;
 }
@@ -1692,7 +1686,7 @@ static gboolean shortcut_dispatch(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
   const ShortcutCtx *c = u;
   PtWindow *w = c->w;
-  if (palette_blocks(w)) return FALSE;
+  if (overlay_open(w)) return FALSE;
   switch (c->id) {
     case PT_ACTION_SWITCH_PROJECT:   action_switch_project(w, c->arg); break;
     case PT_ACTION_SWITCH_TAB:       action_switch_tab(w, c->arg); break;
