@@ -1763,9 +1763,13 @@ char *pt_term_core_grid_text(PtTermCore *c) {
 }
 
 /* One PtCell from the walk's current cell. `fg_default` is the render state's
- * default foreground, resolved here so a consumer never asks twice. */
+ * default foreground, resolved here so a consumer never asks twice. Zeroed
+ * first, so every byte of the struct — padding and the text tail past the NUL
+ * included — is deterministic and two fills of the same cell compare equal
+ * bytewise, whatever the buffer held before. */
 static void fill_cell(PtCell *out, GhosttyRenderStateRowCells cells,
                       GhosttyColorRgb fg_default) {
+  memset(out, 0, sizeof *out);
   uint32_t glen = 0;
   ghostty_render_state_row_cells_get(cells,
       GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
@@ -1854,10 +1858,17 @@ int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max) {
  * The frame-shaped read: one iterator pair for the whole pass instead of the
  * per-call seek row_cells pays, so a full repaint is O(rows) iterator steps
  * rather than O(rows²). Each next() fills exactly what row_cells would for
- * that row — both go through fill_cell with the same resolved default fg. */
+ * that row — both go through fill_cell with the same resolved default fg.
+ *
+ * The reader owns the row buffer and grows it to the widest row it meets, so
+ * no caller ever guesses a column count and no width is ever truncated — an
+ * ultrawide pane at a small font can pass 512 columns, and DECCOLM can move
+ * the grid's width away from what the pty was told. */
 struct PtRowReader {
   PtRowWalk w;
   GhosttyColorRgb fg_default;
+  PtCell *cells;              /* owned; handed out by rows_next */
+  int cap;
 };
 
 PtRowReader *pt_term_core_rows_begin(PtTermCore *c) {
@@ -1869,24 +1880,36 @@ PtRowReader *pt_term_core_rows_begin(PtTermCore *c) {
   ghostty_render_state_get(c->render_state,
                            GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
                            &r->fg_default);
+  /* Seeded from the pty size so the common case never reallocates; the walk
+   * below still grows past it whenever a row turns out wider. */
+  r->cap = MAX(c->cols, 1);
+  r->cells = g_new(PtCell, r->cap);
   return r;
 }
 
-int pt_term_core_rows_next(PtRowReader *r, PtCell *out, int max) {
+int pt_term_core_rows_next(PtRowReader *r, const PtCell **out) {
+  *out = r->cells;
   if (!ghostty_render_state_row_iterator_next(r->w.iter)) return -1;
   if (ghostty_render_state_row_get(r->w.iter,
                                    GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                                    &r->w.cells) != GHOSTTY_SUCCESS)
     return 0;                 /* this row is unreadable; the walk goes on */
   int n = 0;
-  while (n < max && ghostty_render_state_row_cells_next(r->w.cells))
-    fill_cell(&out[n++], r->w.cells, r->fg_default);
+  while (ghostty_render_state_row_cells_next(r->w.cells)) {
+    if (n == r->cap) {
+      r->cap *= 2;
+      r->cells = g_renew(PtCell, r->cells, r->cap);
+    }
+    fill_cell(&r->cells[n++], r->w.cells, r->fg_default);
+  }
+  *out = r->cells;            /* again: the grow may have moved the buffer */
   return n;
 }
 
 void pt_term_core_rows_end(PtRowReader *r) {
   if (r == NULL) return;
   row_walk_end(&r->w);
+  g_free(r->cells);
   g_free(r);
 }
 

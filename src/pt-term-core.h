@@ -253,14 +253,17 @@ int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max);
  *
  * pt_term_core_row_cells seeks from the top on every call, so reading a whole
  * frame with it costs O(rows²) iterator steps. A reader walks every visible
- * row in one pass instead: begin at the top, next() fills `out` with the next
- * row's cells (identical to what row_cells reports for that row) and returns
- * the count, or -1 past the last row. A row the library refuses to read
- * returns 0 and the walk continues. begin() returns NULL when the walk cannot
- * start at all. Same sync contract as row_cells; end() is NULL-safe. */
+ * row in one pass instead: begin at the top, next() points *out at the next
+ * row's cells (identical to what row_cells reports for that row, every cell,
+ * however wide the row — the reader owns the buffer and grows it, so nothing
+ * is ever truncated) and returns the count, or -1 past the last row. A row
+ * the library refuses to read returns 0 and the walk continues. The cells
+ * behind *out belong to the reader and are valid until the next next() or
+ * end(). begin() returns NULL when the walk cannot start at all. Same sync
+ * contract as row_cells; end() is NULL-safe. */
 typedef struct PtRowReader PtRowReader;
 PtRowReader *pt_term_core_rows_begin(PtTermCore *c);
-int pt_term_core_rows_next(PtRowReader *r, PtCell *out, int max);
+int pt_term_core_rows_next(PtRowReader *r, const PtCell **out);
 void pt_term_core_rows_end(PtRowReader *r);
 
 /* Whether any cell of visible row `row` carries an OSC 8 link — the row flag

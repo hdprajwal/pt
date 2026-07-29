@@ -784,9 +784,10 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
                        th_sel.b / 255.0f, (float)th_sel.a };
 
   /* One row of flat cells at a time, all rows in a single sequential walk —
-   * plain memory from here down, no per-cell FFI. The stack array bounds the
-   * row at 512 cells; a pane wider than that clips its tail. */
-  PtCell cells[512];
+   * plain memory from here down, no per-cell FFI. The reader owns the row
+   * buffer and sizes it to the row, so every column renders whatever the
+   * pane's width. */
+  const PtCell *cells;
   /* The run being accumulated: glyphs for consecutive cells that share a font
    * and a colour. Flushed on any change, on a blank, and at end of row. */
   PangoGlyphString *run = pango_glyph_string_new();
@@ -797,8 +798,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   PtRowReader *rows = pt_term_core_rows_begin(t->core);
   int ncells;
   while (rows != NULL &&
-         (ncells = pt_term_core_rows_next(rows, cells,
-                                          G_N_ELEMENTS(cells))) >= 0) {
+         (ncells = pt_term_core_rows_next(rows, &cells)) >= 0) {
     /* Backgrounds first, merged: adjacent cells with the same effective
      * background (selection included) become one rect, the way adjacent
      * glyphs already share one text node. Laying the whole row's backgrounds

@@ -2067,8 +2067,8 @@ static void test_set_colors_reach_cells(void) {
 
 static void test_rows_walk_matches_row_cells(void) {
   /* The one-pass reader must agree with the random-access read cell for cell:
-     styles, colors, a wide char and a link all in play. Both sides fill
-     zeroed buffers, so memcmp covers padding and text tails too. */
+     styles, colors, a wide char and a link all in play. fill_cell zeroes each
+     cell before filling, so memcmp covers padding and text tails too. */
   PtTermCore *core = cursor_core_new();
   pt_term_core_write(core,
       "\033[2;1H\033[1;31mred\033[0m \xE6\xBC\xA2 "
@@ -2078,21 +2078,53 @@ static void test_rows_walk_matches_row_cells(void) {
 
   PtRowReader *r = pt_term_core_rows_begin(core);
   g_assert_nonnull(r);
-  PtCell walked[80], sought[80];
+  const PtCell *walked;
+  PtCell sought[80];
   int rows = 0;
-  for (;;) {
-    memset(walked, 0, sizeof walked);
-    int n = pt_term_core_rows_next(r, walked, 80);
-    if (n < 0) break;
-    memset(sought, 0, sizeof sought);
+  int n;
+  while ((n = pt_term_core_rows_next(r, &walked)) >= 0) {
     g_assert_cmpint(pt_term_core_row_cells(core, rows, sought, 80), ==, n);
     g_assert_cmpint(memcmp(walked, sought, (size_t)n * sizeof(PtCell)), ==, 0);
     rows++;
   }
   /* Past the last row the walk stays done. */
-  g_assert_cmpint(pt_term_core_rows_next(r, walked, 80), ==, -1);
+  g_assert_cmpint(pt_term_core_rows_next(r, &walked), ==, -1);
   pt_term_core_rows_end(r);
   g_assert_cmpint(rows, ==, 24);
+  pt_term_core_free(core);
+}
+
+static void test_rows_walk_wide_pane(void) {
+  /* A pane wider than any fixed row buffer: 600 columns. Nothing may be
+     truncated — the reader grows its buffer to the row, and text parked past
+     column 512 comes back through both read paths. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 600, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready-marker"));
+  /* Row 2, columns 591-594 (1-based): all beyond the old 512-cell clip. */
+  pt_term_core_write(core, "\033[2;591HWIDE", -1);
+  g_assert_true(wait_for_text(core, "WIDE"));
+  pt_term_core_sync(core);
+
+  static PtCell sought[600];   /* static: too big for the test's stack */
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, sought, 600), ==, 600);
+  g_assert_cmpstr(sought[590].text, ==, "W");
+  g_assert_cmpstr(sought[593].text, ==, "E");
+
+  PtRowReader *r = pt_term_core_rows_begin(core);
+  g_assert_nonnull(r);
+  const PtCell *walked;
+  g_assert_cmpint(pt_term_core_rows_next(r, &walked), ==, 600);  /* row 0 */
+  g_assert_cmpint(pt_term_core_rows_next(r, &walked), ==, 600);  /* row 1 */
+  g_assert_cmpstr(walked[590].text, ==, "W");
+  g_assert_cmpstr(walked[591].text, ==, "I");
+  g_assert_cmpstr(walked[592].text, ==, "D");
+  g_assert_cmpstr(walked[593].text, ==, "E");
+  g_assert_cmpint(memcmp(walked, sought, sizeof sought), ==, 0);
+  pt_term_core_rows_end(r);
   pt_term_core_free(core);
 }
 
@@ -2590,6 +2622,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/row-cells-wide", test_row_cells_wide);
   g_test_add_func("/termcore/row-cells-selected", test_row_cells_selected);
   g_test_add_func("/termcore/rows-walk", test_rows_walk_matches_row_cells);
+  g_test_add_func("/termcore/rows-walk-wide", test_rows_walk_wide_pane);
   g_test_add_func("/termcore/row-link-helpers", test_row_link_helpers);
   g_test_add_func("/termcore/set-colors", test_set_colors_reach_cells);
   g_test_add_func("/termcore/cursor-info", test_cursor_info);
