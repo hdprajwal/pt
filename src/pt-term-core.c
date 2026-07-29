@@ -515,6 +515,7 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
    * terminal is written to. */
   if (got_data) c->sb_dirty = TRUE;
   if (got_data) poll_mode_edges(c);
+  if (got_data && c->cbs.output != NULL) c->cbs.output(c, c->cbs_user);
   if (got_data && c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
   if (c->eof) { c->fd_source = 0; return G_SOURCE_REMOVE; }
   return G_SOURCE_CONTINUE;

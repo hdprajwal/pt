@@ -9,7 +9,8 @@ typedef struct { GMainLoop *loop; PtTermCore *core;
                  char comm[64]; char title[128];
                  int osc_code; char osc_payload[128]; int osc_count;
                  char clip[256]; gsize clip_len; gboolean clip_primary;
-                 int clip_count; } Ctx;
+                 int clip_count;
+                 int draw_count, output_count; } Ctx;
 
 static void on_draw(PtTermCore *core, gpointer user) {
   Ctx *ctx = user;
@@ -1794,6 +1795,48 @@ static void test_cursor_wide_tail(void) {
   pt_term_core_free(core);
 }
 
+/* The blink phase goes back to visible on output, so the consumer has to be
+   able to tell output from any other reason to redraw. It cannot do that off
+   `draw`: scrolling fires that too, and every keypress snaps the viewport back
+   to the bottom, so a shell with echo off would have typing pass for output and
+   hold the cursor solid forever. */
+static void count_draw(PtTermCore *core, gpointer user) {
+  (void)core;
+  ((Ctx *)user)->draw_count++;
+}
+
+static void count_output(PtTermCore *core, gpointer user) {
+  (void)core;
+  ((Ctx *)user)->output_count++;
+}
+
+static void test_output_callback_is_output_only(void) {
+  Ctx ctx = {0};
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .draw = count_draw, .output = count_output };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  g_assert_true(wait_for_text(core, "ready-marker"));
+
+  /* Bytes from the child are output, and draw with it. */
+  g_assert_cmpint(ctx.output_count, >, 0);
+  g_assert_cmpint(ctx.draw_count, >=, ctx.output_count);
+
+  /* Moving pt's own view of the terminal is not. */
+  int output_before = ctx.output_count;
+  int draw_before = ctx.draw_count;
+  pt_term_core_scroll_delta(core, -3);
+  pt_term_core_scroll_bottom(core);
+  pt_term_core_reset(core);
+  g_assert_cmpint(ctx.draw_count, >, draw_before);
+  g_assert_cmpint(ctx.output_count, ==, output_before);
+
+  pt_term_core_free(core);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
@@ -1876,5 +1919,7 @@ int main(int argc, char *argv[]) {
                   test_cursor_style_reset_to_default);
   g_test_add_func("/termcore/cursor-blink-mode-12", test_cursor_blink_mode_12);
   g_test_add_func("/termcore/cursor-wide-tail", test_cursor_wide_tail);
+  g_test_add_func("/termcore/output-callback-only-for-output",
+                  test_output_callback_is_output_only);
   return g_test_run();
 }
