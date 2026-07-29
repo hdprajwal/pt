@@ -302,6 +302,155 @@ void pt_osc_scan_clear(PtOscScan *s) {
   s->state = PT_OSC_GROUND;
 }
 
+/* ---- desktop notifications (OSC 9, OSC 777) ----
+ *
+ * See pt-term-core-internal.h for why the ConEmu tree is walked in full rather
+ * than just checking for the `4;` progress prefix: ghostty routes eight other
+ * subcodes away from notifications too, and a pane that popped a desktop
+ * notification saying "9;/home/me" every time a shell reported its cwd would
+ * be worse than one that popped none. */
+
+/* Is this OSC 9 payload a notification, a progress report, or one of the
+ * ConEmu extensions pt does not implement? Mirrors the switch in ghostty's
+ * terminal/osc/parsers/osc9.zig, including every length check: each `break
+ * :conemu` there — an extension that is cut short, or carries a subcode
+ * ghostty does not know — falls through to a notification, and so does each
+ * SHOW here. */
+static PtOscNotifyKind osc9_kind(const char *p, gsize len) {
+  if (len == 0) return PT_OSC_NOTIFY_SHOW;
+  switch (p[0]) {
+    case '1':
+      if (len < 2) return PT_OSC_NOTIFY_SHOW;
+      switch (p[1]) {
+        case ';': return PT_OSC_NOTIFY_NONE;        /* 9;1 sleep */
+        case '0':                                   /* 9;10 xterm emulation */
+          /* Bare `9;10` means both on; with an argument only 0..3 are ConEmu. */
+          if (len == 2) return PT_OSC_NOTIFY_NONE;
+          if (len < 4 || p[2] != ';') return PT_OSC_NOTIFY_SHOW;
+          return (p[3] >= '0' && p[3] <= '3') ? PT_OSC_NOTIFY_NONE
+                                              : PT_OSC_NOTIFY_SHOW;
+        case '1':                                   /* 9;11 comment */
+          if (len < 3 || p[2] != ';') return PT_OSC_NOTIFY_SHOW;
+          return PT_OSC_NOTIFY_NONE;
+        /* 9;12 marks a prompt start and takes no argument, so ghostty accepts
+         * it whatever follows — `9;12;anything` is still the mark. */
+        case '2': return PT_OSC_NOTIFY_NONE;
+        default:  return PT_OSC_NOTIFY_SHOW;
+      }
+    /* 9;2 message box, 9;3 tab title, 9;6 guimacro, 9;7 run process,
+     * 9;8 environment variable, 9;9 report cwd: all `<digit>;<text>`, and all
+     * things pt drops on the floor for now. */
+    case '2': case '3': case '6': case '7': case '8': case '9':
+      if (len < 2 || p[1] != ';') return PT_OSC_NOTIFY_SHOW;
+      return PT_OSC_NOTIFY_NONE;
+    case '4':                                       /* 9;4 progress report */
+      if (len < 3 || p[1] != ';') return PT_OSC_NOTIFY_SHOW;
+      return (p[2] >= '0' && p[2] <= '4') ? PT_OSC_NOTIFY_PROGRESS
+                                          : PT_OSC_NOTIFY_SHOW;
+    /* 9;5 waits for input and takes no argument either. */
+    case '5': return PT_OSC_NOTIFY_NONE;
+    default:  return PT_OSC_NOTIFY_SHOW;
+  }
+}
+
+PtOscNotifyKind pt_osc_notification(int code, const char *payload, gsize len,
+                                    PtOscNotification *out) {
+  if (code == 9) {
+    PtOscNotifyKind kind = osc9_kind(payload, len);
+    if (kind == PT_OSC_NOTIFY_SHOW && out != NULL) {
+      out->title = "";        /* OSC 9 has no title; the consumer supplies one */
+      out->title_len = 0;
+      out->body = payload;
+      out->body_len = len;
+    }
+    return kind;
+  }
+  if (code != 777) return PT_OSC_NOTIFY_NONE;
+
+  /* OSC 777 is rxvt's extension slot and `notify` is the only extension in it
+   * pt (or ghostty) implements, so the name has to match exactly. Both
+   * separators have to be there: with no second ';' there is no title, which
+   * ghostty treats as malformed rather than as a body-only notification
+   * (terminal/osc/parsers/rxvt_extension.zig). The body is the rest, extra
+   * semicolons and all. */
+  static const char ext[] = "notify";
+  const char *k = memchr(payload, ';', len);
+  if (k == NULL) return PT_OSC_NOTIFY_NONE;
+  gsize ext_len = (gsize)(k - payload);
+  if (ext_len != sizeof(ext) - 1 || memcmp(payload, ext, ext_len) != 0)
+    return PT_OSC_NOTIFY_NONE;
+  const char *rest = k + 1;
+  const char *t = memchr(rest, ';', len - (gsize)(rest - payload));
+  if (t == NULL) return PT_OSC_NOTIFY_NONE;
+  if (out != NULL) {
+    out->title = rest;
+    out->title_len = (gsize)(t - rest);
+    out->body = t + 1;
+    out->body_len = len - (gsize)(t + 1 - payload);
+  }
+  return PT_OSC_NOTIFY_SHOW;
+}
+
+/* Copy at most `cap` bytes of `src` into `dst` (which holds cap+1), and say
+ * whether the text may be shown at all.
+ *
+ * Two things happen here that ghostty does not do, both because the far end is
+ * the session bus rather than a Zig string: text that is not valid UTF-8 is
+ * refused outright (the payload came from whatever was writing to the pty, and
+ * a GNotification body is offered to the desktop as UTF-8 — this is the same
+ * rule pt already applies to OSC 52 clipboard writes), and the truncation
+ * backs up to a character boundary instead of cutting mid-codepoint. */
+static gboolean notify_copy(char *dst, gsize cap, const char *src, gsize len) {
+  if (!g_utf8_validate(src, (gssize)len, NULL)) return FALSE;
+  gsize n = len;
+  if (n > cap) {
+    const char *p = src + cap;
+    /* Validated above, so walking back off continuation bytes always lands on
+     * a lead byte, and never before src (the first byte cannot be one). */
+    while (p > src && ((guchar)*p & 0xC0) == 0x80) p--;
+    n = (gsize)(p - src);
+  }
+  memcpy(dst, src, n);
+  dst[n] = '\0';
+  return TRUE;
+}
+
+/* The process-wide rate limit. Ghostty's is the same shape and the same two
+ * numbers (Surface.zig showDesktopNotification): one notification per second
+ * whatever it says, and five seconds before the same text may repeat. Ghostty
+ * compares a Wyhash of title+body; pt compares the text itself, which is
+ * already capped at 63+255 bytes and so costs a memcmp, and cannot collide. */
+#define PT_NOTIFY_MIN_INTERVAL_US    ((gint64)1 * G_USEC_PER_SEC)
+#define PT_NOTIFY_REPEAT_INTERVAL_US ((gint64)5 * G_USEC_PER_SEC)
+
+static gboolean notify_seen;
+static gint64 notify_last_us;
+static char notify_last_title[PT_NOTIFY_TITLE_MAX + 1];
+static char notify_last_body[PT_NOTIFY_BODY_MAX + 1];
+
+gboolean pt_notify_gate(gint64 now_us, const char *title, const char *body) {
+  if (notify_seen) {
+    gint64 since = now_us - notify_last_us;
+    if (since < PT_NOTIFY_MIN_INTERVAL_US) return FALSE;
+    if (since < PT_NOTIFY_REPEAT_INTERVAL_US &&
+        strcmp(title, notify_last_title) == 0 &&
+        strcmp(body, notify_last_body) == 0)
+      return FALSE;
+  }
+  notify_seen = TRUE;
+  notify_last_us = now_us;
+  g_strlcpy(notify_last_title, title, sizeof notify_last_title);
+  g_strlcpy(notify_last_body, body, sizeof notify_last_body);
+  return TRUE;
+}
+
+void pt_notify_gate_reset(void) {
+  notify_seen = FALSE;
+  notify_last_us = 0;
+  notify_last_title[0] = '\0';
+  notify_last_body[0] = '\0';
+}
+
 /* ---- OSC 52 clipboard writes ----
  *
  * `ESC ] 52 ; <targets> ; <base64> BEL` is how anything on the far side of an
