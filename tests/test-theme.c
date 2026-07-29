@@ -269,7 +269,20 @@ static void test_is_dark_by_name(void) {
   g_file_set_contents(shadow, "background = #ffffff\n", -1, NULL);
   g_assert_false(pt_theme_is_dark(dir, "pt-dark"));
 
+  /* Asked again with nothing changed — now served from the mtime-keyed
+   * cache — the answers hold. */
+  g_assert_false(pt_theme_is_dark(dir, "sunny"));
+  g_assert_true(pt_theme_is_dark(dir, "midnight"));
+
+  /* Rewriting a file re-classifies it: the cache must never serve a stale
+   * answer for a changed file. The two bodies differ in length so the
+   * fingerprint moves even on a filesystem with coarse mtimes. */
+  g_file_set_contents(lightf, "background = #0d0f12\n", -1, NULL);
+  g_assert_true(pt_theme_is_dark(dir, "sunny"));
+
+  /* Deleting the shadow falls back to the builtin, not the cached file. */
   g_remove(shadow);
+  g_assert_true(pt_theme_is_dark(dir, "pt-dark"));
   g_remove(lightf);
   g_remove(darkf);
   g_rmdir(dir);

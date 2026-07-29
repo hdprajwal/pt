@@ -1,5 +1,6 @@
 #include "pt-theme.h"
 #include "pt-config.h"   /* pt_kv_parse */
+#include <gio/gio.h>     /* file fingerprint for the is_dark cache */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -328,8 +329,44 @@ char *pt_theme_load_text(const char *dir, const char *name) {
 }
 
 gboolean pt_theme_is_dark(const char *dir, const char *name) {
+  /* Every settings open classifies every installed theme, and the answer only
+   * moves when the file does: cache it under path + mtime + size, so an
+   * unchanged file is a hash lookup instead of a read + parse. An edit makes a
+   * new key rather than updating the old one — stale entries just sit unused
+   * (a handful of bytes per edit of a theme file). Only real files are cached;
+   * the builtin/unknown fallback has no fingerprint to key on and its path is
+   * already cheap (one small parse, no disk). */
+  static GHashTable *cache;   /* "path:mtime.usec:size" -> classification */
+  char *path = g_build_filename(dir, name, NULL);
+  GFile *f = g_file_new_for_path(path);
+  GFileInfo *info = g_file_query_info(
+      f,
+      G_FILE_ATTRIBUTE_TIME_MODIFIED "," G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC
+      "," G_FILE_ATTRIBUTE_STANDARD_SIZE,
+      G_FILE_QUERY_INFO_NONE, NULL, NULL);
+  g_object_unref(f);
+  char *key = NULL;
+  if (info != NULL) {
+    key = g_strdup_printf(
+        "%s:%" G_GUINT64_FORMAT ".%06u:%" G_GINT64_FORMAT, path,
+        g_file_info_get_attribute_uint64(info, G_FILE_ATTRIBUTE_TIME_MODIFIED),
+        g_file_info_get_attribute_uint32(info,
+                                         G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC),
+        (gint64)g_file_info_get_size(info));
+    g_object_unref(info);
+    gpointer hit;
+    if (cache != NULL && g_hash_table_lookup_extended(cache, key, NULL, &hit)) {
+      g_free(key);
+      g_free(path);
+      return GPOINTER_TO_INT(hit);
+    }
+  }
+  g_free(path);
   char *text = pt_theme_load_text(dir, name);
-  if (text == NULL) return TRUE;   /* unknown name: pt's own theme is dark */
+  if (text == NULL) {
+    g_free(key);
+    return TRUE;   /* unknown name: pt's own theme is dark */
+  }
   PtTheme *t = pt_theme_parse(text);
   /* Straight off the parsed background rather than through pt_theme_resolve():
    * the answer does not depend on the chrome tokens or on any override, and a
@@ -339,6 +376,11 @@ gboolean pt_theme_is_dark(const char *dir, const char *name) {
   gboolean dark = bg_is_dark(&t->background);
   pt_theme_free(t);
   g_free(text);
+  if (key != NULL) {
+    if (cache == NULL)
+      cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    g_hash_table_insert(cache, g_steal_pointer(&key), GINT_TO_POINTER(dark));
+  }
   return dark;
 }
 

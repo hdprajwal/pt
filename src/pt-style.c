@@ -60,6 +60,16 @@ void pt_style_apply(const PtResolvedTheme *rt, const PtConfig *cfg) {
     g_string_append_printf(css, "  %s: %spx;\n", font_roles[i].var, nbuf);
   }
   g_string_append(css, "}\n");
+  /* Reloading the provider restyles every widget on the display, and the
+   * settings dialog re-applies at key-repeat rate: when the generated text is
+   * exactly what is already loaded, loading it again buys nothing. Building
+   * the string just to compare it is the cheap side of that trade. */
+  static char *last_css;
+  if (g_strcmp0(last_css, css->str) == 0) {
+    g_string_free(css, TRUE);
+    return;
+  }
   gtk_css_provider_load_from_string(var_provider, css->str);
-  g_string_free(css, TRUE);
+  g_free(last_css);
+  last_css = g_string_free(css, FALSE);
 }

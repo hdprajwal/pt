@@ -5,6 +5,7 @@
 #include <math.h>
 #include <pango/pangocairo.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* The dialog is deliberately tiny: appearance, theme, two font sizes, two
  * families. Layout and padding stay out of it — those are the app's opinion,
@@ -53,10 +54,30 @@ struct _PtSettings {
 G_DEFINE_FINAL_TYPE(PtSettings, pt_settings, GTK_TYPE_WIDGET)
 
 /* ---------- installed families ---------- */
-static int cmp_name(const void *a, const void *b) {
-  const char *const *x = a;
-  const char *const *y = b;
-  return g_utf8_collate(*x, *y);
+/* Collation is sorted on precomputed keys (a Schwartzian transform): qsort
+ * runs the comparator O(n log n) times, and g_utf8_collate in there would
+ * re-derive both sides' collation keys on every call — with hundreds of
+ * installed families that is the slow part of opening the dialog. One
+ * g_utf8_collate_key per name, strcmp in the comparator, keys freed after. */
+typedef struct { char *key; char *name; } KeyedName;
+
+static int cmp_keyed(const void *a, const void *b) {
+  return strcmp(((const KeyedName *)a)->key, ((const KeyedName *)b)->key);
+}
+
+static void sort_families(GPtrArray *names) {
+  if (names->len < 2) return;
+  KeyedName *v = g_new(KeyedName, names->len);
+  for (guint i = 0; i < names->len; i++) {
+    v[i].name = g_ptr_array_index(names, i);
+    v[i].key = g_utf8_collate_key(v[i].name, -1);
+  }
+  qsort(v, names->len, sizeof *v, cmp_keyed);
+  for (guint i = 0; i < names->len; i++) {
+    g_ptr_array_index(names, i) = v[i].name;
+    g_free(v[i].key);
+  }
+  g_free(v);
 }
 
 /* Snapshot the font map into two sorted, NULL-terminated vectors. Pango owns
@@ -81,8 +102,8 @@ static void collect_families(PtSettings *s) {
   }
   g_free(fams);
 
-  if (all->len > 1) qsort(all->pdata, all->len, sizeof(char *), cmp_name);
-  if (mono->len > 1) qsort(mono->pdata, mono->len, sizeof(char *), cmp_name);
+  sort_families(all);
+  sort_families(mono);
   g_ptr_array_add(all, NULL);
   g_ptr_array_add(mono, NULL);
   s->all_fams = (char **)g_ptr_array_free(all, FALSE);

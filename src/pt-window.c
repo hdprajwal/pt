@@ -96,22 +96,76 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
 static char accent_env[PT_ACCENT_COUNT][8] =
     { "#6ee7a0", "#8ab4f8", "#f2b25c", "#c99bf0", "#5ed3c4", "#e0849b" };
 
+/* The last theme parse, kept between renders: the settings dialog emits
+ * "changed" at key-repeat rate when an arrow is held on a row, and re-reading
+ * and re-parsing the theme file per repeat is pure waste when neither the
+ * name nor the file moved. Keyed by name + file stamp, and dropped outright
+ * when the themes-dir monitor fires — which also covers a same-second rewrite
+ * the stamp cannot see. Module-level like accent_env: the themes dir is
+ * per-user, not per-window. */
+static char *theme_cache_name;
+static char *theme_cache_stamp;   /* NULL = no file backing (builtin/missing) */
+static PtTheme *theme_cache_theme;
+
+static void theme_cache_drop(void) {
+  g_clear_pointer(&theme_cache_name, g_free);
+  g_clear_pointer(&theme_cache_stamp, g_free);
+  g_clear_pointer(&theme_cache_theme, pt_theme_free);
+}
+
+/* mtime+size of the named theme's file; NULL when there is no file (the
+ * builtin, or a missing name — both render the same fallback text every time,
+ * so "no file" is itself a valid stamp for the cached name). */
+static char *theme_file_stamp(const char *dir, const char *name) {
+  char *path = g_build_filename(dir, name, NULL);
+  GStatBuf st;
+  char *stamp = NULL;
+  if (g_stat(path, &st) == 0)
+    stamp = g_strdup_printf("%" G_GINT64_FORMAT ":%" G_GINT64_FORMAT,
+                            (gint64)st.st_mtime, (gint64)st.st_size);
+  g_free(path);
+  return stamp;
+}
+
 /* Parse `cfg`'s theme and push colors+fonts everywhere. Deliberately takes the
  * config rather than reading w->config: the settings dialog previews a
  * candidate it still owns, and nothing about rendering it may put that
  * candidate anywhere the debounced save could later find it. */
 static void render_config(const PtConfig *cfg) {
   char *tdir = pt_theme_dir();
-  char *text = pt_theme_load_text(tdir, cfg->theme);
-  if (text == NULL) {
-    g_warning("pt: theme '%s' not found; using pt-dark", cfg->theme);
-    text = g_strdup(pt_theme_builtin_pt_dark());
+  char *stamp = theme_file_stamp(tdir, cfg->theme);
+  if (theme_cache_theme == NULL ||
+      g_strcmp0(theme_cache_name, cfg->theme) != 0 ||
+      g_strcmp0(theme_cache_stamp, stamp) != 0) {
+    char *text = pt_theme_load_text(tdir, cfg->theme);
+    if (text == NULL) {
+      g_warning("pt: theme '%s' not found; using pt-dark", cfg->theme);
+      text = g_strdup(pt_theme_builtin_pt_dark());
+    }
+    theme_cache_drop();
+    theme_cache_theme = pt_theme_parse(text);
+    theme_cache_name = g_strdup(cfg->theme);
+    theme_cache_stamp = g_steal_pointer(&stamp);
+    g_free(text);
   }
-  PtTheme *theme = pt_theme_parse(text);
+  g_free(stamp);
+  /* Resolution is re-run every time — it is 33 color derivations, and it must
+   * see the config's app_overrides, which change independently of the file. */
   PtResolvedTheme rt;
-  pt_theme_resolve(theme, cfg->app_overrides, &rt);
+  pt_theme_resolve(theme_cache_theme, cfg->app_overrides, &rt);
   pt_style_apply(&rt, cfg);
-  pt_terminal_set_theme(&rt);
+  /* Push the theme into the terminals only when it moved: a font-size drag
+   * re-renders per key-repeat with an identical theme, and set_theme repaints
+   * every pane. memcmp is safe here because pt_theme_resolve zeroes the whole
+   * struct before filling it; a stray padding byte could at worst force a
+   * redundant push, never skip a real change. */
+  static PtResolvedTheme last_pushed;
+  static gboolean theme_pushed;
+  if (!theme_pushed || memcmp(&last_pushed, &rt, sizeof rt) != 0) {
+    pt_terminal_set_theme(&rt);
+    last_pushed = rt;
+    theme_pushed = TRUE;
+  }
   pt_terminal_set_font(cfg->font_family, cfg->font_size);
   pt_terminal_set_mouse_reporting(cfg->mouse_reporting);
   pt_terminal_set_osc52(cfg->osc52);
@@ -122,8 +176,6 @@ static void render_config(const PtConfig *cfg) {
     g_strlcpy(accent_env[i], hex, sizeof accent_env[i]);
     g_free(hex);
   }
-  pt_theme_free(theme);
-  g_free(text);
   g_free(tdir);
 }
 
@@ -215,6 +267,10 @@ static void on_theme_file_changed(GFileMonitor *m, GFile *f, GFile *other,
       ev != G_FILE_MONITOR_EVENT_CREATED)
     return;
   PtWindow *w = PT_WINDOW(user);
+  /* Dropped immediately, not from the debounced reload: the reload bails while
+   * the settings dialog is open, but the dialog's own previews keep calling
+   * render_config and must see the edited file, not the cached parse. */
+  theme_cache_drop();
   if (w->theme_reload_source != 0) g_source_remove(w->theme_reload_source);
   w->theme_reload_source = g_timeout_add(150, theme_reload_now, w);
 }
@@ -1774,6 +1830,7 @@ static void pt_window_dispose(GObject *obj) {
   }
   g_clear_object(&w->config_monitor);
   g_clear_object(&w->theme_monitor);
+  theme_cache_drop();   /* module-level, but nothing renders past dispose */
   if (w->config_reload_source != 0) {
     g_source_remove(w->config_reload_source);
     w->config_reload_source = 0;

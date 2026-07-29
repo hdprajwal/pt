@@ -55,7 +55,9 @@ char       *pt_theme_load_text(const char *dir, const char *name);
  * pt_theme_load_text + pt_theme_resolve, without applying anything: for
  * classifying a whole list of installed themes (dir and name as above). A theme
  * that does not load, or one that pins no background, counts as dark — that is
- * the fallback pt_theme_parse fills in and the only theme pt ships. */
+ * the fallback pt_theme_parse fills in and the only theme pt ships. Answers
+ * for real files are cached against the file's mtime+size, so re-classifying
+ * an unchanged file costs a stat and a hash lookup, not a read + parse. */
 gboolean    pt_theme_is_dark(const char *dir, const char *name);
 
 /* Classifier used by pt_theme_filter_appearance. Normally a thin wrapper over
