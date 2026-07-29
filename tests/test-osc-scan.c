@@ -167,6 +167,37 @@ static void test_unterminated_does_not_merge(void) {
   pt_osc_scan_clear(&s);
 }
 
+/* pt_term_core_reset() calls pt_osc_scan_clear() to unwedge a scanner that a
+ * dying program left parked mid-payload, so the clear has to take the buffered
+ * bytes with it and not just the state. This is the guard for that: the pty-
+ * level test in test-term-core is a smoke test and cannot prove it, because
+ * ESC ] restarts the scanner anyway (see test_unterminated_does_not_merge), so
+ * a whole sequence arriving after a missed clear still dispatches correctly.
+ * Only the terminator the dead program never sent tells the two apart. */
+static void test_clear_drops_a_partial_payload(void) {
+  PtOscScan s = {0};
+  Hits h = {0};
+  feed(&s, &h, "\033]9;stale-payload");      /* the program died right here */
+  g_assert_cmpint(h.n, ==, 0);
+  g_assert_nonnull(s.buf);                   /* really is holding the payload */
+
+  pt_osc_scan_clear(&s);
+  g_assert_null(s.buf);
+
+  /* The BEL that was still owed. In ground state these are ordinary bytes;
+     with the buffer still there they would dispatch "stale-payloadand-more". */
+  feed(&s, &h, "and-more\007");
+  g_assert_cmpint(h.n, ==, 0);
+
+  /* And the scanner still works afterwards, from a standing start. */
+  feed(&s, &h, "\033]9;fresh\007");
+  g_assert_cmpint(h.n, ==, 1);
+  g_assert_cmpint(h.code[0], ==, 9);
+  g_assert_cmpstr(h.payload[0], ==, "fresh");
+  hits_clear(&h);
+  pt_osc_scan_clear(&s);
+}
+
 static void test_plain_text_is_free(void) {
   PtOscScan s = {0};
   Hits h = {0};
@@ -293,6 +324,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/oscscan/over-cap", test_over_cap_dropped_then_recovers);
   g_test_add_func("/oscscan/clipboard-cap", test_clipboard_gets_a_bigger_cap);
   g_test_add_func("/oscscan/unterminated", test_unterminated_does_not_merge);
+  g_test_add_func("/oscscan/clear-drops-partial",
+                  test_clear_drops_a_partial_payload);
   g_test_add_func("/oscscan/plain-text", test_plain_text_is_free);
   g_test_add_func("/oscscan/bare-9c", test_bare_9c_is_payload);
   g_test_add_func("/oscscan/malformed", test_malformed_is_dropped);
