@@ -713,27 +713,32 @@ static void set_spawn_env_for(PtProjectUI *p, PtPaneGrid *g) {
   g_free(proj); g_free(acc); g_free(br);
 }
 
-/* The two per-pane config values, pushed after a pane is built: the terminal
- * widget remembers neither between panes, so a pane created after the config
- * was applied would otherwise sit on the compiled-in defaults. Reaches every
- * live pane, which is the same "the file is the source of truth" re-arm an
- * ordinary config apply does. */
-static void push_pane_config(PtWindow *w) {
-  if (w->config == NULL) return;
-  pt_terminal_set_mouse_reporting(w->config->mouse_reporting);
-  pt_terminal_set_osc52(w->config->osc52);
+/* The two per-pane config values as they stand now — what a pane built from
+ * here on starts out with. The terminal widget remembers neither between panes:
+ * the grid that builds a pane is what carries them to it, so that arming a new
+ * pane cannot drag a pane the user toggled by hand back into line with the file.
+ * That is the config apply's job, and it re-arms every live pane itself.
+ * The NULL config is a window mid-teardown; the compiled-in defaults are then
+ * as good an answer as any. */
+static gboolean pane_mouse_reporting(PtWindow *w) {
+  return w->config != NULL ? w->config->mouse_reporting
+                           : PT_CONFIG_MOUSE_REPORTING_DEFAULT;
+}
+
+static PtOsc52Mode pane_osc52(PtWindow *w) {
+  return w->config != NULL ? w->config->osc52 : PT_CONFIG_OSC52_DEFAULT;
 }
 
 static PtTabUI *tab_ui_new(PtWindow *w, PtProjectUI *p, const char *title,
                            PtSplitNode *tree) {
   PtTabUI *t = g_new0(PtTabUI, 1);
   t->title = g_strdup(title);
-  t->grid = pt_pane_grid_new(tree);
+  t->grid = pt_pane_grid_new(tree, pane_mouse_reporting(w), pane_osc52(w));
   g_object_ref_sink(t->grid);
-  /* Both before the grid is parented, so before any pane can allocate: the
-   * spawn is lazy, and the env is read at spawn. */
+  /* The grid built its first panes above, so this is a back-fill — safe, and
+   * still ahead of every spawn: the grid is not parented yet, and a pane only
+   * spawns when it allocates. */
   set_spawn_env_for(p, PT_PANE_GRID(t->grid));
-  push_pane_config(w);
   g_object_set_data(G_OBJECT(t->grid), PT_GRID_TAB_KEY, t);
   g_signal_connect(t->grid, "structure-changed",
                    G_CALLBACK(on_grid_structure), w);
@@ -1126,11 +1131,14 @@ static void action_split(PtWindow *w, PtSplitKind kind) {
   PtProjectUI *p = active_project(w);
   PtTabUI *t = active_tab(p);
   if (t == NULL) return;
-  /* Re-set rather than relied on: the accent may have followed a theme change
-   * and the branch may have moved since this grid's last pane. */
+  /* Re-set rather than relied on: the accent may have followed a theme change,
+   * the branch may have moved and the config may have been edited since this
+   * grid's last pane. Both reach the pane the split is about to build, and
+   * nothing else — the panes already in the grid are left as they are. */
   set_spawn_env_for(p, PT_PANE_GRID(t->grid));
+  pt_pane_grid_set_pane_defaults(PT_PANE_GRID(t->grid),
+                                 pane_mouse_reporting(w), pane_osc52(w));
   pt_pane_grid_split(PT_PANE_GRID(t->grid), kind);
-  push_pane_config(w);   /* the pane the split just built */
 }
 
 static void action_focus_next(PtWindow *w) {

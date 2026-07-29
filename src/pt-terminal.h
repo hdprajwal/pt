@@ -38,11 +38,15 @@ void pt_terminal_set_theme(const PtResolvedTheme *rt);
 /* Family+size together; NULL family keeps the current one. */
 void pt_terminal_set_font(const char *family, int pts);
 /* The `mouse-reporting` config key, pushed into every live terminal: a pane
- * toggled by hand follows the file again the next time it changes. Nothing is
- * remembered between calls, so the window also calls this right after building
- * a pane — a pane born after the config was applied would otherwise sit on
- * PT_CONFIG_MOUSE_REPORTING_DEFAULT. */
+ * toggled by hand follows the file again the next time the config is applied.
+ * Nothing is remembered between calls, so a pane built later gets its value
+ * from its grid instead (pt_pane_grid_set_pane_defaults), through the one-pane
+ * form below. */
 void pt_terminal_set_mouse_reporting(gboolean on);
+/* This pane only, for a pane built after the config was applied: arming it
+ * through the broadcast above would drag every other pane back into line with
+ * the file, undoing a hand toggle no config change asked to undo. */
+void pt_terminal_set_pane_mouse_reporting(PtTerminal *t, gboolean on);
 gboolean pt_terminal_mouse_reporting(PtTerminal *t);
 /* Flips this pane only — ghostty's toggle_mouse_reporting. Returns the new
  * state. */
@@ -51,9 +55,10 @@ gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t);
  * keeps running; only the terminal's state is thrown away. */
 void pt_terminal_reset(PtTerminal *t);
 /* The `osc52` config key: what a program in a pane may do to the clipboard with
- * OSC 52. Pushed into every live terminal, like the one above, and called at
- * the same points. */
+ * OSC 52. Pushed into every live terminal, like the one above, and paired with
+ * the same one-pane form. */
 void pt_terminal_set_osc52(PtOsc52Mode mode);
+void pt_terminal_set_pane_osc52(PtTerminal *t, PtOsc52Mode mode);
 /* GObject signals: "exited" (int), "title-changed" (const char*),
  *                  "command-changed" (const char*) — fg program of the pane changed,
  *                  "notification" (const char* title, const char* body) — a

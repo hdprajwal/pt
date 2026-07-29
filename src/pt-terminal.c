@@ -1671,25 +1671,29 @@ void pt_terminal_set_font(const char *family, int pts) {
   }
 }
 
+void pt_terminal_set_pane_mouse_reporting(PtTerminal *t, gboolean on) {
+  t->report_mouse = on;
+  link_cache_reset(t);       /* who owns the pointer just changed under it */
+  update_link_cursor(t);
+}
+
+void pt_terminal_set_pane_osc52(PtTerminal *t, PtOsc52Mode mode) {
+  t->osc52 = mode;
+  /* Turning it off has to reach the core too, or a pane keeps decoding
+   * clipboards nobody will ever be shown. */
+  if (t->core != NULL) pt_term_core_set_osc52(t->core, mode);
+}
+
 void pt_terminal_set_mouse_reporting(gboolean on) {
   /* The file is the source of truth: a pane the user toggled by hand goes
    * back in step the next time the config is applied, same as the theme. */
-  for (GSList *l = live_terminals; l != NULL; l = l->next) {
-    PtTerminal *t = l->data;
-    t->report_mouse = on;
-    link_cache_reset(t);     /* who owns the pointer just changed under it */
-    update_link_cursor(t);
-  }
+  for (GSList *l = live_terminals; l != NULL; l = l->next)
+    pt_terminal_set_pane_mouse_reporting(l->data, on);
 }
 
 void pt_terminal_set_osc52(PtOsc52Mode mode) {
-  for (GSList *l = live_terminals; l != NULL; l = l->next) {
-    PtTerminal *t = l->data;
-    t->osc52 = mode;
-    /* Turning it off has to reach the core too, or a pane keeps decoding
-     * clipboards nobody will ever be shown. */
-    if (t->core != NULL) pt_term_core_set_osc52(t->core, mode);
-  }
+  for (GSList *l = live_terminals; l != NULL; l = l->next)
+    pt_terminal_set_pane_osc52(l->data, mode);
 }
 
 void pt_terminal_reset(PtTerminal *t) {
