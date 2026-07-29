@@ -57,3 +57,15 @@ char       *pt_theme_load_text(const char *dir, const char *name);
  * that does not load, or one that pins no background, counts as dark — that is
  * the fallback pt_theme_parse fills in and the only theme pt ships. */
 gboolean    pt_theme_is_dark(const char *dir, const char *name);
+
+/* Classifier used by pt_theme_filter_appearance. Normally a thin wrapper over
+ * pt_theme_is_dark with the theme dir in `user`; injectable so the filtering
+ * can be tested without touching the disk. */
+typedef gboolean (*PtThemeDarkFn)(const char *name, gpointer user);
+
+/* The entries of `names` (NULL-terminated) that `classify` puts on the `dark`
+ * side, in the input order. Never NULL: with nothing matching, the result is a
+ * vector holding only the terminator — callers pick appearances to offer by
+ * asking whether it is empty. g_strfreev. */
+char      **pt_theme_filter_appearance(const char *const *names, gboolean dark,
+                                       PtThemeDarkFn classify, gpointer user);

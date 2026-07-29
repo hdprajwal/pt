@@ -1,18 +1,23 @@
 #include "pt-settings.h"
 
+#include "pt-theme.h"
+
 #include <math.h>
 #include <pango/pangocairo.h>
 #include <stdlib.h>
 
-/* The dialog is deliberately tiny: theme, two font sizes, two families. Layout
- * and padding stay out of it — those are the app's opinion, not a setting. */
+/* The dialog is deliberately tiny: appearance, theme, two font sizes, two
+ * families. Layout and padding stay out of it — those are the app's opinion,
+ * not a setting. Appearance sits above Theme because it scopes it: the list the
+ * row underneath walks is only the themes of that appearance. */
 #define PT_SETTINGS_WIDTH 560
-#define ROW_THEME         0
-#define ROW_FONT_SIZE     1
-#define ROW_UI_FONT_SIZE  2
-#define ROW_FONT_FAMILY   3
-#define ROW_UI_FONT_FAMILY 4
-#define N_ROWS            5
+#define ROW_APPEARANCE    0
+#define ROW_THEME         1
+#define ROW_FONT_SIZE     2
+#define ROW_UI_FONT_SIZE  3
+#define ROW_FONT_FAMILY   4
+#define ROW_UI_FONT_FAMILY 5
+#define N_ROWS            6
 
 /* Display clamps. The parser accepts a wider range (PT_CONFIG_FONT_SIZE_*);
  * these are what the arrows will walk you to. */
@@ -29,10 +34,15 @@ struct _PtSettings {
   GtkWidget parent_instance;
   GtkWidget *scrim;   /* sole child of the widget; .pt-palette-scrim */
   GtkWidget *panel;   /* .pt-settings */
-  GtkWidget *list;    /* vertical box of the five rows, built once */
+  GtkWidget *list;    /* vertical box of the six rows, built once */
   GtkWidget *value_labels[N_ROWS];
   PtConfig *candidate;  /* live-edited copy; kept until the next open */
   char **themes;        /* NULL-terminated, owned */
+  char **dark_themes;   /* themes split by appearance, classified once per open */
+  char **light_themes;
+  /* Dialog-local and deliberately not persisted: the config surface stays at
+   * `theme`, and the appearance shown is just what the selected theme is. */
+  gboolean appearance_dark;
   char **mono_fams;     /* installed monospace families, sorted */
   char **all_fams;      /* all installed families, sorted */
   int selected;         /* row index */
@@ -91,6 +101,18 @@ static const char *step_list(char *const *v, const char *cur, int dir) {
   return v[0];
 }
 
+/* ---------- appearance ---------- */
+static gboolean list_empty(char *const *v) { return v == NULL || v[0] == NULL; }
+
+/* The themes the Theme row may walk: only the ones of the chosen appearance. */
+static char *const *appearance_themes(PtSettings *s, gboolean dark) {
+  return dark ? s->dark_themes : s->light_themes;
+}
+
+static gboolean classify_in_dir(const char *name, gpointer user) {
+  return pt_theme_is_dark((const char *)user, name);
+}
+
 /* ---------- rows ---------- */
 /* Highlight without rebuilding: the value labels are cached by pointer, so the
  * rows must outlive every keystroke. */
@@ -144,6 +166,7 @@ static void rebuild_rows(PtSettings *s) {
     gtk_box_remove(GTK_BOX(s->list), child);
   for (int i = 0; i < N_ROWS; i++) s->value_labels[i] = NULL;
 
+  add_row(s, ROW_APPEARANCE, "Appearance");
   add_row(s, ROW_THEME, "Theme");
   add_row(s, ROW_FONT_SIZE, "Terminal font size");
   add_row(s, ROW_UI_FONT_SIZE, "UI font size");
@@ -159,6 +182,7 @@ static void set_value(PtSettings *s, int row, char *text /* consumed */) {
 
 static void refresh_values(PtSettings *s) {
   if (s->candidate == NULL) return;
+  set_value(s, ROW_APPEARANCE, g_strdup(s->appearance_dark ? "Dark" : "Light"));
   set_value(s, ROW_THEME, g_strdup(s->candidate->theme));
   set_value(s, ROW_FONT_SIZE, g_strdup_printf("%d pt", s->candidate->font_size));
   set_value(s, ROW_UI_FONT_SIZE, g_strdup_printf("%g px", s->candidate->ui_font_size));
@@ -182,8 +206,23 @@ static void adjust(PtSettings *s, int dir) {
   gboolean moved = FALSE;
 
   switch (s->selected) {
+    case ROW_APPEARANCE: {
+      /* Two values, so either arrow flips it. Never onto an appearance nothing
+       * is installed for, though: that would leave the row below showing a
+       * theme it cannot step off, out of a list it is not in. */
+      char *const *next = appearance_themes(s, !s->appearance_dark);
+      if (list_empty(next)) return;
+      s->appearance_dark = !s->appearance_dark;
+      /* The theme that was selected is of the other appearance, so it is not in
+       * the narrowed list — land on its first entry and preview that. */
+      replace_str(&c->theme, next[0]);
+      moved = TRUE;
+      break;
+    }
     case ROW_THEME:
-      moved = replace_str(&c->theme, step_list(s->themes, c->theme, dir));
+      moved = replace_str(
+          &c->theme,
+          step_list(appearance_themes(s, s->appearance_dark), c->theme, dir));
       break;
     case ROW_FONT_SIZE: {
       int next = CLAMP(c->font_size + dir, FONT_SIZE_MIN, FONT_SIZE_MAX);
@@ -301,10 +340,30 @@ void pt_settings_open(PtSettings *s, const PtConfig *current,
 
   g_clear_pointer(&s->candidate, pt_config_free);
   g_clear_pointer(&s->themes, g_strfreev);
+  g_clear_pointer(&s->dark_themes, g_strfreev);
+  g_clear_pointer(&s->light_themes, g_strfreev);
   s->candidate = pt_config_copy(current);
   s->themes = themes != NULL ? g_strdupv((char **)themes) : NULL;
   /* Fonts can be installed while pt runs; a snapshot per open is cheap. */
   collect_families(s);
+
+  /* Classify every theme once, here: it reads and parses each theme file, which
+   * is fine per open (they are tiny and there are a handful) and would not be
+   * per keypress. Same helper the terminal answers CSI ? 996 n from, so the
+   * picker and what apps are told can never disagree. */
+  char *tdir = pt_theme_dir();
+  s->dark_themes = pt_theme_filter_appearance((const char *const *)s->themes,
+                                              TRUE, classify_in_dir, tdir);
+  s->light_themes = pt_theme_filter_appearance((const char *const *)s->themes,
+                                               FALSE, classify_in_dir, tdir);
+  s->appearance_dark = pt_theme_is_dark(tdir, s->candidate->theme);
+  g_free(tdir);
+  /* A theme that is no longer on disk classifies dark without being in the dark
+   * list; if that leaves the row below empty while the other side has themes,
+   * open on the side that has them rather than on nothing. */
+  if (list_empty(appearance_themes(s, s->appearance_dark)) &&
+      !list_empty(appearance_themes(s, !s->appearance_dark)))
+    s->appearance_dark = !s->appearance_dark;
 
   s->selected = 0;
   s->open = TRUE;
@@ -348,6 +407,8 @@ static void pt_settings_dispose(GObject *obj) {
   s->open = FALSE;
   g_clear_pointer(&s->candidate, pt_config_free);
   g_clear_pointer(&s->themes, g_strfreev);
+  g_clear_pointer(&s->dark_themes, g_strfreev);
+  g_clear_pointer(&s->light_themes, g_strfreev);
   g_clear_pointer(&s->mono_fams, g_strfreev);
   g_clear_pointer(&s->all_fams, g_strfreev);
   g_clear_pointer(&s->scrim, gtk_widget_unparent);
@@ -397,7 +458,7 @@ static void pt_settings_init(PtSettings *s) {
 
   s->list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_box_append(GTK_BOX(s->panel), s->list);
-  /* The five rows never change shape, only their values and highlight. */
+  /* The six rows never change shape, only their values and highlight. */
   rebuild_rows(s);
 
   GtkWidget *hint = gtk_label_new(
