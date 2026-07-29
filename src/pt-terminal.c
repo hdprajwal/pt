@@ -473,7 +473,7 @@ static void draw_row_underlines(PtTerminal *t, GtkSnapshot *snapshot,
                                 GhosttyRenderStateRowIterator iter, int y,
                                 GhosttyColorRgb fg_default,
                                 GhosttyColorRgb bg_default) {
-  GhosttyRenderStateRowCells cells = pt_term_core_row_cells(t->core);
+  GhosttyRenderStateRowCells cells = pt_term_core_row_cells_raw(t->core);
   if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                                    &cells) != GHOSTTY_SUCCESS)
     return;
@@ -808,7 +808,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   int run_x = 0;
   int y = PT_PAD_Y;
   while (ghostty_render_state_row_iterator_next(iter)) {
-    GhosttyRenderStateRowCells cells = pt_term_core_row_cells(t->core);
+    GhosttyRenderStateRowCells cells = pt_term_core_row_cells_raw(t->core);
     if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                                      &cells) != GHOSTTY_SUCCESS)
       continue;

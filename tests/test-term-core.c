@@ -1920,6 +1920,231 @@ static void test_cursor_wide_cells(void) {
   pt_term_core_free(core);
 }
 
+/* ---- flat cell rows ---- */
+
+static void test_row_cells_text_style_colors(void) {
+  /* Truecolor SGRs pin exact byte values, so nothing here depends on
+     libghostty's stock palette. Row 2 keeps clear of the ready marker. */
+  PtTermCore *core = cursor_core_new();
+  pt_term_core_write(core,
+      "\033[2;1H\033[1;3;4;9;38;2;200;10;20m\033[48;2;1;2;3mA"
+      "\033[0mB\033[2;7mC\033[0m", -1);
+  g_assert_true(wait_for_text(core, "ABC"));
+  pt_term_core_sync(core);
+
+  PtCell cells[80];
+  int n = pt_term_core_row_cells(core, 1, cells, 80);
+  g_assert_cmpint(n, ==, 80);
+
+  g_assert_cmpstr(cells[0].text, ==, "A");
+  g_assert_cmpuint(cells[0].width, ==, 1);
+  g_assert_cmpuint(cells[0].style, ==,
+                   PT_CELL_STYLE_BOLD | PT_CELL_STYLE_ITALIC |
+                   PT_CELL_STYLE_UNDERLINE | PT_CELL_STYLE_STRIKE);
+  g_assert_cmpuint(cells[0].fg.r, ==, 200);
+  g_assert_cmpuint(cells[0].fg.g, ==, 10);
+  g_assert_cmpuint(cells[0].fg.b, ==, 20);
+  g_assert_true(cells[0].has_bg);
+  g_assert_cmpuint(cells[0].bg.r, ==, 1);
+  g_assert_cmpuint(cells[0].bg.g, ==, 2);
+  g_assert_cmpuint(cells[0].bg.b, ==, 3);
+  g_assert_false(cells[0].selected);
+
+  g_assert_cmpstr(cells[1].text, ==, "B");
+  g_assert_cmpuint(cells[1].style, ==, 0);
+  g_assert_false(cells[1].has_bg);
+
+  /* Inverse is reported, never applied: the cell keeps its own colors. */
+  g_assert_cmpstr(cells[2].text, ==, "C");
+  g_assert_cmpuint(cells[2].style, ==,
+                   PT_CELL_STYLE_FAINT | PT_CELL_STYLE_INVERSE);
+  g_assert_false(cells[2].has_bg);
+
+  /* Past the text: blank cells, narrow. */
+  g_assert_cmpstr(cells[3].text, ==, "");
+  g_assert_cmpuint(cells[3].width, ==, 1);
+
+  /* max clamps the fill; a row outside the viewport fills nothing. */
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, cells, 1), ==, 1);
+  g_assert_cmpint(pt_term_core_row_cells(core, 24, cells, 80), ==, 0);
+  g_assert_cmpint(pt_term_core_row_cells(core, -1, cells, 80), ==, 0);
+
+  pt_term_core_free(core);
+}
+
+static void test_row_cells_wide(void) {
+  PtTermCore *core = cursor_core_new();
+  /* U+6F22 owns columns 1-2 of row 3; "x" follows on column 3. */
+  pt_term_core_write(core, "\033[3;1H\xE6\xBC\xA2x", -1);
+  g_assert_true(wait_for_text(core, "\xE6\xBC\xA2"));
+  pt_term_core_sync(core);
+  PtCell cells[8];
+  g_assert_cmpint(pt_term_core_row_cells(core, 2, cells, 8), ==, 8);
+  g_assert_cmpstr(cells[0].text, ==, "\xE6\xBC\xA2");
+  g_assert_cmpuint(cells[0].width, ==, 2);
+  /* The spacer tail holds nothing of its own. */
+  g_assert_cmpuint(cells[1].width, ==, 0);
+  g_assert_cmpstr(cells[1].text, ==, "");
+  g_assert_cmpstr(cells[2].text, ==, "x");
+  g_assert_cmpuint(cells[2].width, ==, 1);
+  pt_term_core_free(core);
+}
+
+static void test_row_cells_selected(void) {
+  PtTermCore *core = cursor_core_new();
+  pt_term_core_write(core, "\033[2;1HSELECTME", -1);
+  g_assert_true(wait_for_text(core, "SELECTME"));
+  /* Cells are 8x16 inset by 20/18, so row 1 spans pixels [34, 50); drag
+     columns 0..2 of it. */
+  pt_term_core_selection_press(core, 21.0, 40.0, 1000000000ULL);
+  pt_term_core_selection_drag(core, 37.0, 40.0);
+  pt_term_core_selection_release(core, 37.0, 40.0);
+  pt_term_core_sync(core);
+  PtCell cells[8];
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, cells, 8), ==, 8);
+  g_assert_true(cells[0].selected);
+  g_assert_true(cells[2].selected);
+  g_assert_false(cells[3].selected);
+  pt_term_core_free(core);
+}
+
+static void test_set_colors_reach_cells(void) {
+  PtTermCore *core = cursor_core_new();
+  PtTermColors colors = {
+    .bg = { 5, 6, 7, 1.0 },
+    .fg = { 10, 20, 30, 1.0 },
+    .cursor = { 40, 50, 60, 1.0 },
+  };
+  colors.palette[1] = (PtColor){ 170, 16, 32, 1.0 };   /* pin ANSI red */
+  pt_term_core_set_colors(core, &colors);
+  /* A plain cell and an SGR-31 cell, printed after the colors landed. */
+  pt_term_core_write(core, "\033[2;1HX\033[31mR\033[0m", -1);
+  g_assert_true(wait_for_text(core, "XR"));
+  pt_term_core_sync(core);
+  PtCell cells[4];
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, cells, 4), ==, 4);
+  /* The plain cell reports the theme's default foreground... */
+  g_assert_cmpuint(cells[0].fg.r, ==, 10);
+  g_assert_cmpuint(cells[0].fg.g, ==, 20);
+  g_assert_cmpuint(cells[0].fg.b, ==, 30);
+  g_assert_false(cells[0].has_bg);
+  /* ...and SGR 31 resolves through the pinned palette slot. */
+  g_assert_cmpuint(cells[1].fg.r, ==, 170);
+  g_assert_cmpuint(cells[1].fg.g, ==, 16);
+  g_assert_cmpuint(cells[1].fg.b, ==, 32);
+  pt_term_core_free(core);
+}
+
+/* ---- cursor info ---- */
+
+static int want_cx, want_cy, want_cw;
+static gboolean cursor_info_is_wanted(PtTermCore *c) {
+  PtCursorInfo info;
+  if (!pt_term_core_cursor_info(c, &info)) return FALSE;
+  return info.x == want_cx && info.y == want_cy && info.width == want_cw;
+}
+
+static gboolean cursor_info_hidden(PtTermCore *c) {
+  PtCursorInfo info;
+  pt_term_core_cursor_info(c, &info);
+  return !info.visible;
+}
+
+static void test_cursor_info(void) {
+  PtTermCore *core = cursor_core_new();
+  PtCursorInfo info;
+  /* cursor_info syncs itself, so no explicit sync anywhere in here. After the
+     ready marker the cursor sits at row 1, column 0. */
+  g_assert_true(pt_term_core_cursor_info(core, &info));
+  g_assert_cmpint(info.x, ==, 0);
+  g_assert_cmpint(info.y, ==, 1);
+  g_assert_cmpint(info.width, ==, 1);
+  g_assert_cmpint(info.style, ==,
+                  GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK);
+  g_assert_true(info.visible);
+  g_assert_false(info.blinking);
+  /* Nothing in pt can set password input yet (see the header). */
+  g_assert_false(info.password);
+
+  /* Printing advances x. */
+  want_cx = 2; want_cy = 1; want_cw = 1;
+  pt_term_core_write(core, "ab", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+
+  /* On the spacer tail of a wide char, x is already backed up onto the head
+     and the cursor covers both cells. */
+  want_cx = 0; want_cy = 2; want_cw = 2;
+  pt_term_core_write(core, "\033[3;1H\xE6\xBC\xA2\033[3;2H", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+
+  /* On the head: same two cells, no backing up. */
+  want_cx = 0; want_cy = 2; want_cw = 2;
+  pt_term_core_write(core, "\033[3;1H", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+
+  /* Past the wide char the cursor is narrow again. */
+  want_cx = 3; want_cy = 2; want_cw = 1;
+  pt_term_core_write(core, "\033[3;4H", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+
+  /* DECTCEM hides it; position stays valid. */
+  pt_term_core_write(core, "\033[?25l", -1);
+  g_assert_true(wait_until(cursor_info_hidden, core));
+  g_assert_true(pt_term_core_cursor_info(core, &info));
+
+  pt_term_core_free(core);
+}
+
+/* ---- render dirty ---- */
+
+/* Let any in-flight pty reads land so a take-and-clear assertion cannot race
+   a byte that was already on its way. */
+static void drain_reads(void) {
+  for (int i = 0; i < 20; i++) {
+    g_main_context_iteration(NULL, FALSE);
+    g_usleep(2000);
+  }
+}
+
+static void test_take_render_dirty(void) {
+  PtTermCore *core = cursor_core_new();   /* output has arrived already */
+  drain_reads();
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  /* Bytes from the child set it again — exactly once. */
+  pt_term_core_write(core, "probe\n", -1);
+  g_assert_true(wait_for_text(core, "probe"));
+  drain_reads();
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  /* Moving the viewport is a render change with no output. */
+  pt_term_core_scroll_delta(core, -1);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  /* So are a resize and a theme's colors landing. */
+  pt_term_core_resize(core, 81, 24, 8, 16);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  PtTermColors colors = { .fg = { 1, 2, 3, 1.0 } };
+  pt_term_core_set_colors(core, &colors);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  /* And so is the selection changing. */
+  pt_term_core_selection_press(core, 21.0, 20.0, 1000000000ULL);
+  pt_term_core_selection_drag(core, 60.0, 20.0);
+  pt_term_core_selection_release(core, 60.0, 20.0);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  pt_term_core_selection_clear(core);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  pt_term_core_free(core);
+}
+
 /* The blink phase goes back to visible on output, so the consumer has to be
    able to tell output from any other reason to redraw. It cannot do that off
    `draw`: scrolling fires that too, and every keypress snaps the viewport back
@@ -2242,6 +2467,12 @@ int main(int argc, char *argv[]) {
                   test_cursor_style_reset_to_default);
   g_test_add_func("/termcore/cursor-blink-mode-12", test_cursor_blink_mode_12);
   g_test_add_func("/termcore/cursor-wide-cells", test_cursor_wide_cells);
+  g_test_add_func("/termcore/row-cells", test_row_cells_text_style_colors);
+  g_test_add_func("/termcore/row-cells-wide", test_row_cells_wide);
+  g_test_add_func("/termcore/row-cells-selected", test_row_cells_selected);
+  g_test_add_func("/termcore/set-colors", test_set_colors_reach_cells);
+  g_test_add_func("/termcore/cursor-info", test_cursor_info);
+  g_test_add_func("/termcore/render-dirty", test_take_render_dirty);
   g_test_add_func("/termcore/output-callback-only-for-output",
                   test_output_callback_is_output_only);
   return g_test_run();
