@@ -15,6 +15,10 @@ GtkWidget *pt_terminal_new_full(const char *cwd, const char *const *env_pairs);
  * Copied; pass NULL to clear. */
 void pt_terminal_set_default_env(const char *const *env_pairs);
 PtTermCore *pt_terminal_core(PtTerminal *t);
+/* Stable for the life of the pane and never reused. A desktop notification
+ * sits on screen until the user clicks it, long after the pane that raised it
+ * may have gone, so what it carries back is this rather than a pointer. */
+guint64 pt_terminal_id(PtTerminal *t);
 gboolean pt_terminal_running(PtTerminal *t);   /* fg process other than the shell */
 int pt_terminal_last_exit(PtTerminal *t);      /* -1 until the prompt reports */
 char *pt_terminal_current_cwd(PtTerminal *t);  /* /proc/<pid>/cwd, caller frees */
@@ -43,4 +47,9 @@ void pt_terminal_reset(PtTerminal *t);
  * with OSC 52. Re-armed on every live terminal, like the one above. */
 void pt_terminal_set_osc52(PtOsc52Mode mode);
 /* GObject signals: "exited" (int), "title-changed" (const char*), "activity" (void),
- *                  "command-changed" (const char*) — fg program of the pane changed */
+ *                  "command-changed" (const char*) — fg program of the pane changed,
+ *                  "notification" (const char* title, const char* body) — a
+ *                      program asked for a desktop notification with OSC 9 or
+ *                      OSC 777. Already filtered, capped and rate-limited by
+ *                      the core, and never emitted while the pane is focused;
+ *                      `title` is "" when the sequence carried none. */

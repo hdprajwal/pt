@@ -78,6 +78,11 @@ static PtTabUI *active_tab(PtProjectUI *p) {
 }
 
 static void mark_dirty(PtWindow *w);   /* persistence hook; body in Task 12 */
+/* Wired up in tab_ui_new, but written down with the rest of the notification
+ * code further on — it needs find_grid and the project/tab switches. */
+static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
+                                 const char *title, const char *body,
+                                 gpointer user);
 
 /* ---------- config ---------- */
 
@@ -621,6 +626,8 @@ static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
   g_signal_connect(t->grid, "command-changed", G_CALLBACK(on_grid_command), w);
   g_signal_connect(t->grid, "title-changed", G_CALLBACK(on_grid_title), w);
   g_signal_connect(t->grid, "emptied", G_CALLBACK(on_grid_emptied), w);
+  g_signal_connect(t->grid, "notification",
+                   G_CALLBACK(on_grid_notification), w);
   return t;
 }
 
@@ -747,6 +754,109 @@ static gboolean find_grid(PtWindow *w, PtPaneGrid *g, guint *out_pi,
     }
   }
   return FALSE;
+}
+
+/* ---------- desktop notifications (OSC 9 / OSC 777) ----------
+ *
+ * A build finishes in a pane on another workspace and nothing tells you. The
+ * core has already decided which sequences deserve a notification, dropped the
+ * ones from a pane the user is looking at, capped the text and paid the rate
+ * limit, so what is left here is the desktop half: raise it, and make clicking
+ * it land on the pane that sent it. */
+
+/* Bring the pane with this id to the front: its project, its tab, its pane,
+ * and the window itself. FALSE when no pane has that id, which is what a
+ * notification clicked after its pane was closed looks like. */
+static gboolean activate_pane(PtWindow *w, guint64 pane_id) {
+  if (w->projects == NULL) return FALSE;
+  for (guint pi = 0; pi < w->projects->len; pi++) {
+    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
+    for (guint ti = 0; ti < p->tabs->len; ti++) {
+      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
+      if (!pt_pane_grid_focus_pane_by_id(PT_PANE_GRID(t->grid), pane_id))
+        continue;
+      /* The grid focused the pane already; the switches put that grid on
+       * screen. Order matters — show_active_grid re-focuses the grid's
+       * remembered pane, which the call above has just made the right one. */
+      action_switch_project(w, (int)pi);
+      action_switch_tab(w, (int)ti);
+      gtk_window_present(GTK_WINDOW(w));
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/* The notification's default action, i.e. what clicking the body does. It
+ * lives on the application rather than the window because that is where the
+ * desktop can reach it: the shell activates `app.activate-pane` on a process
+ * that may have been started by the click itself. The window is found through
+ * the application for the same reason — nothing here holds a window pointer
+ * that could outlive the window. */
+static void on_activate_pane_action(GSimpleAction *action, GVariant *param,
+                                    gpointer user) {
+  (void)action;
+  GtkApplication *app = user;
+  if (param == NULL) return;
+  guint64 pane_id = g_variant_get_uint64(param);
+  for (GList *l = gtk_application_get_windows(app); l != NULL; l = l->next) {
+    if (!PT_IS_WINDOW(l->data)) continue;
+    if (activate_pane(PT_WINDOW(l->data), pane_id)) return;
+  }
+}
+
+/* Registered once per application, from pt_window_new. */
+static void install_notification_action(GtkApplication *app) {
+  if (g_action_map_lookup_action(G_ACTION_MAP(app), "activate-pane") != NULL)
+    return;
+  GSimpleAction *act =
+      g_simple_action_new("activate-pane", G_VARIANT_TYPE_UINT64);
+  g_signal_connect(act, "activate", G_CALLBACK(on_activate_pane_action), app);
+  g_action_map_add_action(G_ACTION_MAP(app), G_ACTION(act));
+  g_object_unref(act);
+}
+
+static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
+                                 const char *title, const char *body,
+                                 gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  if (w->projects == NULL) return;
+  GtkApplication *app = gtk_window_get_application(GTK_WINDOW(w));
+  if (app == NULL) return;
+
+  /* OSC 9 carries no title at all, so most notifications arrive nameless.
+   * Ghostty falls back to the flat application name; pt can do better, because
+   * the tab already carries the name of the program that is running in it —
+   * "cargo" over "build finished" says which of four builds this was. Down to
+   * the app name only when even that is empty. */
+  guint pi = 0, ti = 0;
+  const char *shown = title;
+  if (shown == NULL || shown[0] == '\0') {
+    if (find_grid(w, g, &pi, &ti)) {
+      PtProjectUI *p = g_ptr_array_index(w->projects, pi);
+      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
+      if (t->title != NULL && t->title[0] != '\0') shown = t->title;
+    }
+  }
+  if (shown == NULL || shown[0] == '\0') shown = "pt";
+
+  GNotification *n = g_notification_new(shown);
+  g_notification_set_body(n, body);
+  GIcon *icon = g_themed_icon_new("dev.hdprajwal.pt");
+  g_notification_set_icon(n, icon);
+  g_object_unref(icon);
+  g_notification_set_default_action_and_target(n, "app.activate-pane", "t",
+                                               pane_id);
+  /* Keyed per pane, so a pane that notifies twice replaces its own earlier
+   * notification instead of stacking a second one the user has to dismiss.
+   * Ghostty keys on the body text instead (apprt/gtk/class/surface.zig), which
+   * collapses two panes that finished with the same message into one — the
+   * opposite trade, and the wrong one here, because pt's notification is
+   * addressed to a particular pane. */
+  char *id = g_strdup_printf("pane-%" G_GUINT64_FORMAT, pane_id);
+  g_application_send_notification(G_APPLICATION(app), id, n);
+  g_free(id);
+  g_object_unref(n);
 }
 
 /* Close the focused pane of grid g (not of whatever happens to be active now).
@@ -1738,6 +1848,9 @@ static void pt_window_init(PtWindow *w) {
 }
 
 GtkWidget *pt_window_new(AdwApplication *app) {
+  /* Before the window: a notification clicked while pt was not running
+   * activates the app, and the action has to be there when it does. */
+  install_notification_action(GTK_APPLICATION(app));
   return g_object_new(PT_TYPE_WINDOW, "application", app,
                       "title", "pt",
                       "default-width", 1100, "default-height", 700, NULL);

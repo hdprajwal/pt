@@ -23,6 +23,10 @@ typedef enum {
 /* Move focus to the nearest pane in the given direction (spatial, based on
  * on-screen geometry). No-op when no pane lies that way. */
 void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir);
+/* Focus the pane with this pt_terminal_id(), if the grid holds it. FALSE means
+ * it does not — the caller is expected to ask every grid in turn, and a pane
+ * that was closed since is found by nobody. */
+gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id);
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
 int pt_pane_grid_pane_count(PtPaneGrid *g);
 /* TRUE when any pane in the grid has a foreground process other than the shell. */
@@ -38,4 +42,9 @@ void pt_pane_grid_focus_terminal(PtPaneGrid *g); /* grab focus on focused pane *
  *          "title-changed" (const char*) — focused pane's title changed (the
  *              prompt reports the last exit code through it, so this is the
  *              instant edge for the status bar's exit marker);
- *          "emptied" (void) — last pane closed via clean shell exit (close tab). */
+ *          "emptied" (void) — last pane closed via clean shell exit (close tab);
+ *          "notification" (guint64 pane_id, const char *title,
+ *              const char *body) — a program in *any* pane of this grid asked
+ *              for a desktop notification (OSC 9 / OSC 777). Unlike the two
+ *              above this is not restricted to the focused pane: an unwatched
+ *              pane is exactly where these come from. */

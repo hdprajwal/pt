@@ -67,11 +67,21 @@ static PtOsc52Mode osc52_default = PT_CONFIG_OSC52_DEFAULT;
 static char **default_env;
 
 enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_ACTIVITY, SIG_COMMAND_CHANGED,
-       N_SIGNALS };
+       SIG_NOTIFICATION, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+/* Handed out by pt_terminal_id(). A desktop notification outlives the read
+ * that produced it — it sits on the user's screen until they click it — so
+ * what it carries back has to be something that can be looked up rather than
+ * followed. An id survives the pane being closed in the meantime; a pointer
+ * would not. Ghostty does the same, with the core surface's id
+ * (apprt/gtk/class/surface.zig sendDesktopNotification). Never reused: a
+ * 64-bit counter incremented once per pane cannot wrap in any session. */
+static guint64 next_terminal_id = 1;
 
 struct _PtTerminal {
   GtkWidget parent_instance;
+  guint64 id;
   PtTermCore *core;
   char *start_cwd;
   char **env;                /* extra child env, or NULL */
@@ -220,6 +230,18 @@ static void core_exited(PtTermCore *core, int status, gpointer user) {
 static void core_title(PtTermCore *core, const char *title, gpointer user) {
   (void)core;
   g_signal_emit(PT_TERMINAL(user), signals[SIG_TITLE_CHANGED], 0, title);
+}
+
+/* A program in this pane asked the desktop to say something (OSC 9 / OSC 777).
+ * The core has already thrown out everything that should not get this far —
+ * the ConEmu extensions sharing OSC 9, notifications from a pane the user is
+ * looking at, text that is not UTF-8, and anything over the rate limit — so
+ * this only has to say which pane it was. */
+static void core_notification(PtTermCore *core, const char *title,
+                              const char *body, gpointer user) {
+  (void)core;
+  PtTerminal *t = PT_TERMINAL(user);
+  g_signal_emit(t, signals[SIG_NOTIFICATION], 0, title, body);
 }
 
 static void core_command(PtTermCore *core, const char *comm, gpointer user) {
@@ -558,12 +580,14 @@ static void ensure_core(PtTerminal *t) {
     return;
   }
   apply_palette(t->core);
-  /* Registering clipboard_write is what starts the OSC scanner: with no
-   * consumer at all the core does not even look at the bytes. */
+  /* Registering clipboard_write or notification is what starts the OSC
+   * scanner: with no consumer at all the core does not even look at the
+   * bytes. */
   PtTermCoreCallbacks cbs = { .draw = core_draw, .output = core_output,
                               .exited = core_exited,
                               .title = core_title, .command = core_command,
-                              .clipboard_write = core_clipboard_write };
+                              .clipboard_write = core_clipboard_write,
+                              .notification = core_notification };
   pt_term_core_set_callbacks(t->core, &cbs, t);
   pt_term_core_set_osc52(t->core, t->osc52);
   /* Cores are built lazily, long after the theme was applied globally, so the
@@ -1557,6 +1581,8 @@ char *pt_terminal_current_cwd(PtTerminal *t) {
 
 PtTermCore *pt_terminal_core(PtTerminal *t) { return t->core; }
 
+guint64 pt_terminal_id(PtTerminal *t) { return t->id; }
+
 const char *pt_terminal_last_command(PtTerminal *t) { return t->last_command; }
 
 gboolean pt_terminal_running(PtTerminal *t) {
@@ -1705,9 +1731,13 @@ static void pt_terminal_class_init(PtTerminalClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_COMMAND_CHANGED] = g_signal_new("command-changed", PT_TYPE_TERMINAL,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_NOTIFICATION] = g_signal_new("notification", PT_TYPE_TERMINAL,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
+      G_TYPE_STRING, G_TYPE_STRING);
 }
 
 static void pt_terminal_init(PtTerminal *t) {
+  t->id = next_terminal_id++;
   gtk_widget_set_focusable(GTK_WIDGET(t), TRUE);
   gtk_widget_set_hexpand(GTK_WIDGET(t), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(t), TRUE);

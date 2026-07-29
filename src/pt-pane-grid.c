@@ -1,7 +1,7 @@
 #include "pt-pane-grid.h"
 
 enum { SIG_STRUCTURE, SIG_ACTIVITY, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
-       SIG_EMPTIED, N_SIGNALS };
+       SIG_EMPTIED, SIG_NOTIFICATION, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtPaneGrid {
@@ -52,6 +52,17 @@ static void on_term_title(PtTerminal *t, const char *title, gpointer user) {
   PtPaneGrid *g = PT_PANE_GRID(user);
   if (g->focused != NULL && g->focused->user == (gpointer)t)
     g_signal_emit(g, signals[SIG_TITLE], 0, title);
+}
+
+/* Unlike command-changed and title-changed above, this is forwarded from every
+ * pane and not just the focused one — the whole point of a desktop
+ * notification is that it comes from a pane the user is not watching. The
+ * pane's id rides along because the notification has to be clickable back to
+ * the pane that raised it, minutes later and possibly from another tab. */
+static void on_term_notification(PtTerminal *t, const char *title,
+                                 const char *body, gpointer user) {
+  g_signal_emit(PT_PANE_GRID(user), signals[SIG_NOTIFICATION], 0,
+                pt_terminal_id(t), title, body);
 }
 
 /* Is `leaf` still a live leaf of `n`? Compares by pointer identity only, so a
@@ -105,6 +116,7 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   g_signal_connect(term, "exited", G_CALLBACK(on_term_exited), g);
   g_signal_connect(term, "command-changed", G_CALLBACK(on_term_command), g);
   g_signal_connect(term, "title-changed", G_CALLBACK(on_term_title), g);
+  g_signal_connect(term, "notification", G_CALLBACK(on_term_notification), g);
   GtkEventController *focus = gtk_event_controller_focus_new();
   g_signal_connect(focus, "enter", G_CALLBACK(on_term_focus_enter), g);
   gtk_widget_add_controller(term, focus);
@@ -334,6 +346,29 @@ void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir) {
   emit_focused_command(g);
 }
 
+/* Focus the pane with this id, if it is one of ours. Answers FALSE when it is
+ * not, which is the ordinary case: the window asks every grid in turn, and a
+ * notification whose pane was closed while it sat on screen finds no taker at
+ * all. Emits the same signals a keyboard focus move does, so the status line
+ * and the tab strip follow. */
+gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id) {
+  if (g->tree == NULL) return FALSE;
+  PtSplitNode *first = pt_split_first_leaf(g->tree);
+  PtSplitNode *leaf = first;
+  do {
+    if (leaf != NULL && leaf->user != NULL &&
+        pt_terminal_id(PT_TERMINAL(leaf->user)) == id) {
+      g->focused = leaf;
+      pt_pane_grid_focus_terminal(g);
+      g_signal_emit(g, signals[SIG_FOCUS], 0);
+      emit_focused_command(g);
+      return TRUE;
+    }
+    leaf = pt_split_next_leaf(g->tree, leaf);
+  } while (leaf != NULL && leaf != first);
+  return FALSE;
+}
+
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g) {
   return g->focused != NULL ? PT_TERMINAL(g->focused->user) : NULL;
 }
@@ -433,6 +468,9 @@ static void pt_pane_grid_class_init(PtPaneGridClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_TITLE] = g_signal_new("title-changed", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_NOTIFICATION] = g_signal_new("notification", PT_TYPE_PANE_GRID,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+      G_TYPE_UINT64, G_TYPE_STRING, G_TYPE_STRING);
   signals[SIG_EMPTIED] = g_signal_new("emptied", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
