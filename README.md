@@ -176,6 +176,30 @@ A URL printed as ordinary text is not a link. The program has to say it is.
 Inside an app that has the mouse, <kbd>Ctrl</kbd>+click goes to the app instead,
 and holding <kbd>Shift</kbd> takes it back, exactly as with selection.
 
+## When a program wants your attention
+
+A long build finishes while pt is on another workspace and nothing tells you.
+Programs can say so: printing `\033]9;build done\007` raises a desktop
+notification, and `\033]777;notify;Build;done\007` does the same with a title
+of its own. Anything can send them — `printf` at the end of a command works —
+and pt raises them out of the box.
+
+Clicking one comes back to the pane that sent it: the right project, the right
+tab, the right pane, and the window in front. A pane that has closed since is
+simply not there any more, and the click does nothing.
+
+The pane you are already reading stays quiet. A notification for the pane in
+front of you is telling you something you can see, so pt drops those without
+raising anything.
+
+Beyond that, one notification a second, and five seconds before the same text
+can repeat. A program in a loop cannot queue thousands of them at your desktop,
+and it cannot crowd out the one real notification another pane is trying to
+send. Long bodies are cut to fit rather than dropped.
+
+`\033]9;4;...` is a progress report, not a notification, and does not raise
+one.
+
 ## Configuration
 
 pt reads `~/.config/pt/config`, a `key = value` file (`#` starts a comment):
