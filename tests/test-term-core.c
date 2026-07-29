@@ -627,6 +627,96 @@ static void test_focus_report_resent_on_mode_enable(void) {
   pt_term_core_free(core);
 }
 
+/* ---- in-band resize reports (mode 2048) ----
+ *
+ * Same `cat -v` recipe again. The report is
+ * "ESC [ 48 ; rows ; cols ; rows*cell_h ; cols*cell_w t", so a pane spawned at
+ * 80x24 with 8x16 cells reports "^[[48;24;80;384;640t" and the same pane at
+ * 100x30 reports "^[[48;30;100;480;800t". Every core here starts at 80x24, and
+ * enabling the mode produces a report at once, so that first string doubles as
+ * the signal that the parser has seen the enable. */
+#define REPORT_80x24 "^[[48;24;80;384;640t"
+#define REPORT_100x30 "^[[48;30;100;480;800t"
+
+static void test_in_band_resize_report(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?2048h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  /* Waiting on the enable-time report is what proves the mode is on before the
+     resize below; there is no getter, and racing it would pass vacuously. */
+  g_assert_true(wait_for_text(core, REPORT_80x24));
+
+  pt_term_core_resize(core, 100, 30, 8, 16);
+  g_assert_true(wait_for_text(core, REPORT_100x30));
+
+  pt_term_core_free(core);
+}
+
+static void test_in_band_resize_needs_mode(void) {
+  /* Without mode 2048 a resize must put nothing on the pty: the child gets
+     SIGWINCH and nothing else, as it always has. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  /* Different dimensions from the spawn size, or the change guard would carry
+     this test on its own and it would prove nothing about the mode. */
+  pt_term_core_resize(core, 100, 30, 8, 16);
+  /* The pty is a FIFO: once PROBE has come back, anything written before it
+     has too. */
+  pt_term_core_write(core, "PROBE\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE"));
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "^["));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
+static void test_in_band_resize_unchanged_is_silent(void) {
+  /* With the mode on, so this cannot pass by accident. libghostty-vt does not
+     dedupe — ghostty_terminal_resize() re-sends the same bytes for the same
+     size — so a second report here would mean pt's guard is gone. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?2048h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, REPORT_80x24));
+
+  pt_term_core_resize(core, 80, 24, 8, 16);    /* what the core already has */
+  pt_term_core_write(core, "PROBE\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE"));
+  g_assert_cmpint(count_text(core, "^[[48;"), ==, 1);
+
+  pt_term_core_free(core);
+}
+
+static void test_in_band_resize_on_mode_enable(void) {
+  /* An app that turns 2048 on at startup wants the size straight away, not on
+     the next window drag. `read` holds the enable until the pane is settled at
+     a known size, and no resize call follows it. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; read x; printf '\\033[?2048h'; cat -v",
+    NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_for_text(core, REPORT_80x24));
+
+  pt_term_core_free(core);
+}
+
 static void test_alt_screen_arrows(void) {
   /* On the alt screen with no mouse tracking, the wheel becomes cursor keys.
      Mode 1007 is on by default, and DECCKM is off here, so the normal form
@@ -1126,6 +1216,13 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/focus-report-forced", test_focus_report_forced);
   g_test_add_func("/termcore/focus-report-on-enable",
                   test_focus_report_resent_on_mode_enable);
+  g_test_add_func("/termcore/in-band-resize", test_in_band_resize_report);
+  g_test_add_func("/termcore/in-band-resize-off",
+                  test_in_band_resize_needs_mode);
+  g_test_add_func("/termcore/in-band-resize-unchanged",
+                  test_in_band_resize_unchanged_is_silent);
+  g_test_add_func("/termcore/in-band-resize-on-enable",
+                  test_in_band_resize_on_mode_enable);
   g_test_add_func("/termcore/alt-screen-arrows", test_alt_screen_arrows);
   g_test_add_func("/termcore/alt-screen-tracking-wheel",
                   test_alt_screen_tracking_wheel);

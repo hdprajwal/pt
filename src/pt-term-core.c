@@ -51,6 +51,7 @@ struct PtTermCore {
   /* focus reporting (mode 1004); see pt_term_core_focus_report */
   gboolean focused;         /* last state a caller reported, mode 1004 or not */
   gboolean was_focus_event; /* mode 1004 as of the last read, for the 0->1 edge */
+  gboolean was_in_band_resize; /* mode 2048, same, for the enable-time report */
 
   PtOscScan osc;            /* OSC scanner state, carried across reads */
   PtOsc52Mode osc52;        /* what OSC 52 may do to the clipboard */
@@ -410,7 +411,33 @@ static void on_child_exited(GPid pid, gint wait_status, gpointer ud) {
  * back. libghostty-vt's C API has no mode-change callback (terminal.h exposes
  * modes through ghostty_terminal_mode_get only), so pt watches the mode for a
  * 0->1 edge once per read batch instead and reports on it. Same observable
- * behaviour, one read of a bitfield per batch of pty bytes. */
+ * behaviour, one read of a bitfield per batch of pty bytes. Mode 2048 wants
+ * the same answer for the same reason, so it shares the poll below. */
+
+/* An unsolicited mode-2048 report for the size the pane has right now.
+ *
+ * The resize path never needs this: ghostty_terminal_resize() checks mode 2048
+ * and writes the report through the write_pty effect itself
+ * (terminal/c/terminal.zig:505-519), so pt gets it for free. This is only for
+ * the enable-time report below, which has no resize to hang off. Calling
+ * ghostty_terminal_resize() with the size the terminal already has would emit
+ * one — the library does not dedupe — but it also clears synchronized output
+ * (:502), and an app that has just turned on 2048 has not asked for a frame to
+ * be torn in half. Encoding it here is the smaller lie. */
+static void send_size_report(PtTermCore *c) {
+  if (c->pty_fd < 0 || c->child_exited) return;
+  GhosttySizeReportSize size = { .rows = c->rows, .columns = c->cols,
+                                 .cell_width = (uint32_t)c->cell_w,
+                                 .cell_height = (uint32_t)c->cell_h };
+  char buf[64];   /* 50 bytes is the widest mode-2048 report there can be */
+  size_t written = 0;
+  if (ghostty_size_report_encode(GHOSTTY_SIZE_REPORT_MODE_2048, size, buf,
+                                 sizeof(buf), &written) != GHOSTTY_SUCCESS ||
+      written == 0)
+    return;
+  pty_write_raw(c->pty_fd, buf, written);
+}
+
 static void poll_mode_edges(PtTermCore *c) {
   bool focus_event = false;
   ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_FOCUS_EVENT,
@@ -419,6 +446,17 @@ static void poll_mode_edges(PtTermCore *c) {
   if (focus_event && !c->was_focus_event)
     pt_term_core_focus_report(c, c->focused, TRUE);
   c->was_focus_event = focus_event;
+
+  /* Mode 2048 is the same story: ghostty answers CSI ? 2048 h with a size
+   * report on the spot (stream_handler.zig:750), so an app that enables it
+   * while starting up can lay itself out without waiting for a window drag.
+   * libghostty-vt makes the mode change an explicit no-op instead
+   * (stream_terminal.zig:507-511), so the edge is pt's to catch. */
+  bool in_band_resize = false;
+  ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_IN_BAND_RESIZE,
+                            &in_band_resize);
+  if (in_band_resize && !c->was_in_band_resize) send_size_report(c);
+  c->was_in_band_resize = in_band_resize;
 }
 
 static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
@@ -564,15 +602,32 @@ void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode) {
 void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
                          int cell_w, int cell_h) {
   if (cols < 1 || rows < 1) return;
+  /* Nothing to do when nothing moved. pt_terminal_size_allocate calls straight
+   * through on every GTK allocation, and ghostty_terminal_resize() re-sends a
+   * byte-identical mode-2048 report however little changed, so without this an
+   * app watching in-band resizes would be woken by every layout pass. Ghostty
+   * guards further up and on a different quantity — the window's pixel size
+   * (Surface.zig:2475) — and so does send duplicate reports when the pixels
+   * move but the grid does not; pt's call site makes the stricter guard the
+   * cheaper one. */
+  if (cols == c->cols && rows == c->rows &&
+      cell_w == c->cell_w && cell_h == c->cell_h)
+    return;
   c->cols = cols; c->rows = rows; c->cell_w = cell_w; c->cell_h = cell_h;
-  ghostty_terminal_resize(c->terminal, cols, rows,
-                          (uint32_t)cell_w, (uint32_t)cell_h);
+
+  /* TIOCSWINSZ first, then the terminal, because ghostty_terminal_resize()
+   * writes the mode-2048 report as it goes. Ghostty sets the winsize before it
+   * reports too (Termio.zig:472 ahead of :495): an app that reads the report
+   * and immediately asks the kernel with TIOCGWINSZ has to get one answer, not
+   * the new size from one path and the old size from the other. */
   struct winsize ws = {
     .ws_row = rows, .ws_col = cols,
     .ws_xpixel = (unsigned short)(cols * cell_w),
     .ws_ypixel = (unsigned short)(rows * cell_h),
   };
   if (c->pty_fd >= 0) ioctl(c->pty_fd, TIOCSWINSZ, &ws);
+  ghostty_terminal_resize(c->terminal, cols, rows,
+                          (uint32_t)cell_w, (uint32_t)cell_h);
 }
 
 void pt_term_core_write(PtTermCore *c, const char *buf, gssize len) {

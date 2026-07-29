@@ -40,6 +40,11 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
                              int cell_w, int cell_h, GError **error);
 void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
                                 gpointer user);
+/* A no-op when all four arguments match what the core already has. Otherwise
+ * the kernel is told first (TIOCSWINSZ, and the SIGWINCH that follows it) and
+ * the terminal second, which is also when an app on mode 2048 gets its in-band
+ * size report — libghostty-vt writes that one itself. Callers may fire this on
+ * every layout pass; the guard is here rather than at the call sites. */
 void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
                          int cell_w, int cell_h);
 void pt_term_core_write(PtTermCore *c, const char *buf, gssize len);
