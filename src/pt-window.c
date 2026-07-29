@@ -834,17 +834,19 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
 
   /* OSC 9 carries no title at all, so most notifications arrive nameless.
    * Ghostty falls back to the flat application name; pt can do better, because
-   * the tab already carries the name of the program that is running in it —
-   * "cargo" over "build finished" says which of four builds this was. Down to
-   * the app name only when even that is empty. */
-  guint pi = 0, ti = 0;
+   * the pane knows what is running in it — "cargo" over "build finished" says
+   * which of four builds this was.
+   *
+   * Asked of the sending pane and not of its tab: a tab's title follows its
+   * *focused* pane (on_grid_command only forwards for that one), and the pane
+   * that raises a notification is by definition not the focused one, so the
+   * tab title would name a sibling. Down to the app name only when the pane
+   * has no command yet either. */
   const char *shown = title;
   if (shown == NULL || shown[0] == '\0') {
-    if (find_grid(w, g, &pi, &ti)) {
-      PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (t->title != NULL && t->title[0] != '\0') shown = t->title;
-    }
+    PtTerminal *sender = pt_pane_grid_pane_by_id(g, pane_id);
+    const char *cmd = sender != NULL ? pt_terminal_last_command(sender) : NULL;
+    if (cmd != NULL && cmd[0] != '\0') shown = cmd;
   }
   if (shown == NULL || shown[0] == '\0') shown = "pt";
 
