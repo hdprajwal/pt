@@ -1267,6 +1267,46 @@ gboolean pt_term_core_cursor_wide_tail(PtTermCore *c) {
   return tail;
 }
 
+gboolean pt_term_core_cursor_wide(PtTermCore *c) {
+  bool in_vp = false;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE,
+                           &in_vp);
+  if (!in_vp) return FALSE;
+  uint16_t cx = 0, cy = 0;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &cx);
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cy);
+
+  /* The render state answers the tail question and not this one, so the only
+   * way to it is the cell itself. Both iterators are forward-only, hence the
+   * two walks — cy rows and cx cells, no grid copy, no allocation. */
+  GhosttyRenderStateRowIterator iter = c->row_iter;
+  if (ghostty_render_state_get(c->render_state,
+                               GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                               &iter) != GHOSTTY_SUCCESS)
+    return FALSE;
+  for (uint16_t r = 0; r <= cy; r++)
+    if (!ghostty_render_state_row_iterator_next(iter)) return FALSE;
+
+  GhosttyRenderStateRowCells cells = c->row_cells;
+  if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                   &cells) != GHOSTTY_SUCCESS)
+    return FALSE;
+  for (uint16_t x = 0; x <= cx; x++)
+    if (!ghostty_render_state_row_cells_next(cells)) return FALSE;
+
+  GhosttyCell cell = 0;
+  if (ghostty_render_state_row_cells_get(
+          cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+          &cell) != GHOSTTY_SUCCESS)
+    return FALSE;
+  GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+  ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &wide);
+  return wide == GHOSTTY_CELL_WIDE_WIDE;
+}
+
 GhosttyTerminal pt_term_core_terminal(PtTermCore *c) { return c->terminal; }
 GhosttyRenderState pt_term_core_render_state(PtTermCore *c) { return c->render_state; }
 GhosttyRenderStateRowIterator pt_term_core_row_iter(PtTermCore *c) { return c->row_iter; }

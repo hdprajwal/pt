@@ -1680,6 +1680,16 @@ static gboolean wide_tail_off(PtTermCore *c) {
   return !pt_term_core_cursor_wide_tail(c);
 }
 
+static gboolean wide_head_on(PtTermCore *c) {
+  pt_term_core_sync(c);
+  return pt_term_core_cursor_wide(c);
+}
+
+static gboolean wide_head_off(PtTermCore *c) {
+  pt_term_core_sync(c);
+  return !pt_term_core_cursor_wide(c);
+}
+
 static PtTermCore *cursor_core_new(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
@@ -1776,7 +1786,7 @@ static void test_cursor_blink_mode_12(void) {
   pt_term_core_free(core);
 }
 
-static void test_cursor_wide_tail(void) {
+static void test_cursor_wide_cells(void) {
   /* A wide character owns two cells and the second holds nothing of its own.
      Parking the cursor there is the case the renderer has to back up one
      column for, or half a glyph gets a cursor drawn over it. Row 2 keeps this
@@ -1786,12 +1796,17 @@ static void test_cursor_wide_tail(void) {
   pt_term_core_write(core, "\033[2;1H\xE6\xBC\xA2", -1);
   g_assert_true(wait_for_text(core, "\xE6\xBC\xA2"));
   g_assert_true(wait_until(wide_tail_off, core));
+  g_assert_true(wait_until(wide_head_off, core));   /* column 3 is narrow */
 
   pt_term_core_write(core, "\033[2;2H", -1);   /* onto the tail */
   g_assert_true(wait_until(wide_tail_on, core));
+  /* The tail is a spacer, not the wide cell: a renderer that widened here
+     without backing up would cover the wrong two cells. */
+  g_assert_false(pt_term_core_cursor_wide(core));
 
-  pt_term_core_write(core, "\033[2;1H", -1);   /* back onto the head */
-  g_assert_true(wait_until(wide_tail_off, core));
+  pt_term_core_write(core, "\033[2;1H", -1);   /* onto the head */
+  g_assert_true(wait_until(wide_head_on, core));
+  g_assert_false(pt_term_core_cursor_wide_tail(core));
   pt_term_core_free(core);
 }
 
@@ -1918,7 +1933,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/cursor-style-default-restore",
                   test_cursor_style_reset_to_default);
   g_test_add_func("/termcore/cursor-blink-mode-12", test_cursor_blink_mode_12);
-  g_test_add_func("/termcore/cursor-wide-tail", test_cursor_wide_tail);
+  g_test_add_func("/termcore/cursor-wide-cells", test_cursor_wide_cells);
   g_test_add_func("/termcore/output-callback-only-for-output",
                   test_output_callback_is_output_only);
   return g_test_run();
