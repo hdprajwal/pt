@@ -1222,6 +1222,50 @@ void pt_term_core_sync(PtTermCore *c) {
   ghostty_render_state_update(c->render_state, c->terminal);
 }
 
+/* ---- cursor shape and blink ----
+ *
+ * Straight reads off the last synced render state. Each falls back to what a
+ * terminal nobody has configured looks like, so a failed query cannot turn the
+ * cursor into something stranger than a steady block. */
+GhosttyRenderStateCursorVisualStyle pt_term_core_cursor_style(PtTermCore *c) {
+  GhosttyRenderStateCursorVisualStyle style =
+      GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VISUAL_STYLE,
+                           &style);
+  return style;
+}
+
+gboolean pt_term_core_cursor_blinking(PtTermCore *c) {
+  bool on = false;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_BLINKING, &on);
+  return on;
+}
+
+gboolean pt_term_core_cursor_password_input(PtTermCore *c) {
+  bool on = false;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_PASSWORD_INPUT,
+                           &on);
+  return on;
+}
+
+gboolean pt_term_core_cursor_wide_tail(PtTermCore *c) {
+  /* Undefined unless the cursor is actually in the viewport, so the guard is
+   * here rather than at every call site. */
+  bool in_vp = false;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE,
+                           &in_vp);
+  if (!in_vp) return FALSE;
+  bool tail = false;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_WIDE_TAIL,
+                           &tail);
+  return tail;
+}
+
 GhosttyTerminal pt_term_core_terminal(PtTermCore *c) { return c->terminal; }
 GhosttyRenderState pt_term_core_render_state(PtTermCore *c) { return c->render_state; }
 GhosttyRenderStateRowIterator pt_term_core_row_iter(PtTermCore *c) { return c->row_iter; }

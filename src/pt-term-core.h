@@ -184,6 +184,34 @@ gboolean pt_term_core_paste_is_safe(const char *text, gssize len);
  * Fires the draw callback. */
 void pt_term_core_reset(PtTermCore *c);
 
+/* ---- cursor shape and blink (DECSCUSR, mode 12) ----
+ *
+ * What the app asked the cursor to look like, so a renderer can draw an insert
+ * bar in nvim rather than the same block everywhere. DECSCUSR pairs a shape
+ * with a blink: 1/2 block, 3/4 underline, 5/6 bar, odd blinking and even
+ * steady, and 0 (or an empty parameter) back to the default, which for a
+ * terminal with no user config is a steady block — ghostty's own numbering
+ * (src/terminal/stream.zig:1593, tests at :2833) and its VT-only mapping
+ * (src/terminal/stream_terminal.zig:154). Mode 12 carries the blink on its own.
+ *
+ * All four read the render state, so they answer as of the last
+ * pt_term_core_sync() — the same contract as pt_term_core_render_state() and
+ * the row iterators. Sync first, then ask. */
+GhosttyRenderStateCursorVisualStyle pt_term_core_cursor_style(PtTermCore *c);
+gboolean pt_term_core_cursor_blinking(PtTermCore *c);
+/* TRUE while the terminal believes the cursor sits at a password prompt, which
+ * is a cue to draw something unmissable and never blink it. Nothing in pt sets
+ * this yet: ghostty decides it by polling the pty's termios for canonical mode
+ * with echo off (src/termio/Exec.zig:366), and libghostty-vt's C API has no way
+ * in, so today it is always FALSE. The renderer handles it anyway, so the day
+ * pt grows that poll the drawing is already right. */
+gboolean pt_term_core_cursor_password_input(PtTermCore *c);
+/* TRUE when the cursor sits on the second half of a wide character. The cell
+ * it is standing on holds nothing of its own — the glyph belongs to the cell
+ * to its left — so a renderer should back up one column and draw two cells
+ * wide, as ghostty does (src/renderer/generic.zig:3232). */
+gboolean pt_term_core_cursor_wide_tail(PtTermCore *c);
+
 void pt_term_core_sync(PtTermCore *c);              /* render_state_update */
 GhosttyTerminal pt_term_core_terminal(PtTermCore *c);
 GhosttyRenderState pt_term_core_render_state(PtTermCore *c);
