@@ -9,9 +9,9 @@ static void test_defaults(void) {
   g_assert_cmpfloat(c->ui_font_size, ==, 12.5);
   g_assert_cmpstr(c->ui_font_family, ==, "IBM Plex Sans");
   g_assert_cmpuint(g_hash_table_size(c->app_overrides), ==, 0);
-  /* pt diverges from ghostty here: mouse reporting is off out of the box so
-   * click+drag selects. */
-  g_assert_false(c->mouse_reporting);
+  /* Apps that ask for the mouse get it, as everywhere else; shift takes it
+   * back for a gesture when you want pt's own selection. */
+  g_assert_true(c->mouse_reporting);
   /* Clipboard writes from programs ship on: a yank on the far end of an ssh
    * session is meant to land on the local clipboard without setup. */
   g_assert_cmpint(c->osc52, ==, PT_OSC52_WRITE);
@@ -36,7 +36,7 @@ static void test_parse_mouse_reporting(void) {
   }
   /* Junk keeps the default, like every other key. */
   PtConfig *bad = pt_config_parse("mouse-reporting = sometimes\n");
-  g_assert_false(bad->mouse_reporting);
+  g_assert_true(bad->mouse_reporting);
   pt_config_free(bad);
 
   /* It takes part in copy/equal like the rest. */

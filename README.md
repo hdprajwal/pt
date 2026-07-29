@@ -109,12 +109,12 @@ a line, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> copies the selection
 (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd> pastes). Typing clears the
 selection and snaps the view back to the prompt.
 
-That holds inside full-screen apps too — Claude Code, vim, htop, lazygit, fzf.
-Those apps normally ask the terminal for the mouse, and pt does not hand the
-*pointer* over: `mouse-reporting` ships off, which is the one place pt
-deliberately differs from ghostty's defaults. The cost is that click-driven
-features inside those apps (clicking a vim buffer, dragging a pane divider) do
-nothing.
+Full-screen apps — Claude Code, vim, htop, lazygit, fzf — usually ask the
+terminal for the mouse, and pt hands it over. That is what makes their own
+mouse features work: clicking a vim buffer, dragging a pane divider, and
+selecting text inside Claude Code, which copies it for you. Hold
+<kbd>Shift</kbd> while you drag to take the pointer back for that one gesture
+and select with pt instead.
 
 The wheel is not part of that deal. An app that asks for the mouse gets the
 wheel whatever `mouse-reporting` says, because scrolling is not how you select
@@ -122,11 +122,11 @@ text and an app on the alternate screen leaves pt nothing to scroll. Holding
 <kbd>Shift</kbd> takes the wheel back and moves pt's own view, the way every
 other terminal does it.
 
-Set `mouse-reporting = true` for the usual terminal behaviour. A plain drag
-then goes to the app, and holding <kbd>Shift</kbd> takes the pointer back for
-the length of one gesture so you can still select. Either way, "Toggle mouse
-reporting" in the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) flips the
-focused pane for the rest of the session without touching the config.
+Set `mouse-reporting = false` if you would rather a plain drag always selected
+pt's own text, even inside those apps. The cost is that their click-driven
+features stop working, including Claude Code's selection. Either way, "Toggle
+mouse reporting" in the command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) flips
+the focused pane for the rest of the session without touching the config.
 
 ## When a program copies for you
 
@@ -175,7 +175,7 @@ font-size = 9
 font-family = JetBrains Mono
 ui-font-size = 12.5
 ui-font-family = IBM Plex Sans
-mouse-reporting = false
+mouse-reporting = true
 osc52 = write
 ```
 

@@ -38,7 +38,7 @@ static gboolean th_pal_set[16] = {
 static char *font_family;   /* NULL -> PT_FONT_FAMILY_DEFAULT */
 
 /* The `mouse-reporting` config key, mirrored into every terminal made after
- * it is set. Off by default: see PT_CONFIG_MOUSE_REPORTING_DEFAULT. */
+ * it is set. On by default: see PT_CONFIG_MOUSE_REPORTING_DEFAULT. */
 static gboolean mouse_reporting_default = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
 
 /* The `osc52` config key, same arrangement: mirrored into every terminal. */
@@ -790,10 +790,10 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
  * the pointer: wheel, buttons and motion are encoded to the pty instead of
  * driving selection or the viewport. Two things have to agree before that
  * happens, exactly as in ghostty: the app must have asked for the mouse, and
- * `mouse-reporting` must be on. pt ships it off, so a plain drag selects text
- * even inside a full-screen TUI. With it on, holding shift takes the pointer
- * back for the length of one gesture, which is the escape hatch every other
- * terminal offers.
+ * `mouse-reporting` must be on. It ships on, so those apps behave the way they
+ * do everywhere else, and holding shift takes the pointer back for the length
+ * of one gesture, which is the escape hatch every other terminal offers. Set
+ * it off to make a plain drag always select pt's own text instead.
  */
 /* Rows per wheel notch, as before. Pixel-unit deltas (touchpads, and wheels
  * whose driver reports high-resolution scrolling) already carry the distance
@@ -822,15 +822,15 @@ static gboolean pointer_reports(PtTerminal *t, GdkModifierType state) {
   return t->button_down ? t->reporting_drag : mouse_reporting(t, state);
 }
 
-/* Who owns the *wheel*, which is not the same question. `mouse-reporting` is
- * off by default so that a plain press and drag selects text inside a
- * full-screen TUI without learning a modifier first — that is a statement
- * about the press, and the wheel got swept up in it: an app tracking the mouse
- * on the alt screen took the wheel out of pt's hands (no scrollback to move)
- * without being given it, so scrolling did nothing at all. So the wheel goes
- * to any app that tracks the mouse, and shift takes it back, which is what
- * xterm, kitty and ghostty all do. Mid-drag it still follows whoever took the
- * press, for the same reason the pointer does. */
+/* Who owns the *wheel*, which is not the same question. `mouse-reporting` is a
+ * statement about the press: turning it off means a plain drag selects text
+ * inside a full-screen TUI without learning a modifier first. The wheel got
+ * swept up in that, and an app tracking the mouse on the alt screen took the
+ * wheel out of pt's hands (no scrollback to move) without being given it, so
+ * scrolling did nothing at all. So the wheel goes to any app that tracks the
+ * mouse whatever the key says, and shift takes it back, which is what xterm,
+ * kitty and ghostty all do. Mid-drag it still follows whoever took the press,
+ * for the same reason the pointer does. */
 static gboolean wheel_reports(PtTerminal *t, GdkModifierType state) {
   if (t->button_down) return t->reporting_drag;
   return t->core != NULL && (state & GDK_SHIFT_MASK) == 0 &&
