@@ -187,8 +187,9 @@
             <td class="name">selection</td>
             <td class="key">Ctrl ⇧ C</td>
             <td class="desc">
-              Click and drag to select, with no modifier, even inside full-screen
-              apps. Double-click a word, triple-click a line.
+              Click and drag to select. Double-click a word, triple-click a
+              line. Inside a full-screen app that wants the mouse, hold Shift to
+              select with pt instead.
             </td>
           </tr>
           <tr>
@@ -254,24 +255,50 @@ ctest --test-dir build   <span class="c"># tests</span></code></pre>
         the view back to the prompt.
       </p>
       <p>
-        That holds inside full-screen apps too — Claude Code, vim, htop, lazygit,
-        fzf. Those apps normally ask the terminal for the mouse, and pt does not
-        hand it over: <code>mouse-reporting</code> ships off, which is the one
-        place pt deliberately differs from ghostty's defaults. The cost is that
-        mouse-driven features inside those apps do nothing.
+        Full-screen apps — Claude Code, vim, htop, lazygit, fzf — usually ask the
+        terminal for the mouse, and pt hands it over. That is what makes their
+        own mouse features work, including selecting text inside Claude Code,
+        which copies it for you. Hold <code>Shift</code> while you drag to take
+        the pointer back for that one gesture and select with pt instead.
       </p>
       <p>
-        Set <code>mouse-reporting = true</code> for the usual behaviour. A plain
-        drag then goes to the app, and holding <code>Shift</code> takes the
-        pointer back for one gesture. Either way, "Toggle mouse reporting" in the
-        palette flips the focused pane for the rest of the session without
+        The wheel is not part of that deal. An app that asks for the mouse gets
+        the wheel whatever <code>mouse-reporting</code> says, because scrolling
+        is not how you select text and an app on the alternate screen leaves pt
+        nothing to scroll. Holding <code>Shift</code> takes the wheel back and
+        moves pt's own view.
+      </p>
+      <p>
+        Set <code>mouse-reporting = false</code> if you would rather a plain drag
+        always selected pt's own text. The cost is that click-driven features
+        inside those apps stop working. Either way, "Toggle mouse reporting" in
+        the palette flips the focused pane for the rest of the session without
         touching the config.
+      </p>
+
+      <h2>When a program copies for you</h2>
+      <p>
+        A program can put text on your clipboard by printing an escape sequence
+        (OSC 52). That is how a yank in nvim over ssh, tmux's copy mode, and
+        selecting text inside Claude Code all reach the clipboard on the machine
+        you are sitting at. pt allows it out of the box.
+      </p>
+      <p>
+        The same sequence has a second form that asks the terminal what is on the
+        clipboard instead. pt never answers it, at any setting. Anything running
+        in a pane could use it to read what you last copied, including something
+        on the far end of an ssh session.
+      </p>
+      <p>
+        Set <code>osc52 = ask</code> to approve each one. The dialog says which
+        pane asked and how many bytes it wants to copy.
+        <code>osc52 = off</code> ignores clipboard writes completely.
       </p>
 
       <h2 id="config">Configuration</h2>
       <p>
         pt reads <code>~/.config/pt/config</code>, a <code>key = value</code> file
-        where <code>#</code> starts a comment. Those six keys, plus
+        where <code>#</code> starts a comment. Those seven keys, plus
         <code>app-*</code> colour-token overrides such as
         <code>app-background = #101010</code>, are the entire config surface.
       </p>
@@ -280,11 +307,13 @@ ctest --test-dir build   <span class="c"># tests</span></code></pre>
 <span class="k">font-family</span> = JetBrains Mono
 <span class="k">ui-font-size</span> = 12.5
 <span class="k">ui-font-family</span> = IBM Plex Sans
-<span class="k">mouse-reporting</span> = false</code></pre>
+<span class="k">mouse-reporting</span> = true
+<span class="k">osc52</span> = write</code></pre>
       <p>
         Booleans accept <code>true</code>/<code>false</code>,
         <code>yes</code>/<code>no</code>, <code>on</code>/<code>off</code> or
-        <code>1</code>/<code>0</code>. Custom themes go in
+        <code>1</code>/<code>0</code>. <code>osc52</code> takes
+        <code>write</code>, <code>ask</code> or <code>off</code>. Custom themes go in
         <code>~/.config/pt/themes/</code>; both the config and the active theme
         are watched and applied live.
       </p>
