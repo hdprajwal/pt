@@ -1116,9 +1116,15 @@ gboolean pt_term_core_paste_is_safe(const char *text, gssize len) {
  * does not, because the reason to reach for this command is a program that died
  * mid-sequence and left something held down. */
 void pt_term_core_reset(PtTermCore *c) {
-  /* Before the library reset, not after: the terminal-side clear has to happen
-   * while the selection it names still exists, and selection_clear early-outs
-   * on the flag, so doing it the other way round would leave the mirror lying. */
+  /* Before the library reset, not after. Both orders end up with the mirror
+   * clear — sel_active is still set afterwards, so the early-out would not
+   * fire — but only this one releases the terminal's tracked selection while
+   * there is still a selection to release. Run the other way round, the
+   * OPT_SELECTION write lands on a terminal that has already dropped its own
+   * (Screen.zig:408) and does nothing but flip pt's flag, and it does so after
+   * PageList.reset has pointed every surviving tracked pin at the new first
+   * page and marked it garbage (PageList.zig:743-753). The library unwinds its
+   * selection out of that state itself; pt has no reason to lean on that. */
   pt_term_core_selection_clear(c);
   c->sel_dragging = FALSE;      /* a reset mid-drag ends the drag */
   c->sel_moved = FALSE;

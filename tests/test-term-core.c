@@ -1025,10 +1025,18 @@ static void on_osc_count_cb(PtTermCore *core, int code, const char *payload,
   g_strlcpy(ctx->osc_payload, payload, sizeof(ctx->osc_payload));
 }
 
+/* An integration smoke test, deliberately: it proves the reset runs against a
+   live core with the scanner wired to a real pty and leaves it dispatching, and
+   it asserts nothing that depends on how the kernel batched the reads. The real
+   guard for pt_osc_scan_clear() is /oscscan/clear-drops-partial in
+   test-osc-scan, which drives PtOscScan directly and is deterministic. Proving
+   the clear here would mean inferring, from "ARMED" reaching the grid, that the
+   unterminated OSC written behind it in the same write() had already been fed
+   to the scanner before the reset — and nothing guarantees the pty delivers
+   both halves in one read. */
 static void test_reset_clears_osc_scanner(void) {
-  /* A program that died mid-OSC leaves pt's scanner parked in its payload
-     state with everything since buffered. Plain `cat` (not `cat -v`) so the
-     escape bytes come back raw and the scanner really sees them. */
+  /* Plain `cat` (not `cat -v`) so the escape bytes come back raw and the
+     scanner really sees them. */
   Ctx ctx = {0};
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf ready; cat", NULL};
@@ -1039,25 +1047,17 @@ static void test_reset_clears_osc_scanner(void) {
   pt_term_core_set_callbacks(core, &cbs, &ctx);
   g_assert_true(wait_for_text(core, "ready"));
 
-  /* ARMED rides in the same write, so seeing it in the grid means the
-     unterminated OSC behind it has been through the scanner too. */
+  /* A program that died mid-OSC. */
   pt_term_core_write(core, "ARMED\033]9;stale-payload", -1);
   g_assert_true(wait_for_text(core, "ARMED"));
   g_assert_cmpint(ctx.osc_count, ==, 0);          /* never terminated */
 
   pt_term_core_reset(core);
 
-  /* The terminator the dead program never sent. With the buffer still there
-     this would dispatch "stale-payloadand-more"; with it cleared the scanner
-     is in ground and these are ordinary bytes. */
-  pt_term_core_write(core, "and-more\007PROBE1\n", -1);
-  g_assert_true(wait_for_text(core, "PROBE1"));
-  g_assert_cmpint(ctx.osc_count, ==, 0);
-
-  /* And the scanner still works: a whole unrelated OSC after the reset
-     dispatches on its own terms. */
-  pt_term_core_write(core, "\033]9;fresh-payload\007PROBE2\n", -1);
-  g_assert_true(wait_for_text(core, "PROBE2"));
+  /* A whole unrelated OSC after the reset still dispatches on its own terms,
+     with its own payload and nothing of the dead one's. */
+  pt_term_core_write(core, "\033]9;fresh-payload\007PROBE\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE"));
   g_assert_cmpint(ctx.osc_count, ==, 1);
   g_assert_cmpstr(ctx.osc_payload, ==, "fresh-payload");
 
