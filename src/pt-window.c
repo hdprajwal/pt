@@ -653,9 +653,11 @@ static void on_git_update(const PtGitStatus *st, GPtrArray *files,
   PtProjectUI *p = user;
   p->git = *st;
   p->is_repo = is_repo;
-  /* `files` dies with this call, so the project keeps its own copy. */
+  /* `files` transfers from the monitor: the project keeps the array itself,
+   * and everything downstream (sidebar, project bar, palette, info panel)
+   * reads from here — no copies anywhere on the path. */
   g_clear_pointer(&p->git_files, g_ptr_array_unref);
-  p->git_files = pt_git_files_copy(files);
+  p->git_files = files;
   /* No refresh_statusline here: the status bar stopped speaking for git in the
    * rebuild (that moved to the project bar), and scraping the terminal grid on
    * every git poll would be pure waste. */
@@ -692,10 +694,27 @@ static void project_ui_free(gpointer data) {
   g_free(p);
 }
 
+/* Poll cost follows attention: the active project's monitor polls at 5s, the
+ * rest back off to 60s, and the numstat subprocess only runs for the project
+ * on screen while the info panel is. Called whenever the active project or
+ * the panel's visibility moves; the setters no-op when nothing changed. */
+static void sync_git_monitors(PtWindow *w) {
+  gboolean panel = w->infopanel != NULL &&
+                   gtk_widget_get_visible(w->infopanel);
+  for (guint i = 0; i < w->projects->len; i++) {
+    PtProjectUI *p = g_ptr_array_index(w->projects, i);
+    if (p->monitor == NULL) continue;
+    gboolean is_active = (int)i == w->active_project;
+    pt_git_monitor_set_want_line_counts(p->monitor, panel && is_active);
+    pt_git_monitor_set_active(p->monitor, is_active);
+  }
+}
+
 /* ---------- actions ---------- */
 static void action_switch_project(PtWindow *w, int idx) {
   if (idx < 0 || (guint)idx >= w->projects->len) return;
   w->active_project = idx;
+  sync_git_monitors(w);
   refresh_sidebar(w);
   show_active_grid(w);
   refresh_infopanel(w);
@@ -1062,6 +1081,7 @@ static void on_folder_chosen(GObject *src, GAsyncResult *res, gpointer user) {
   char *name = g_path_get_basename(path);
   g_ptr_array_add(w->projects, project_ui_new(w, name, path));
   w->active_project = (int)w->projects->len - 1;
+  sync_git_monitors(w);
   g_free(name);
   g_free(path);
   g_object_unref(file);
@@ -1090,6 +1110,7 @@ static void on_project_remove(PtSidebar *sb, int idx, gpointer user) {
   g_ptr_array_remove_index(w->projects, idx);
   if (w->active_project >= (int)w->projects->len)
     w->active_project = (int)w->projects->len - 1;
+  sync_git_monitors(w);   /* whoever slid into the active slot polls fast */
   refresh_sidebar(w);
   show_active_grid(w);
   mark_dirty(w);
@@ -1134,6 +1155,9 @@ static void on_search_escape(PtSidebar *sb, gpointer user) {
 static void action_toggle_infopanel(PtWindow *w) {
   gboolean show = !gtk_widget_get_visible(w->infopanel);
   gtk_widget_set_visible(w->infopanel, show);
+  /* Line counts are only worth a subprocess while the panel can show them;
+   * opening flips the gate on, which also refreshes so they arrive now. */
+  sync_git_monitors(w);
   /* refresh_infopanel is a no-op while hidden, so without this the panel would
    * appear holding whatever it showed when it was last closed. */
   if (show) refresh_infopanel(w);
@@ -1721,6 +1745,9 @@ static void restore_state(PtWindow *w) {
   if (w->projects->len > 0)
     w->active_project = CLAMP(s->active_project, 0,
                               (int)w->projects->len - 1);
+  /* Monitors start on the fast poll; back the restored background projects
+   * off now that the active one is known. */
+  sync_git_monitors(w);
   pt_session_state_free(s);
 }
 

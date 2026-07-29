@@ -5,7 +5,7 @@ typedef struct {
   char branch[128];   /* "" when unknown; "(detached)" for detached HEAD */
   int ahead;
   int behind;
-  int changed;        /* changed + untracked + unmerged entry count */
+  int changed;        /* == the length of the file list parsed with it */
 } PtGitStatus;
 
 /* One changed path. `xy` is the display code: "??" for untracked, otherwise the
@@ -17,29 +17,16 @@ typedef struct {
   int add, del;   /* lines; -1 = unknown (binary, untracked, no counts yet) */
 } PtGitFile;
 
-/* One `git diff --numstat` row. add/del are -1 for binary files ("-  -"). */
-typedef struct {
-  char *path;
-  int add, del;
-} PtGitNumstat;
-
-/* Parse `git status --porcelain=v2 --branch` output.
- * Returns FALSE only when text is NULL. Unknown lines are ignored. */
-gboolean pt_git_parse_porcelain_v2(const char *text, PtGitStatus *out);
-
-/* Changed paths from the same output, in git's order. Elements are PtGitFile*
- * and the array frees them. Never NULL: NULL text or no entries gives an empty
- * array. Renames report the new path. */
-GPtrArray *pt_git_parse_files(const char *text);
-
-/* Deep copy of such an array; NULL gives an empty one. */
-GPtrArray *pt_git_files_copy(GPtrArray *files);
-
-/* Parse `git diff --numstat` output. Elements are PtGitNumstat*; the array
- * frees them. Never NULL. Rename rows ("a => b", "src/{a => b}.c") resolve to
- * the new path. */
-GPtrArray *pt_git_parse_numstat(const char *text);
-
-/* Copy counts onto the files with matching paths. Rows that match nothing are
- * dropped, and files with no row keep their -1s. */
-void pt_git_files_merge_numstat(GPtrArray *files, GPtrArray *stats);
+/* One pass over `git status --porcelain=v2 --branch` output: branch and
+ * ahead/behind from the headers, one PtGitFile per entry line in git's order
+ * (renames report the new path), and `out_status->changed` set from the file
+ * count — the two can never disagree. When `numstat_text_or_null` carries
+ * `git diff --numstat` output, its line counts land on the matching paths in
+ * the same call: files with no row keep their -1s (untracked, binary), rows
+ * matching no file are dropped, and rename rows ("a => b", "src/{a => b}.c")
+ * resolve to the new path first. NULL status text (not a repository) gives a
+ * zeroed status. `*out_files` is never NULL and transfers to the caller; the
+ * array frees its PtGitFile* elements. */
+void pt_git_result_parse(const char *status_text,
+                         const char *numstat_text_or_null,
+                         PtGitStatus *out_status, GPtrArray **out_files);

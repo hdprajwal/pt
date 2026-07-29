@@ -2,109 +2,59 @@
 #include <stdio.h>
 #include <string.h>
 
-gboolean pt_git_parse_porcelain_v2(const char *text, PtGitStatus *out) {
-  if (text == NULL || out == NULL) return FALSE;
-  memset(out, 0, sizeof(*out));
-
-  char **lines = g_strsplit(text, "\n", -1);
-  for (char **lp = lines; *lp != NULL; lp++) {
-    const char *line = *lp;
-    if (g_str_has_prefix(line, "# branch.head ")) {
-      g_strlcpy(out->branch, line + strlen("# branch.head "),
-                sizeof(out->branch));
-    } else if (g_str_has_prefix(line, "# branch.ab ")) {
-      sscanf(line, "# branch.ab +%d -%d", &out->ahead, &out->behind);
-    } else if (line[0] == '1' || line[0] == '2' || line[0] == 'u' ||
-               line[0] == '?') {
-      /* Entry lines all start with a type tag followed by a space. */
-      if (line[1] == ' ') out->changed++;
-    }
-  }
-  g_strfreev(lines);
-  return TRUE;
-}
-
 static void git_file_free(gpointer data) {
   PtGitFile *f = data;
   g_free(f->path);
   g_free(f);
 }
 
-/* Entry lines are `n_fields` space-separated columns whose last one is the
- * path — and a path may itself contain spaces, so the split has to stop
- * counting at the path and take the rest verbatim. NULL when the line is
- * short of columns. */
-static char *entry_path(const char *line, int n_fields) {
-  char **tok = g_strsplit(line, " ", n_fields);
-  char *path = NULL;
-  if (g_strv_length(tok) == (guint)n_fields && tok[n_fields - 1][0] != '\0')
-    path = g_strdup(tok[n_fields - 1]);
-  g_strfreev(tok);
-  return path;
-}
-
-GPtrArray *pt_git_parse_files(const char *text) {
-  GPtrArray *files = g_ptr_array_new_with_free_func(git_file_free);
-  if (text == NULL) return files;
-
-  char **lines = g_strsplit(text, "\n", -1);
-  for (char **lp = lines; *lp != NULL; lp++) {
-    const char *line = *lp;
-    if (line[0] == '\0' || line[1] != ' ') continue;
-    char *path = NULL;
-    switch (line[0]) {
-      case '1': path = entry_path(line, 9);  break;
-      case '2': path = entry_path(line, 10); break;
-      case 'u': path = entry_path(line, 11); break;
-      case '?': path = entry_path(line, 2);  break;
-      default:  continue;   /* "# branch.*" headers and anything unknown */
-    }
-    if (path == NULL) continue;
-    /* Rename entries carry "<new>\t<orig>"; the new path is the one to show. */
-    char *tab = strchr(path, '\t');
-    if (tab != NULL) *tab = '\0';
-
-    PtGitFile *f = g_new0(PtGitFile, 1);
-    f->add = f->del = -1;   /* until a numstat row says otherwise */
-    if (line[0] == '?') {
-      g_strlcpy(f->xy, "??", sizeof(f->xy));
-    } else {
-      int n = 0;
-      for (int i = 2; i < 4 && line[i] != '\0' && line[i] != ' '; i++)
-        if (line[i] != '.') f->xy[n++] = line[i];
-      f->xy[n] = '\0';
-    }
-    f->path = path;
-    g_ptr_array_add(files, f);
+/* Advance past `n` space-terminated fields inside [p, end). NULL when the
+ * line runs out of columns first. */
+static const char *skip_fields(const char *p, const char *end, int n) {
+  for (int i = 0; i < n; i++) {
+    const char *sp = memchr(p, ' ', (size_t)(end - p));
+    if (sp == NULL) return NULL;
+    p = sp + 1;
   }
-  g_strfreev(lines);
-  return files;
+  return p < end ? p : NULL;
 }
 
-GPtrArray *pt_git_files_copy(GPtrArray *files) {
-  GPtrArray *copy = g_ptr_array_new_with_free_func(git_file_free);
-  for (guint i = 0; files != NULL && i < files->len; i++) {
-    const PtGitFile *src = g_ptr_array_index(files, i);
-    PtGitFile *f = g_new0(PtGitFile, 1);
-    memcpy(f->xy, src->xy, sizeof(f->xy));
-    f->path = g_strdup(src->path);
-    f->add = src->add;
-    f->del = src->del;
-    g_ptr_array_add(copy, f);
+/* One porcelain entry line ("1 ", "2 ", "u ", "? ") → one PtGitFile. The
+ * fixed columns are skipped with a pointer scan; everything after them is the
+ * path, verbatim — a path may contain spaces. */
+static void parse_entry(const char *line, const char *end, GPtrArray *files) {
+  int skip;
+  switch (line[0]) {
+    case '1': skip = 8; break;
+    case '2': skip = 9; break;
+    case 'u': skip = 10; break;
+    case '?': skip = 1; break;
+    default: return;    /* unknown entry kinds are ignored */
   }
-  return copy;
+  const char *path = skip_fields(line, end, skip);
+  if (path == NULL) return;
+  /* Rename entries carry "<new>\t<orig>"; the new path is the one to show. */
+  const char *stop = memchr(path, '\t', (size_t)(end - path));
+  if (stop == NULL) stop = end;
+
+  PtGitFile *f = g_new0(PtGitFile, 1);
+  f->add = f->del = -1;   /* until a numstat row says otherwise */
+  if (line[0] == '?') {
+    g_strlcpy(f->xy, "??", sizeof(f->xy));
+  } else {
+    int n = 0;
+    for (const char *c = line + 2; c < line + 4 && c < end && *c != ' '; c++)
+      if (*c != '.') f->xy[n++] = *c;
+    f->xy[n] = '\0';
+  }
+  f->path = g_strndup(path, (gsize)(stop - path));
+  g_ptr_array_add(files, f);
 }
 
-/* ---------- numstat ---------- */
-static void numstat_free(gpointer data) {
-  PtGitNumstat *s = data;
-  g_free(s->path);
-  g_free(s);
-}
-
-/* Renames arrive with the unchanged parts factored out: "old.c => new.c",
- * "src/{old => new}.c", "dir/{ => sub}/f.c". Rebuild the new path by keeping
- * the right-hand side of every brace group (or of a bare arrow). */
+/* Numstat renames arrive with the unchanged parts factored out:
+ * "old.c => new.c", "src/{old => new}.c", "dir/{ => sub}/f.c". Rebuild the new
+ * path by keeping the right-hand side of every brace group (or of a bare
+ * arrow). */
 static char *numstat_new_path(const char *spec) {
   static const char arrow[] = " => ";
   if (strstr(spec, arrow) == NULL) return g_strdup(spec);
@@ -136,41 +86,67 @@ static char *numstat_new_path(const char *spec) {
   return path;
 }
 
-GPtrArray *pt_git_parse_numstat(const char *text) {
-  GPtrArray *stats = g_ptr_array_new_with_free_func(numstat_free);
-  if (text == NULL) return stats;
-
-  char **lines = g_strsplit(text, "\n", -1);
-  for (char **lp = lines; *lp != NULL; lp++) {
-    char **col = g_strsplit(*lp, "\t", 3);
-    if (g_strv_length(col) == 3 && col[0][0] != '\0' && col[2][0] != '\0') {
-      PtGitNumstat *s = g_new0(PtGitNumstat, 1);
-      /* Binary files report "-" in both columns and have no line counts. */
-      gboolean binary = col[0][0] == '-' || col[1][0] == '-';
-      s->add = binary ? -1 : (int)g_ascii_strtoll(col[0], NULL, 10);
-      s->del = binary ? -1 : (int)g_ascii_strtoll(col[1], NULL, 10);
-      s->path = numstat_new_path(col[2]);
-      g_ptr_array_add(stats, s);
-    }
-    g_strfreev(col);
-  }
-  g_strfreev(lines);
-  return stats;
-}
-
-void pt_git_files_merge_numstat(GPtrArray *files, GPtrArray *stats) {
-  if (files == NULL || stats == NULL) return;
+/* Walk `git diff --numstat` rows ("add\tdel\tpath") and copy the counts onto
+ * the files with matching paths. Binary rows ("-\t-") keep the file at -1. */
+static void merge_numstat(GPtrArray *files, const char *text) {
+  if (text == NULL || files->len == 0) return;
   GHashTable *by_path = g_hash_table_new(g_str_hash, g_str_equal);
-  for (guint i = 0; i < stats->len; i++) {
-    PtGitNumstat *s = g_ptr_array_index(stats, i);
-    g_hash_table_insert(by_path, s->path, s);
-  }
   for (guint i = 0; i < files->len; i++) {
     PtGitFile *f = g_ptr_array_index(files, i);
-    const PtGitNumstat *s = g_hash_table_lookup(by_path, f->path);
-    if (s == NULL) continue;   /* untracked, or a path git no longer lists */
-    f->add = s->add;
-    f->del = s->del;
+    g_hash_table_insert(by_path, f->path, f);
+  }
+  for (const char *line = text; *line != '\0';) {
+    const char *nl = strchr(line, '\n');
+    const char *end = nl != NULL ? nl : line + strlen(line);
+    const char *tab1 = memchr(line, '\t', (size_t)(end - line));
+    const char *tab2 = tab1 != NULL
+        ? memchr(tab1 + 1, '\t', (size_t)(end - tab1 - 1)) : NULL;
+    if (tab1 != NULL && tab1 > line && tab2 != NULL && tab2 + 1 < end) {
+      char *spec = g_strndup(tab2 + 1, (gsize)(end - tab2 - 1));
+      char *path = numstat_new_path(spec);
+      PtGitFile *f = g_hash_table_lookup(by_path, path);
+      if (f != NULL) {
+        /* Binary files report "-" in both columns and have no line counts. */
+        gboolean binary = line[0] == '-' || tab1[1] == '-';
+        f->add = binary ? -1 : (int)g_ascii_strtoll(line, NULL, 10);
+        f->del = binary ? -1 : (int)g_ascii_strtoll(tab1 + 1, NULL, 10);
+      }
+      g_free(path);
+      g_free(spec);
+    }
+    line = nl != NULL ? nl + 1 : end;
   }
   g_hash_table_destroy(by_path);
+}
+
+void pt_git_result_parse(const char *status_text,
+                         const char *numstat_text_or_null,
+                         PtGitStatus *out_status, GPtrArray **out_files) {
+  memset(out_status, 0, sizeof(*out_status));
+  GPtrArray *files = g_ptr_array_new_with_free_func(git_file_free);
+
+  /* One walk, no buffer split: each iteration sees [line, end). Prefix checks
+   * are safe on the running pointer — no header prefix spans a newline. */
+  for (const char *line = status_text; line != NULL && *line != '\0';) {
+    const char *nl = strchr(line, '\n');
+    const char *end = nl != NULL ? nl : line + strlen(line);
+    if (g_str_has_prefix(line, "# branch.head ")) {
+      const char *head = line + strlen("# branch.head ");
+      gsize n = MIN((gsize)(end - head), sizeof(out_status->branch) - 1);
+      memcpy(out_status->branch, head, n);
+      out_status->branch[n] = '\0';
+    } else if (g_str_has_prefix(line, "# branch.ab ")) {
+      /* %d stops at the newline on its own; the format never crosses it. */
+      sscanf(line, "# branch.ab +%d -%d", &out_status->ahead,
+             &out_status->behind);
+    } else if (end - line >= 2 && line[1] == ' ') {
+      parse_entry(line, end, files);
+    }
+    line = nl != NULL ? nl + 1 : end;
+  }
+
+  /* Structural, not counted: the entry lines *are* the changed set. */
+  out_status->changed = (int)files->len;
+  merge_numstat(files, numstat_text_or_null);
+  *out_files = files;
 }

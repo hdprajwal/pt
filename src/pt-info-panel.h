@@ -9,7 +9,9 @@ GtkWidget *pt_info_panel_new(void);
  * project accent for the dot. Strings are copied. */
 void pt_info_panel_set_info(PtInfoPanel *ip, const char *shell, int pid,
                             const char *dir, int accent);
-/* Git block. `files` holds PtGitFile* and is deep-copied; NULL means none. */
+/* Git block. `files` holds PtGitFile*; the panel keeps its own reference to
+ * the array instead of copying it, so treat a handed-in array as frozen —
+ * replace it wholesale, never mutate it in place. NULL means none. */
 void pt_info_panel_set_git(PtInfoPanel *ip, const PtGitStatus *st,
                            gboolean is_repo, GPtrArray *files);
 /* Hides the Zed button when zed is not on PATH. */

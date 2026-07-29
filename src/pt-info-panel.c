@@ -168,9 +168,12 @@ void pt_info_panel_set_git(PtInfoPanel *ip, const PtGitStatus *st,
   gtk_widget_set_visible(ip->ab, ab[0] != '\0');
 
   if (!is_repo) files = NULL;
+  if (files == ip->files) return;   /* the very array already shown */
   if (same_files(ip, files)) return;
   g_ptr_array_unref(ip->files);
-  ip->files = pt_git_files_copy(files);
+  /* A reference, not a copy: git updates always deliver a fresh array, so the
+   * one shown here is never mutated behind the panel's back. */
+  ip->files = files != NULL ? g_ptr_array_ref(files) : g_ptr_array_new();
   rebuild_files(ip);
 }
 
@@ -261,7 +264,7 @@ static void pt_info_panel_init(PtInfoPanel *ip) {
   gtk_widget_add_css_class(GTK_WIDGET(ip), "pt-infopanel");
   gtk_widget_set_size_request(GTK_WIDGET(ip), PT_INFO_PANEL_WIDTH, -1);
   ip->accent = -1;
-  ip->files = pt_git_files_copy(NULL);   /* empty, with the right free func */
+  ip->files = g_ptr_array_new();   /* empty; parsed arrays free their own */
 
   ip->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_parent(ip->box, GTK_WIDGET(ip));
