@@ -8,6 +8,13 @@ G_DECLARE_FINAL_TYPE(PtPaneGrid, pt_pane_grid, PT, PANE_GRID, GtkWidget)
 
 /* Takes ownership of tree; creates a PtTerminal per leaf (cwd from leaf). */
 GtkWidget *pt_pane_grid_new(PtSplitNode *tree);
+/* The env every pane of this grid hands its shell: NULL-terminated
+ * "KEY=VALUE" strings, copied (NULL clears). Panes are built deep inside the
+ * grid, from split-tree leaves with no project context of their own, so the
+ * window sets it here once per grid and the grid passes it to each pane.
+ * Applies to future spawns — the grid's existing panes are updated too, but a
+ * shell already running keeps the env it started with. */
+void pt_pane_grid_set_env(PtPaneGrid *g, const char *const *envv);
 PtSplitNode *pt_pane_grid_tree(PtPaneGrid *g);
 void pt_pane_grid_split(PtPaneGrid *g, PtSplitKind kind);
 /* Close focused pane. Returns FALSE when the grid is now empty (close the tab). */

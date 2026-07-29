@@ -7,13 +7,13 @@
 #define PT_TYPE_TERMINAL (pt_terminal_get_type())
 G_DECLARE_FINAL_TYPE(PtTerminal, pt_terminal, PT, TERMINAL, GtkWidget)
 
-GtkWidget *pt_terminal_new(const char *cwd);   /* uses the default env below */
-/* env_pairs: NULL-terminated "KEY=VALUE" strings for the child. Copied. */
-GtkWidget *pt_terminal_new_full(const char *cwd, const char *const *env_pairs);
-/* Module-level default env applied by pt_terminal_new (used by pane grids,
- * which create terminals from split leaves without project context).
- * Copied; pass NULL to clear. */
-void pt_terminal_set_default_env(const char *const *env_pairs);
+GtkWidget *pt_terminal_new(const char *cwd);
+/* env_pairs: NULL-terminated "KEY=VALUE" strings for the child, copied (NULL
+ * clears). Read once, when the pane spawns its shell — which happens lazily, at
+ * the pane's first allocation — so setting it afterwards reaches only a
+ * respawn: a live shell keeps the env it started with. The pane grid calls this
+ * for every pane it builds, with the env its window handed it. */
+void pt_terminal_set_spawn_env(PtTerminal *t, const char *const *env_pairs);
 PtTermCore *pt_terminal_core(PtTerminal *t);
 /* Stable for the life of the pane and never reused. A desktop notification
  * sits on screen until the user clicks it, long after the pane that raised it
@@ -37,9 +37,11 @@ void pt_terminal_set_font_size(int pts);    /* clamped; re-measures all panes */
 void pt_terminal_set_theme(const PtResolvedTheme *rt);
 /* Family+size together; NULL family keeps the current one. */
 void pt_terminal_set_font(const char *family, int pts);
-/* Module-level mouse-reporting default (the `mouse-reporting` config key).
- * Applying a config re-arms every live terminal, so a pane toggled by hand
- * follows the file again the next time it changes. */
+/* The `mouse-reporting` config key, pushed into every live terminal: a pane
+ * toggled by hand follows the file again the next time it changes. Nothing is
+ * remembered between calls, so the window also calls this right after building
+ * a pane — a pane born after the config was applied would otherwise sit on
+ * PT_CONFIG_MOUSE_REPORTING_DEFAULT. */
 void pt_terminal_set_mouse_reporting(gboolean on);
 gboolean pt_terminal_mouse_reporting(PtTerminal *t);
 /* Flips this pane only — ghostty's toggle_mouse_reporting. Returns the new
@@ -48,8 +50,9 @@ gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t);
 /* ghostty's `reset` action, this pane only: see pt_term_core_reset. The shell
  * keeps running; only the terminal's state is thrown away. */
 void pt_terminal_reset(PtTerminal *t);
-/* Module-level `osc52` mode: what a program in a pane may do to the clipboard
- * with OSC 52. Re-armed on every live terminal, like the one above. */
+/* The `osc52` config key: what a program in a pane may do to the clipboard with
+ * OSC 52. Pushed into every live terminal, like the one above, and called at
+ * the same points. */
 void pt_terminal_set_osc52(PtOsc52Mode mode);
 /* GObject signals: "exited" (int), "title-changed" (const char*),
  *                  "command-changed" (const char*) — fg program of the pane changed,

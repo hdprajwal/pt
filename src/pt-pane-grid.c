@@ -9,6 +9,7 @@ struct _PtPaneGrid {
   PtSplitNode *tree;
   PtSplitNode *focused;   /* always a leaf of tree, or NULL when empty */
   GtkWidget *root_widget; /* current widget tree child */
+  char **env;             /* child env for the panes we build, or NULL */
 };
 
 G_DEFINE_FINAL_TYPE(PtPaneGrid, pt_pane_grid, GTK_TYPE_WIDGET)
@@ -104,6 +105,9 @@ static void on_term_exited(PtTerminal *t, int status, gpointer user) {
 static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   if (leaf->user != NULL) return GTK_WIDGET(leaf->user);
   GtkWidget *term = pt_terminal_new(leaf->cwd);
+  /* Before the pane is parented, and so before it can allocate and spawn. */
+  pt_terminal_set_spawn_env(PT_TERMINAL(term),
+                            (const char *const *)g->env);
   g_object_ref_sink(term);
   leaf->user = term;
   g_object_set_data(G_OBJECT(term), "pt-leaf", leaf);
@@ -232,6 +236,27 @@ GtkWidget *pt_pane_grid_new(PtSplitNode *tree) {
 }
 
 PtSplitNode *pt_pane_grid_tree(PtPaneGrid *g) { return g->tree; }
+
+static void set_env_walk(PtSplitNode *n, char **envv) {
+  if (n == NULL) return;
+  if (n->kind == PT_SPLIT_LEAF) {
+    if (n->user != NULL)
+      pt_terminal_set_spawn_env(PT_TERMINAL(n->user),
+                                (const char *const *)envv);
+    return;
+  }
+  set_env_walk(n->a, envv);
+  set_env_walk(n->b, envv);
+}
+
+void pt_pane_grid_set_env(PtPaneGrid *g, const char *const *envv) {
+  g_clear_pointer(&g->env, g_strfreev);
+  if (envv != NULL) g->env = g_strdupv((char **)envv);
+  /* The panes that already exist get it too: a pane whose shell has not
+   * spawned yet (a restored tab never shown, so never allocated) must not be
+   * left with the env of whatever the grid was told first. */
+  set_env_walk(g->tree, g->env);
+}
 
 void pt_pane_grid_split(PtPaneGrid *g, PtSplitKind kind) {
   if (g->focused == NULL) return;
@@ -429,6 +454,7 @@ static void pt_pane_grid_dispose(GObject *obj) {
   }
   free_terminals(g->tree);
   g_clear_pointer(&g->tree, pt_split_free);
+  g_clear_pointer(&g->env, g_strfreev);
   G_OBJECT_CLASS(pt_pane_grid_parent_class)->dispose(obj);
 }
 

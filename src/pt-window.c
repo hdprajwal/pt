@@ -58,6 +58,12 @@ struct _PtWindow {
   guint config_reload_source;
   guint theme_reload_source;
   guint config_save_source;     /* debounce */
+  /* The accent hexes handed to spawned shells as PT_ACCENT, in "#rrggbb" form.
+   * Filled from the resolved theme's accent-0..5 tokens on every render, which
+   * is once per config; a project's env is built per spawn and reads whichever
+   * one its accent points at. Seeded with pt-dark's accents in init so an env
+   * built before the first render still carries a sane value. */
+  char accent_hex[PT_ACCENT_COUNT][8];
 };
 
 G_DEFINE_FINAL_TYPE(PtWindow, pt_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -123,21 +129,13 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
 
 /* ---------- config ---------- */
 
-/* The accent hexes handed to spawned shells as PT_ACCENT, kept module-level
- * because set_spawn_env_for() runs per project while the theme is resolved
- * once per config. Seeded with pt-dark's accents so any spawn that somehow
- * beats the first render_config() still gets a sane value; render_config()
- * overwrites it from the resolved accent tokens. */
-static char accent_env[PT_ACCENT_COUNT][8] =
-    { "#6ee7a0", "#8ab4f8", "#f2b25c", "#c99bf0", "#5ed3c4", "#e0849b" };
-
 /* The last theme parse, kept between renders: the settings dialog emits
  * "changed" at key-repeat rate when an arrow is held on a row, and re-reading
  * and re-parsing the theme file per repeat is pure waste when neither the
  * name nor the file moved. Keyed by name + file stamp, and dropped outright
  * when the themes-dir monitor fires — belt over the stamp's braces for a
  * same-size rewrite on a filesystem without subsecond mtimes. Module-level
- * like accent_env: the themes dir is per-user, not per-window. */
+ * rather than per-window: the themes dir is per-user. */
 static char *theme_cache_name;
 static char *theme_cache_stamp;   /* NULL = no file backing (builtin/missing) */
 static PtTheme *theme_cache_theme;
@@ -178,8 +176,9 @@ static char *theme_file_stamp(const char *dir, const char *name) {
 /* Parse `cfg`'s theme and push colors+fonts everywhere. Deliberately takes the
  * config rather than reading w->config: the settings dialog previews a
  * candidate it still owns, and nothing about rendering it may put that
- * candidate anywhere the debounced save could later find it. */
-static void render_config(const PtConfig *cfg) {
+ * candidate anywhere the debounced save could later find it. `w` is only
+ * written for the resolved accent hexes, which are not config state. */
+static void render_config(PtWindow *w, const PtConfig *cfg) {
   char *tdir = pt_theme_dir();
   char *stamp = theme_file_stamp(tdir, cfg->theme);
   if (theme_cache_theme == NULL ||
@@ -221,7 +220,7 @@ static void render_config(const PtConfig *cfg) {
    * Accents always resolve opaque, so the css form is "#rrggbb". */
   for (int i = 0; i < PT_ACCENT_COUNT; i++) {
     char *hex = pt_color_to_css(&rt.tokens[PT_TOK_ACCENT_0 + i]);
-    g_strlcpy(accent_env[i], hex, sizeof accent_env[i]);
+    g_strlcpy(w->accent_hex[i], hex, sizeof w->accent_hex[i]);
     g_free(hex);
   }
   g_free(tdir);
@@ -229,7 +228,7 @@ static void render_config(const PtConfig *cfg) {
 
 /* NULL config = disposed window, same guard convention as active_project(). */
 static void apply_config(PtWindow *w) {
-  if (w->config != NULL) render_config(w->config);
+  if (w->config != NULL) render_config(w, w->config);
 }
 
 static gboolean config_save_now(gpointer user) {
@@ -306,7 +305,7 @@ static gboolean theme_reload_now(gpointer user) {
    * first-ever ⌃,; rendering the candidate again is a no-op for it. */
   if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings))) {
     const PtConfig *cand = pt_settings_config(PT_SETTINGS(w->settings));
-    if (cand != NULL) render_config(cand);
+    if (cand != NULL) render_config(w, cand);
     return G_SOURCE_REMOVE;
   }
   apply_config(w);
@@ -697,30 +696,44 @@ static void seed_git_branch(PtProjectUI *p) {
   g_free(head);
 }
 
-/* Terminals are spawned deep inside the pane grid (leaves become terminals
- * during rebuild), so the project context reaches the child through the
- * module-level default env instead of a parameter. Every path that can create
- * a terminal for project p calls this immediately before doing so; the grid
- * builds synchronously, so the default is never read for a different project
- * than the one that just set it. */
-static void set_spawn_env_for(PtProjectUI *p) {
-  /* Accent hexes come from the resolved theme's accent-0..5 tokens (see
-   * accent_env above), seeded with pt-dark's values. */
+/* What a shell of project p is told about it: the project's name, its accent as
+ * a hex the prompt can colour with, and its branch. Given to the grid, which is
+ * what actually builds the panes — leaves become terminals inside it, with no
+ * project context of their own. Rebuilt at every point that can add a pane, so
+ * a split hours later still sees the current theme's accent and the branch as
+ * it stands now. */
+static void set_spawn_env_for(PtProjectUI *p, PtPaneGrid *g) {
+  PtWindow *w = p->window;
+  int a = ((p->accent % PT_ACCENT_COUNT) + PT_ACCENT_COUNT) % PT_ACCENT_COUNT;
   char *proj = g_strdup_printf("PT_PROJECT=%s", p->name);
-  char *acc  = g_strdup_printf("PT_ACCENT=%s",
-                               accent_env[((p->accent % PT_ACCENT_COUNT) +
-                                           PT_ACCENT_COUNT) % PT_ACCENT_COUNT]);
+  char *acc  = g_strdup_printf("PT_ACCENT=%s", w->accent_hex[a]);
   char *br   = g_strdup_printf("PT_BRANCH=%s", p->git.branch);
   const char *pairs[] = { proj, acc, br, NULL };
-  pt_terminal_set_default_env(pairs);
+  pt_pane_grid_set_env(g, pairs);
   g_free(proj); g_free(acc); g_free(br);
 }
 
-static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
+/* The two per-pane config values, pushed after a pane is built: the terminal
+ * widget remembers neither between panes, so a pane created after the config
+ * was applied would otherwise sit on the compiled-in defaults. Reaches every
+ * live pane, which is the same "the file is the source of truth" re-arm an
+ * ordinary config apply does. */
+static void push_pane_config(PtWindow *w) {
+  if (w->config == NULL) return;
+  pt_terminal_set_mouse_reporting(w->config->mouse_reporting);
+  pt_terminal_set_osc52(w->config->osc52);
+}
+
+static PtTabUI *tab_ui_new(PtWindow *w, PtProjectUI *p, const char *title,
+                           PtSplitNode *tree) {
   PtTabUI *t = g_new0(PtTabUI, 1);
   t->title = g_strdup(title);
   t->grid = pt_pane_grid_new(tree);
   g_object_ref_sink(t->grid);
+  /* Both before the grid is parented, so before any pane can allocate: the
+   * spawn is lazy, and the env is read at spawn. */
+  set_spawn_env_for(p, PT_PANE_GRID(t->grid));
+  push_pane_config(w);
   g_object_set_data(G_OBJECT(t->grid), PT_GRID_TAB_KEY, t);
   g_signal_connect(t->grid, "structure-changed",
                    G_CALLBACK(on_grid_structure), w);
@@ -765,7 +778,7 @@ static void on_git_update(const PtGitStatus *st, GPtrArray *files,
 
 /* Everything a project is before it has tabs: identity, accent, the empty tab
  * array, and — for a project whose directory is actually there — the branch
- * seed and the spawn env its first shells will read. Tabs stay the caller's
+ * seed its first shells' PT_BRANCH comes from. Tabs stay the caller's
  * business because that is the one place the two entry points differ: a
  * restored project brings its own from the session, a freshly added one gets a
  * single shell. `accent` < 0 takes the next colour in the cycle. */
@@ -780,13 +793,10 @@ static PtProjectUI *project_ui_alloc(PtWindow *w, const char *name,
                           : (int)(w->projects->len % PT_ACCENT_COUNT);
   p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
   p->missing = !g_file_test(path, G_FILE_TEST_IS_DIR);
-  if (!p->missing) {
+  /* Before the caller builds any tab: PT_BRANCH is part of the env every one of
+   * them hands its shells, and the git monitor's first poll lands far later. */
+  if (!p->missing)
     seed_git_branch(p);   /* the monitor has not polled yet; read HEAD directly */
-    /* Per project and immediately before its tabs are built, never once for a
-     * whole restore: each project's shells must see their own
-     * PT_PROJECT/PT_ACCENT/PT_BRANCH. */
-    set_spawn_env_for(p);
-  }
   return p;
 }
 
@@ -796,7 +806,8 @@ static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
                                    const char *path, int accent) {
   PtProjectUI *p = project_ui_alloc(w, name, path, accent);
   if (!p->missing) {
-    g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(path)));
+    g_ptr_array_add(p->tabs,
+                    tab_ui_new(w, p, "shell", pt_split_leaf_new(path)));
     p->monitor = pt_git_monitor_new(path, on_git_update, p);
   }
   return p;
@@ -869,8 +880,8 @@ static void action_prev_tab(PtWindow *w) {
 static void action_new_tab(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   if (p == NULL || p->missing) return;
-  set_spawn_env_for(p);
-  g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(p->path)));
+  g_ptr_array_add(p->tabs,
+                  tab_ui_new(w, p, "shell", pt_split_leaf_new(p->path)));
   p->active_tab = (int)p->tabs->len - 1;
   show_active_grid(w);
   /* the row's shell count just moved; without this it waits for the comm poll */
@@ -1115,8 +1126,11 @@ static void action_split(PtWindow *w, PtSplitKind kind) {
   PtProjectUI *p = active_project(w);
   PtTabUI *t = active_tab(p);
   if (t == NULL) return;
-  set_spawn_env_for(p);
+  /* Re-set rather than relied on: the accent may have followed a theme change
+   * and the branch may have moved since this grid's last pane. */
+  set_spawn_env_for(p, PT_PANE_GRID(t->grid));
   pt_pane_grid_split(PT_PANE_GRID(t->grid), kind);
+  push_pane_config(w);   /* the pane the split just built */
 }
 
 static void action_focus_next(PtWindow *w) {
@@ -1456,7 +1470,7 @@ static void on_settings_changed(PtSettings *s, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
   if (w->config == NULL) return;   /* disposed window */
   const PtConfig *cand = pt_settings_config(s);
-  if (cand != NULL) render_config(cand);
+  if (cand != NULL) render_config(w, cand);
 }
 
 /* Enter: the candidate becomes the config, and only now does it hit disk. */
@@ -1795,19 +1809,19 @@ static void restore_state(PtWindow *w) {
     PtProjectState *ps = g_ptr_array_index(s->projects, i);
     /* Same construction as a project the user adds — the saved accent instead
      * of the next one in the cycle, and the saved tabs instead of one fresh
-     * shell. project_ui_alloc has already seeded the branch and the per-project
-     * spawn env, which the tabs below need before they spawn anything. */
+     * shell. project_ui_alloc has already seeded the branch, which the tabs
+     * below put in the env of every shell they spawn. */
     PtProjectUI *p = project_ui_alloc(w, ps->name, ps->path, ps->accent);
     if (!p->missing) {
       for (guint j = 0; j < ps->tabs->len; j++) {
         PtTabState *ts = g_ptr_array_index(ps->tabs, j);
         /* steal the tree from the session copy */
-        g_ptr_array_add(p->tabs, tab_ui_new(w, ts->title, ts->tree));
+        g_ptr_array_add(p->tabs, tab_ui_new(w, p, ts->title, ts->tree));
         ts->tree = NULL;
       }
       if (p->tabs->len == 0)
         g_ptr_array_add(p->tabs,
-                        tab_ui_new(w, "shell", pt_split_leaf_new(p->path)));
+                        tab_ui_new(w, p, "shell", pt_split_leaf_new(p->path)));
       p->active_tab = CLAMP(ps->active_tab, 0, (int)p->tabs->len - 1);
       p->monitor = pt_git_monitor_new(p->path, on_git_update, p);
     }
@@ -1871,6 +1885,12 @@ static void pt_window_class_init(PtWindowClass *klass) {
 static void pt_window_init(PtWindow *w) {
   w->projects = g_ptr_array_new_with_free_func(project_ui_free);
   w->active_project = -1;
+  /* pt-dark's accents, until the first render resolves the real theme. */
+  static const char *const accent_seed[PT_ACCENT_COUNT] = {
+    "#6ee7a0", "#8ab4f8", "#f2b25c", "#c99bf0", "#5ed3c4", "#e0849b",
+  };
+  for (int i = 0; i < PT_ACCENT_COUNT; i++)
+    g_strlcpy(w->accent_hex[i], accent_seed[i], sizeof w->accent_hex[i]);
 
   /* The sidebar runs the full window height, so the project bar (which owns the
    * window controls and the drag handle) sits atop the content column only. */

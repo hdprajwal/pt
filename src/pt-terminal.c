@@ -55,17 +55,6 @@ static gboolean th_pal_set[16] = {
 static gboolean th_dark = TRUE;
 static char *font_family;   /* NULL -> PT_FONT_FAMILY_DEFAULT */
 
-/* The `mouse-reporting` config key, mirrored into every terminal made after
- * it is set. On by default: see PT_CONFIG_MOUSE_REPORTING_DEFAULT. */
-static gboolean mouse_reporting_default = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
-
-/* The `osc52` config key, same arrangement: mirrored into every terminal. */
-static PtOsc52Mode osc52_default = PT_CONFIG_OSC52_DEFAULT;
-
-/* Env applied by pt_terminal_new when the caller has no project context
- * (pane grids build terminals straight from split-tree leaves). */
-static char **default_env;
-
 enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_COMMAND_CHANGED,
        SIG_NOTIFICATION, N_SIGNALS };
 static guint signals[N_SIGNALS];
@@ -1683,7 +1672,6 @@ void pt_terminal_set_font(const char *family, int pts) {
 }
 
 void pt_terminal_set_mouse_reporting(gboolean on) {
-  mouse_reporting_default = on;
   /* The file is the source of truth: a pane the user toggled by hand goes
    * back in step the next time the config is applied, same as the theme. */
   for (GSList *l = live_terminals; l != NULL; l = l->next) {
@@ -1695,7 +1683,6 @@ void pt_terminal_set_mouse_reporting(gboolean on) {
 }
 
 void pt_terminal_set_osc52(PtOsc52Mode mode) {
-  osc52_default = mode;
   for (GSList *l = live_terminals; l != NULL; l = l->next) {
     PtTerminal *t = l->data;
     t->osc52 = mode;
@@ -1777,8 +1764,10 @@ static void pt_terminal_init(PtTerminal *t) {
   pango_font_description_set_size(t->font_desc, font_size_pts * PANGO_SCALE);
   t->layout = gtk_widget_create_pango_layout(GTK_WIDGET(t), NULL);
   pango_layout_set_font_description(t->layout, t->font_desc);
-  t->report_mouse = mouse_reporting_default;
-  t->osc52 = osc52_default;
+  /* Compiled-in defaults only: the config's values arrive from the window,
+   * which calls the two setters below for every pane it has just built. */
+  t->report_mouse = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
+  t->osc52 = PT_CONFIG_OSC52_DEFAULT;
   t->blink_visible = TRUE;
   t->link_row = -2;          /* no cached link answer yet */
   live_terminals = g_slist_prepend(live_terminals, t);
@@ -1816,18 +1805,13 @@ static void pt_terminal_init(PtTerminal *t) {
   gtk_widget_add_controller(GTK_WIDGET(t), focus);
 }
 
-void pt_terminal_set_default_env(const char *const *env_pairs) {
-  g_clear_pointer(&default_env, g_strfreev);
-  if (env_pairs != NULL) default_env = g_strdupv((char **)env_pairs);
-}
-
-GtkWidget *pt_terminal_new_full(const char *cwd, const char *const *env_pairs) {
-  PtTerminal *t = g_object_new(PT_TYPE_TERMINAL, NULL);
-  t->start_cwd = g_strdup(cwd != NULL ? cwd : g_get_home_dir());
+void pt_terminal_set_spawn_env(PtTerminal *t, const char *const *env_pairs) {
+  g_clear_pointer(&t->env, g_strfreev);
   if (env_pairs != NULL) t->env = g_strdupv((char **)env_pairs);
-  return GTK_WIDGET(t);
 }
 
 GtkWidget *pt_terminal_new(const char *cwd) {
-  return pt_terminal_new_full(cwd, (const char *const *)default_env);
+  PtTerminal *t = g_object_new(PT_TYPE_TERMINAL, NULL);
+  t->start_cwd = g_strdup(cwd != NULL ? cwd : g_get_home_dir());
+  return GTK_WIDGET(t);
 }
