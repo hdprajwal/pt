@@ -191,10 +191,17 @@ static void blink_phase_reset(PtTerminal *t) {
 }
 
 /* ---- core callbacks ---- */
+/* Output, as opposed to a redraw: the core fires this only for bytes from the
+ * child, so scrolling the viewport and snapping it back on a keypress do not
+ * pass for typing. */
+static void core_output(PtTermCore *core, gpointer user) {
+  (void)core;
+  blink_phase_reset(PT_TERMINAL(user));
+}
+
 static void core_draw(PtTermCore *core, gpointer user) {
   (void)core;
   PtTerminal *t = PT_TERMINAL(user);
-  blink_phase_reset(t);
   gtk_widget_queue_draw(GTK_WIDGET(t));
   update_link_cursor(t);       /* the grid just moved under the pointer */
   g_signal_emit(t, signals[SIG_ACTIVITY], 0);
@@ -553,7 +560,8 @@ static void ensure_core(PtTerminal *t) {
   apply_palette(t->core);
   /* Registering clipboard_write is what starts the OSC scanner: with no
    * consumer at all the core does not even look at the bytes. */
-  PtTermCoreCallbacks cbs = { .draw = core_draw, .exited = core_exited,
+  PtTermCoreCallbacks cbs = { .draw = core_draw, .output = core_output,
+                              .exited = core_exited,
                               .title = core_title, .command = core_command,
                               .clipboard_write = core_clipboard_write };
   pt_term_core_set_callbacks(t->core, &cbs, t);

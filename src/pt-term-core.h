@@ -8,6 +8,12 @@ typedef struct PtTermCore PtTermCore;
 
 typedef struct {
   void (*draw)(PtTermCore *core, gpointer user);   /* state changed; redraw */
+  /* Bytes arrived from the child and the parser has consumed them. Fires just
+   * before the draw that follows, and only for real output: a scroll, a reset
+   * and anything else that only moves pt's view of the terminal fire `draw`
+   * alone. Anything that has to tell output apart from a redraw — the cursor
+   * blink phase, which output pushes back to visible — belongs here. */
+  void (*output)(PtTermCore *core, gpointer user);
   void (*exited)(PtTermCore *core, int status, gpointer user);
   void (*title)(PtTermCore *core, const char *title, gpointer user);
   void (*command)(PtTermCore *core, const char *comm, gpointer user);
