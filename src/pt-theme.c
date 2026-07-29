@@ -180,6 +180,14 @@ static double srgb_lum(const PtColor *c) {   /* rough perceived lightness */
   return (0.299 * c->r + 0.587 * c->g + 0.114 * c->b) / 255.0;
 }
 
+/* The one definition of "is this theme dark", used both for deriving the chrome
+ * and for what pt tells programs. ghostty runs the same formula
+ * (terminal/color.zig:484) against the same 0.5, but branches the other way
+ * (`lum > 0.5` → light, application.zig:1370), so the two disagree at exactly
+ * 0.5 and nowhere else. pt's direction is kept: it has been picking the chrome
+ * since before anyone asked it about color schemes. */
+static gboolean bg_is_dark(const PtColor *bg) { return srgb_lum(bg) < 0.5; }
+
 static PtColor shift_l(const PtColor *c, double delta) {
   /* Move toward white (delta>0) or black (delta<0) in linear-ish space. */
   PtColor out = *c;
@@ -218,7 +226,8 @@ void pt_theme_resolve(const PtTheme *t, GHashTable *config_overrides,
   out->term.app_overrides = NULL;  /* not owned by the resolved copy */
 
   const PtColor bg = t->background, fg = t->foreground;
-  gboolean dark = srgb_lum(&bg) < 0.5;
+  gboolean dark = bg_is_dark(&bg);
+  out->dark = dark;
   double dir = dark ? 1.0 : -1.0;
   PtColor *tok = out->tokens;
 
@@ -316,4 +325,19 @@ char *pt_theme_load_text(const char *dir, const char *name) {
   if (g_strcmp0(name, "pt-dark") == 0)
     return g_strdup(pt_theme_builtin_pt_dark());
   return NULL;
+}
+
+gboolean pt_theme_is_dark(const char *dir, const char *name) {
+  char *text = pt_theme_load_text(dir, name);
+  if (text == NULL) return TRUE;   /* unknown name: pt's own theme is dark */
+  PtTheme *t = pt_theme_parse(text);
+  /* Straight off the parsed background rather than through pt_theme_resolve():
+   * the answer does not depend on the chrome tokens or on any override, and a
+   * caller classifying every installed theme should not pay to derive 33 colors
+   * per name. App overrides cannot move it either — they repaint pt's chrome,
+   * not the terminal background this reads. */
+  gboolean dark = bg_is_dark(&t->background);
+  pt_theme_free(t);
+  g_free(text);
+  return dark;
 }

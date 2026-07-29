@@ -56,6 +56,9 @@ struct PtTermCore {
   PtOscScan osc;            /* OSC scanner state, carried across reads */
   PtOsc52Mode osc52;        /* what OSC 52 may do to the clipboard */
 
+  /* color scheme (CSI ? 996 n, mode 2031); see pt_term_core_set_color_scheme */
+  gboolean dark;
+
   PtTermCoreCallbacks cbs;
   gpointer cbs_user;
 };
@@ -104,6 +107,17 @@ static bool effect_device_attributes(GhosttyTerminal t, void *ud,
   out->secondary.firmware_version = 1;
   out->secondary.rom_cartridge = 0;
   out->tertiary.unit_id = 0;
+  return true;
+}
+
+/* CSI ? 996 n. Answered whether or not mode 2031 is on — a direct question
+ * always gets an answer, only the unsolicited notification is mode-gated
+ * (Termio.zig:711-720, where ghostty's `force` flag splits the two). */
+static bool effect_color_scheme(GhosttyTerminal t, void *ud,
+                                GhosttyColorScheme *out) {
+  (void)t;
+  PtTermCore *c = ud;
+  *out = c->dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT;
   return true;
 }
 
@@ -547,6 +561,9 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   c->pty_fd = -1;
   c->last_exit = -1;
   c->osc52 = PT_CONFIG_OSC52_DEFAULT;
+  /* pt ships one theme and it is dark, so a core nobody configures answers
+   * dark rather than lying about a light background it is not painting. */
+  c->dark = TRUE;
   if (env_pairs != NULL) c->env_pairs = g_strdupv((char **)env_pairs);
 
   GhosttyTerminalOptions opts = { .cols = cols, .rows = rows,
@@ -583,6 +600,8 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
                        (const void *)effect_size);
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES,
                        (const void *)effect_device_attributes);
+  ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_COLOR_SCHEME,
+                       (const void *)effect_color_scheme);
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_XTVERSION,
                        (const void *)effect_xtversion);
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
@@ -604,6 +623,34 @@ void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
 
 void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode) {
   c->osc52 = mode;
+}
+
+void pt_term_core_set_color_scheme(PtTermCore *c, gboolean dark) {
+  dark = dark ? TRUE : FALSE;      /* the compare below is on the value */
+  /* Ghostty dedupes a layer up, on the state (Surface.zig:4958), and its
+   * notification path deliberately does not: every config reload re-pings mode
+   * 2031 unconditionally, colors changed or not (stream_handler.zig:120-122).
+   * pt cannot copy that. Its one theme-apply path runs on every settings-dialog
+   * preview step (pt-window.c:92-95), so an unconditional re-ping would write
+   * to the child on every arrow keypress in that dialog. Dedupe here instead,
+   * where every caller passes through. */
+  if (c->dark == dark) return;
+  c->dark = dark;
+  if (c->pty_fd < 0 || c->child_exited) return;
+
+  /* The notification is mode-gated; the answer to a direct query above is not.
+   * Unlike modes 1004 and 2048 there is no enable-time report to arrange:
+   * ghostty sends nothing when an app turns 2031 on (report_color_scheme is
+   * read in exactly one place tree-wide, Termio.zig:712), leaving the app to
+   * ask with CSI ? 996 n if it wants the value at startup. So no edge poll. */
+  bool on = false;
+  ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_COLOR_SCHEME_REPORT, &on);
+  if (!on) return;
+  /* libghostty-vt has no encoder for this one — the bytes only exist as string
+   * literals inside ghostty (stream_terminal.zig:328-331, pinned by its own
+   * tests at :1885 and :1914) — so pt writes them itself. */
+  const char *seq = dark ? "\x1b[?997;1n" : "\x1b[?997;2n";
+  pty_write_raw(c->pty_fd, seq, 9);
 }
 
 void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
@@ -1098,6 +1145,14 @@ void pt_term_core_reset(PtTermCore *c) {
    * report for an app that turns either mode on again. */
   c->was_focus_event = FALSE;
   c->was_in_band_resize = FALSE;
+
+  /* The color scheme is deliberately *not* cleared: it mirrors the theme pt is
+   * painting, which a reset does not touch (colors survive fullReset), so the
+   * next 996 query must still be answered with the truth. Nothing is reported
+   * either — ghostty re-emits for mode 2031 after RIS from the stream
+   * (stream_handler.zig:951-954), but that belongs to the escape sequence, not
+   * to the reset action this is, and fullReset has just turned 2031 off
+   * anyway, so there is nobody left listening. */
 
   if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
 }
