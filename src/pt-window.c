@@ -79,6 +79,41 @@ static PtTabUI *active_tab(PtProjectUI *p) {
   return g_ptr_array_index(p->tabs, p->active_tab);
 }
 
+/* Grid → owning tab, the same trick pt-pane-grid plays with "pt-leaf" on a
+ * terminal. Grid signals arrive carrying the grid and nothing else while every
+ * handler wants its tab, so without this each one walked every project's tabs
+ * to find it. Set in tab_ui_new and cleared in tab_ui_free: a grid can outlive
+ * its tab (pt-pane-grid's idle holds its own ref), and an unset back-pointer is
+ * exactly the "no tab owns this grid any more" answer the close paths want,
+ * where a stale one would be a read after free. */
+#define PT_GRID_TAB_KEY "pt-tab"
+
+static PtTabUI *grid_tab(PtPaneGrid *g) {
+  return g != NULL ? g_object_get_data(G_OBJECT(g), PT_GRID_TAB_KEY) : NULL;
+}
+
+/* Locate the tab that owns a grid, as (project index, tab index) — what every
+ * caller actually acts on, since tabs are addressed by slot. FALSE when no tab
+ * owns it: confirmation is async, so by response time the grid may have been
+ * dropped already (its last shell exited cleanly → on_grid_emptied removed the
+ * tab), and a plain "close the active tab's pane" would then hit whatever tab
+ * slid into that slot. The scan is over the projects only — the tab pointer
+ * comes from the grid itself. */
+static gboolean find_grid(PtWindow *w, PtPaneGrid *g, guint *out_pi,
+                          guint *out_ti) {
+  PtTabUI *t = grid_tab(g);
+  if (w->projects == NULL || t == NULL) return FALSE;
+  for (guint pi = 0; pi < w->projects->len; pi++) {
+    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
+    guint ti = 0;
+    if (!g_ptr_array_find(p->tabs, t, &ti)) continue;
+    if (out_pi != NULL) *out_pi = pi;
+    if (out_ti != NULL) *out_ti = ti;
+    return TRUE;
+  }
+  return FALSE;
+}
+
 static void mark_dirty(PtWindow *w);   /* persistence hook; body in Task 12 */
 /* Wired up in tab_ui_new, but written down with the rest of the notification
  * code further on — it needs find_grid and the project/tab switches. */
@@ -347,8 +382,7 @@ static void refresh_projectbar(PtWindow *w) {
   pt_project_bar_update(PT_PROJECT_BAR(w->projectbar),
       p != NULL ? p->name : "pt",
       p != NULL ? p->path : "",
-      (p != NULL && p->is_repo) ? p->git.branch : NULL,
-      p != NULL ? p->git.changed : 0,
+      (p != NULL && p->is_repo) ? &p->git : NULL,
       p != NULL ? p->accent : 0);
 }
 
@@ -361,8 +395,7 @@ static void refresh_sidebar(PtWindow *w) {
     rows[i].path = p->path;
     rows[i].missing = p->missing;
     rows[i].is_repo = p->is_repo;
-    rows[i].changed = p->git.changed;
-    g_strlcpy(rows[i].branch, p->git.branch, sizeof(rows[i].branch));
+    rows[i].git = p->git;
     rows[i].accent = p->accent;
     rows[i].shell_count = (int)p->tabs->len;
     int running = 0;
@@ -593,20 +626,14 @@ static void remove_tab_at(PtWindow *w, guint pi, guint ti) {
 
 /* Last pane in a grid closed via a clean shell exit → drop the owning tab.
  * The grid may belong to a background project/tab (a background shell can exit),
- * so scan every project. The emitting grid survives this (the idle in
- * pt-pane-grid holds its own ref) even though tab removal unrefs it here. */
+ * which is why the lookup goes through find_grid rather than assuming the
+ * active tab. The emitting grid survives this (the idle in pt-pane-grid holds
+ * its own ref) even though tab removal unrefs it here. */
 static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
-  for (guint pi = 0; pi < w->projects->len; pi++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-    for (guint ti = 0; ti < p->tabs->len; ti++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (t->grid != GTK_WIDGET(g)) continue;
-      remove_tab_at(w, pi, ti);
-      return;
-    }
-  }
+  guint pi = 0, ti = 0;
+  if (!find_grid(w, g, &pi, &ti)) return;
+  remove_tab_at(w, pi, ti);
 }
 
 /* Focused pane's foreground program changed → relabel the owning tab live.
@@ -617,25 +644,19 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
  * title is captured on the next structural save anyway. */
 static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
-  for (guint pi = 0; pi < w->projects->len; pi++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-    for (guint ti = 0; ti < p->tabs->len; ti++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (t->grid != GTK_WIDGET(g)) continue;
-      g_free(t->title);
-      t->title = g_strdup(comm);
-      if ((int)pi == w->active_project) {
-        refresh_tabstrip(w);
-        /* run-state just flipped for a pane of the visible project: this is the
-         * edge the 500ms poll deliberately does not cover (it only runs while
-         * something is running), so the "✓ / ✗ exit N" settle happens here. */
-        refresh_statusline(w);
-      }
-      queue_refresh_sidebar(w);
-      return;
-    }
+  guint pi = 0;
+  if (!find_grid(w, g, &pi, NULL)) return;
+  PtTabUI *t = grid_tab(g);
+  g_free(t->title);
+  t->title = g_strdup(comm);
+  if ((int)pi == w->active_project) {
+    refresh_tabstrip(w);
+    /* run-state just flipped for a pane of the visible project: this is the
+     * edge the 500ms poll deliberately does not cover (it only runs while
+     * something is running), so the "✓ / ✗ exit N" settle happens here. */
+    refresh_statusline(w);
   }
+  queue_refresh_sidebar(w);
 }
 
 /* The prompt smuggles the last exit code out through the terminal title, so a
@@ -700,6 +721,7 @@ static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
   t->title = g_strdup(title);
   t->grid = pt_pane_grid_new(tree);
   g_object_ref_sink(t->grid);
+  g_object_set_data(G_OBJECT(t->grid), PT_GRID_TAB_KEY, t);
   g_signal_connect(t->grid, "structure-changed",
                    G_CALLBACK(on_grid_structure), w);
   g_signal_connect(t->grid, "focus-changed", G_CALLBACK(on_grid_focus), w);
@@ -715,6 +737,7 @@ static void tab_ui_free(gpointer data) {
   PtTabUI *t = data;
   g_free(t->title);
   if (t->grid != NULL) {
+    g_object_set_data(G_OBJECT(t->grid), PT_GRID_TAB_KEY, NULL);
     if (gtk_widget_get_parent(t->grid) != NULL)
       gtk_widget_unparent(t->grid);
     g_object_unref(t->grid);
@@ -740,19 +763,39 @@ static void on_git_update(const PtGitStatus *st, GPtrArray *files,
   refresh_infopanel(p->window);
 }
 
-static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
-                                   const char *path) {
+/* Everything a project is before it has tabs: identity, accent, the empty tab
+ * array, and — for a project whose directory is actually there — the branch
+ * seed and the spawn env its first shells will read. Tabs stay the caller's
+ * business because that is the one place the two entry points differ: a
+ * restored project brings its own from the session, a freshly added one gets a
+ * single shell. `accent` < 0 takes the next colour in the cycle. */
+static PtProjectUI *project_ui_alloc(PtWindow *w, const char *name,
+                                     const char *path, int accent) {
   PtProjectUI *p = g_new0(PtProjectUI, 1);
   p->name = g_strdup(name);
   p->path = g_strdup(path);
   p->window = w;
   /* called before the project joins the array, so len is its future index */
-  p->accent = (int)(w->projects->len % PT_ACCENT_COUNT);
+  p->accent = accent >= 0 ? accent
+                          : (int)(w->projects->len % PT_ACCENT_COUNT);
   p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
   p->missing = !g_file_test(path, G_FILE_TEST_IS_DIR);
   if (!p->missing) {
     seed_git_branch(p);   /* the monitor has not polled yet; read HEAD directly */
+    /* Per project and immediately before its tabs are built, never once for a
+     * whole restore: each project's shells must see their own
+     * PT_PROJECT/PT_ACCENT/PT_BRANCH. */
     set_spawn_env_for(p);
+  }
+  return p;
+}
+
+/* A project the user just added (or one restored with no tabs saved): one
+ * shell, git monitor running. `accent` < 0 = next in the cycle. */
+static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
+                                   const char *path, int accent) {
+  PtProjectUI *p = project_ui_alloc(w, name, path, accent);
+  if (!p->missing) {
     g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(path)));
     p->monitor = pt_git_monitor_new(path, on_git_update, p);
   }
@@ -835,26 +878,6 @@ static void action_new_tab(PtWindow *w) {
   mark_dirty(w);
 }
 
-/* Locate the tab that owns a grid. Confirmation is async, so by response time
- * the grid may have been dropped already (its last shell exited cleanly →
- * on_grid_emptied removed the tab) — a plain "close the active tab's pane"
- * would then hit whatever tab slid into that slot. */
-static gboolean find_grid(PtWindow *w, PtPaneGrid *g, guint *out_pi,
-                          guint *out_ti) {
-  if (w->projects == NULL || g == NULL) return FALSE;
-  for (guint pi = 0; pi < w->projects->len; pi++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-    for (guint ti = 0; ti < p->tabs->len; ti++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (t->grid != GTK_WIDGET(g)) continue;
-      if (out_pi != NULL) *out_pi = pi;
-      if (out_ti != NULL) *out_ti = ti;
-      return TRUE;
-    }
-  }
-  return FALSE;
-}
-
 /* ---------- desktop notifications (OSC 9 / OSC 777) ----------
  *
  * A build finishes in a pane on another workspace and nothing tells you. The
@@ -868,22 +891,29 @@ static gboolean find_grid(PtWindow *w, PtPaneGrid *g, guint *out_pi,
  * notification clicked after its pane was closed looks like. */
 static gboolean activate_pane(PtWindow *w, guint64 pane_id) {
   if (w->projects == NULL) return FALSE;
-  for (guint pi = 0; pi < w->projects->len; pi++) {
+  /* Pane ids are per-process, not per-grid, so the only way to the right grid
+   * is to ask each one; from there find_grid gives the slots to switch to. */
+  PtPaneGrid *found = NULL;
+  for (guint pi = 0; pi < w->projects->len && found == NULL; pi++) {
     PtProjectUI *p = g_ptr_array_index(w->projects, pi);
     for (guint ti = 0; ti < p->tabs->len; ti++) {
       PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (!pt_pane_grid_focus_pane_by_id(PT_PANE_GRID(t->grid), pane_id))
-        continue;
-      /* The grid focused the pane already; the switches put that grid on
-       * screen. Order matters — show_active_grid re-focuses the grid's
-       * remembered pane, which the call above has just made the right one. */
-      action_switch_project(w, (int)pi);
-      action_switch_tab(w, (int)ti);
-      gtk_window_present(GTK_WINDOW(w));
-      return TRUE;
+      if (pt_pane_grid_pane_by_id(PT_PANE_GRID(t->grid), pane_id) != NULL) {
+        found = PT_PANE_GRID(t->grid);
+        break;
+      }
     }
   }
-  return FALSE;
+  guint pi = 0, ti = 0;
+  if (!find_grid(w, found, &pi, &ti)) return FALSE;
+  /* Focus the pane inside its grid first: the switches below end in
+   * show_active_grid, which re-focuses the grid's remembered pane — which this
+   * call has just made the right one. */
+  pt_pane_grid_focus_pane_by_id(found, pane_id);
+  action_switch_project(w, (int)pi);
+  action_switch_tab(w, (int)ti);
+  gtk_window_present(GTK_WINDOW(w));
+  return TRUE;
 }
 
 /* Pane ids are handed out by a counter that starts over at 1 every launch, and
@@ -1154,7 +1184,8 @@ static void on_folder_chosen(GObject *src, GAsyncResult *res, gpointer user) {
   if (file == NULL) return;
   char *path = g_file_get_path(file);
   char *name = g_path_get_basename(path);
-  g_ptr_array_add(w->projects, project_ui_new(w, name, path));
+  /* -1: take the next accent in the cycle, by the project's new position. */
+  g_ptr_array_add(w->projects, project_ui_new(w, name, path, -1));
   w->active_project = (int)w->projects->len - 1;
   sync_git_monitors(w);
   g_free(name);
@@ -1762,18 +1793,12 @@ static void restore_state(PtWindow *w) {
   if (s == NULL) return;
   for (guint i = 0; i < s->projects->len; i++) {
     PtProjectState *ps = g_ptr_array_index(s->projects, i);
-    PtProjectUI *p = g_new0(PtProjectUI, 1);
-    p->window = w;
-    p->name = g_strdup(ps->name);
-    p->path = g_strdup(ps->path);
-    p->accent = ps->accent;
-    p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
-    p->missing = !g_file_test(ps->path, G_FILE_TEST_IS_DIR);
+    /* Same construction as a project the user adds — the saved accent instead
+     * of the next one in the cycle, and the saved tabs instead of one fresh
+     * shell. project_ui_alloc has already seeded the branch and the per-project
+     * spawn env, which the tabs below need before they spawn anything. */
+    PtProjectUI *p = project_ui_alloc(w, ps->name, ps->path, ps->accent);
     if (!p->missing) {
-      /* per project, not once for the whole restore: each project's shells must
-       * see their own PT_PROJECT/PT_ACCENT/PT_BRANCH */
-      seed_git_branch(p);
-      set_spawn_env_for(p);
       for (guint j = 0; j < ps->tabs->len; j++) {
         PtTabState *ts = g_ptr_array_index(ps->tabs, j);
         /* steal the tree from the session copy */

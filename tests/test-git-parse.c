@@ -235,6 +235,62 @@ static void test_numstat_empty(void) {
   g_ptr_array_unref(files);
 }
 
+/* ---------- the branch chip ----------
+ *
+ * One spelling for every surface that shows a project's git state (sidebar row,
+ * project bar chip); the tests pin the text, because two surfaces drifting
+ * apart is exactly what the shared formatter exists to prevent. */
+
+static char *chip(const PtGitStatus *st) {
+  static char buf[192];
+  g_strlcpy(buf, "poison", sizeof buf);   /* every path must overwrite this */
+  pt_git_format_chip(st, buf, sizeof buf);
+  return buf;
+}
+
+/* A clean tree is the branch and nothing else. */
+static void test_chip_clean(void) {
+  PtGitStatus s = { 0 };
+  g_strlcpy(s.branch, "main", sizeof s.branch);
+  g_assert_cmpstr(chip(&s), ==, "main");
+}
+
+/* Dirty adds the count behind a ✚, one space out. */
+static void test_chip_changed(void) {
+  PtGitStatus s = { .changed = 12 };
+  g_strlcpy(s.branch, "feature/x", sizeof s.branch);
+  g_assert_cmpstr(chip(&s), ==, "feature/x ✚12");
+}
+
+/* No branch means no chip, even with changed files: a bare " ✚3" names nothing.
+ * Covers a non-repo, and a repo polled before its HEAD was read. */
+static void test_chip_no_branch(void) {
+  PtGitStatus s = { .changed = 3 };
+  g_assert_cmpstr(chip(&s), ==, "");
+  g_assert_cmpstr(chip(NULL), ==, "");
+}
+
+/* The status comes straight from a parse in real callers; ahead/behind are the
+ * status bar's business and never reach the chip. */
+static void test_chip_from_parse(void) {
+  PtGitStatus s;
+  GPtrArray *files = parse(
+      "# branch.head main\n"
+      "# branch.ab +4 -9\n"
+      "? a.c\n", NULL, &s);
+  g_assert_cmpstr(chip(&s), ==, "main ✚1");
+  g_ptr_array_unref(files);
+}
+
+/* A buffer too small truncates and stays terminated. */
+static void test_chip_truncates(void) {
+  PtGitStatus s = { .changed = 2 };
+  g_strlcpy(s.branch, "long-branch-name", sizeof s.branch);
+  char buf[5];
+  pt_git_format_chip(&s, buf, sizeof buf);
+  g_assert_cmpstr(buf, ==, "long");
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/gitparse/clean", test_clean_repo);
@@ -251,5 +307,10 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/gitparse/numstat/merge", test_numstat_merge);
   g_test_add_func("/gitparse/numstat/absent", test_numstat_absent);
   g_test_add_func("/gitparse/numstat/empty", test_numstat_empty);
+  g_test_add_func("/gitparse/chip/clean", test_chip_clean);
+  g_test_add_func("/gitparse/chip/changed", test_chip_changed);
+  g_test_add_func("/gitparse/chip/no-branch", test_chip_no_branch);
+  g_test_add_func("/gitparse/chip/from-parse", test_chip_from_parse);
+  g_test_add_func("/gitparse/chip/truncates", test_chip_truncates);
   return g_test_run();
 }

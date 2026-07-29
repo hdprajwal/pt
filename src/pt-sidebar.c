@@ -232,19 +232,20 @@ static void rebuild_rows(PtSidebar *sb) {
     gtk_widget_add_css_class(name, "pt-name");
     gtk_box_append(GTK_BOX(row), name);
 
-    char *btxt = NULL;
+    char chip[192];
+    const char *btxt = NULL;
     gboolean dirty = FALSE;
     if (r->missing) {
-      btxt = g_strdup("[missing]");
+      btxt = "[missing]";
       dirty = TRUE;
     } else if (r->is_repo) {
-      btxt = r->changed > 0 ? g_strdup_printf("%s ✚%d", r->branch, r->changed)
-                            : g_strdup(r->branch);
-      dirty = r->changed > 0;
+      /* Same formatter as the project bar's chip — one spelling, one place. */
+      pt_git_format_chip(&r->git, chip, sizeof chip);
+      btxt = chip;
+      dirty = r->git.changed > 0;
     }
     if (btxt != NULL) {
       GtkWidget *branch = gtk_label_new(btxt);
-      g_free(btxt);
       gtk_label_set_xalign(GTK_LABEL(branch), 0.0f);
       gtk_label_set_ellipsize(GTK_LABEL(branch), PANGO_ELLIPSIZE_END);
       gtk_widget_set_hexpand(branch, FALSE);
@@ -359,10 +360,12 @@ void pt_sidebar_focus_search(PtSidebar *sb) {
 
 /* ---------- public API ---------- */
 static gboolean row_equal(const PtSidebarRow *a, const PtSidebarRow *b) {
-  return a->changed == b->changed && a->is_repo == b->is_repo &&
+  /* Only the fields a row *renders*: ahead/behind ride along in PtGitStatus
+   * but never reach the rail, and comparing them would rebuild for nothing. */
+  return a->git.changed == b->git.changed && a->is_repo == b->is_repo &&
          a->missing == b->missing && a->accent == b->accent &&
          a->shell_count == b->shell_count && a->running == b->running &&
-         g_strcmp0(a->branch, b->branch) == 0 &&
+         g_strcmp0(a->git.branch, b->git.branch) == 0 &&
          g_strcmp0(a->name, b->name) == 0 &&
          g_strcmp0(a->path, b->path) == 0;
 }

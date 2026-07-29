@@ -150,3 +150,11 @@ void pt_git_result_parse(const char *status_text,
   merge_numstat(files, numstat_text_or_null);
   *out_files = files;
 }
+
+void pt_git_format_chip(const PtGitStatus *st, char *buf, gsize cap) {
+  if (buf == NULL || cap == 0) return;
+  buf[0] = '\0';
+  if (st == NULL || st->branch[0] == '\0') return;
+  if (st->changed > 0) g_snprintf(buf, cap, "%s ✚%d", st->branch, st->changed);
+  else                 g_strlcpy(buf, st->branch, cap);
+}

@@ -30,3 +30,11 @@ typedef struct {
 void pt_git_result_parse(const char *status_text,
                          const char *numstat_text_or_null,
                          PtGitStatus *out_status, GPtrArray **out_files);
+
+/* The short git line every surface shows for a project — "main", or
+ * "main ✚3" when files changed. `buf` always ends up NUL-terminated, and is
+ * empty when there is nothing to show: a NULL status, or one with no branch
+ * (not a repository, or polled before HEAD was read) — a bare count names
+ * nothing, so it is not printed alone. Lives here rather than in a widget
+ * because the sidebar and the project bar must not drift apart. */
+void pt_git_format_chip(const PtGitStatus *st, char *buf, gsize cap);

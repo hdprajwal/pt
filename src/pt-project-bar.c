@@ -27,7 +27,7 @@ char *pt_path_home_abbrev(const char *path) {
 }
 
 void pt_project_bar_update(PtProjectBar *b, const char *name, const char *path,
-                           const char *branch, int changed, int accent) {
+                           const PtGitStatus *git, int accent) {
   g_return_if_fail(PT_IS_PROJECT_BAR(b));
 
   gtk_label_set_text(GTK_LABEL(b->name), name != NULL ? name : "pt");
@@ -36,13 +36,12 @@ void pt_project_bar_update(PtProjectBar *b, const char *name, const char *path,
   gtk_label_set_text(GTK_LABEL(b->path), shown);
   g_free(shown);
 
-  gboolean has_branch = branch != NULL && branch[0] != '\0';
-  if (has_branch) {
-    char *txt = changed > 0 ? g_strdup_printf("%s ✚%d", branch, changed)
-                            : g_strdup(branch);
-    gtk_label_set_text(GTK_LABEL(b->chip), txt);
-    g_free(txt);
-  }
+  /* Same formatter as the sidebar row's branch label — one spelling, one
+   * place. Empty text is exactly the "nothing to show" case. */
+  char chip[192];
+  pt_git_format_chip(git, chip, sizeof chip);
+  gboolean has_branch = chip[0] != '\0';
+  if (has_branch) gtk_label_set_text(GTK_LABEL(b->chip), chip);
   gtk_widget_set_visible(b->chip, has_branch);
 
   /* The chip is the bar's only accented element. */
