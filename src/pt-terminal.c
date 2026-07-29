@@ -459,6 +459,11 @@ static void ensure_core(PtTerminal *t) {
                               .clipboard_write = core_clipboard_write };
   pt_term_core_set_callbacks(t->core, &cbs, t);
   pt_term_core_set_osc52(t->core, t->osc52);
+  /* The core is built lazily from size-allocate, which is later than the focus
+   * grab in show_active_grid: on a new tab the first focus-in has already come
+   * and gone by now. Push the widget's real state in so the core does not start
+   * out believing a focused pane is unfocused. */
+  pt_term_core_focus_report(t->core, t->focused, FALSE);
 }
 
 static void pt_terminal_size_allocate(GtkWidget *widget, int width, int height,
@@ -736,6 +741,10 @@ static void on_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   t->focused = TRUE;
+  /* Deliberately synchronous, where ghostty defers to a glib idle
+   * (apprt/gtk/class/surface.zig:2750): it does so to avoid re-entering
+   * libghostty while the renderer lock is held, and pt has no such lock. */
+  if (t->core != NULL) pt_term_core_focus_report(t->core, TRUE, FALSE);
   gtk_widget_add_css_class(GTK_WIDGET(t), "focused");
   gtk_widget_queue_draw(GTK_WIDGET(t));
 }
@@ -744,6 +753,10 @@ static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
   (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   t->focused = FALSE;
+  /* Also fires when the pane is unparented on a tab or project switch, and
+   * when the window itself goes inactive, both by way of GTK's own crossing
+   * events — so a backgrounded pane counts as unfocused with no code here. */
+  if (t->core != NULL) pt_term_core_focus_report(t->core, FALSE, FALSE);
   gtk_widget_remove_css_class(GTK_WIDGET(t), "focused");
   gtk_widget_queue_draw(GTK_WIDGET(t));
 }
