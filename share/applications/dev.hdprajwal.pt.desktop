@@ -9,3 +9,7 @@ Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=terminal;shell;project;workspace;
 StartupNotify=true
+# Programs in a pane can raise desktop notifications (OSC 9 / OSC 777). Without
+# this key GNOME's Control Center never lists pt under Notifications, so there
+# is nowhere to turn them off.
+X-GNOME-UsesNotifications=true

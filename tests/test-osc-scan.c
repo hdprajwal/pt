@@ -450,6 +450,39 @@ static void test_other_codes_are_never_notifications(void) {
   g_assert_cmpint(pt_osc_notification(99, "", 0, &n), ==, PT_OSC_NOTIFY_NONE);
 }
 
+/* Where the two caps meet. A body under the scanner's 8K cap arrives whole and
+ * is cut to PT_NOTIFY_BODY_MAX further down (in the core, which is where the
+ * cutting lives); a body over it never reaches the classifier at all, because
+ * the scanner drops the sequence rather than grow a buffer for a payload no
+ * notification could carry. So "truncated, not dropped" holds up to 8K and no
+ * further, and this is the line. */
+static void test_notification_meets_the_scanner_cap(void) {
+  PtOscScan s = {0};
+  Hits h = {0};
+
+  GString *big = g_string_new("\033]9;");
+  for (gsize i = 0; i < PT_OSC_MAX - 8; i++) g_string_append_c(big, 'x');
+  g_string_append_c(big, '\007');
+  feed(&s, &h, big->str);
+  g_string_free(big, TRUE);
+  g_assert_cmpint(h.n, ==, 1);
+  PtOscNotification n = {0};
+  g_assert_cmpint(pt_osc_notification(h.code[0], h.payload[0], h.len[0], &n),
+                  ==, PT_OSC_NOTIFY_SHOW);
+  g_assert_cmpuint(n.body_len, ==, PT_OSC_MAX - 8);   /* whole, not yet cut */
+  hits_clear(&h);
+
+  /* One byte of payload over the cap and there is nothing to classify. */
+  big = g_string_new("\033]9;");
+  for (gsize i = 0; i < PT_OSC_MAX + 1; i++) g_string_append_c(big, 'x');
+  g_string_append_c(big, '\007');
+  feed(&s, &h, big->str);
+  g_string_free(big, TRUE);
+  g_assert_cmpint(h.n, ==, 0);
+  hits_clear(&h);
+  pt_osc_scan_clear(&s);
+}
+
 /* One per second whatever it says, and five before the same text repeats —
  * ghostty's two numbers. Driven with a synthetic clock so nothing sleeps. */
 static void test_notify_gate_rate_limits(void) {
@@ -514,6 +547,8 @@ int main(int argc, char *argv[]) {
                   test_osc9_progress_is_not_a_notification);
   g_test_add_func("/oscnotify/other-codes",
                   test_other_codes_are_never_notifications);
+  g_test_add_func("/oscnotify/scanner-cap",
+                  test_notification_meets_the_scanner_cap);
   g_test_add_func("/oscnotify/gate-rate-limit", test_notify_gate_rate_limits);
   g_test_add_func("/oscnotify/gate-repeats", test_notify_gate_suppresses_repeats);
   return g_test_run();
