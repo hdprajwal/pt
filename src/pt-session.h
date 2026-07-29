@@ -7,6 +7,11 @@
 /* Number of entries in the fixed accent cycle projects are coloured from. */
 #define PT_ACCENT_COUNT 6
 
+/* Shape of the state file this build writes and can read. A file claiming a
+ * higher version is left alone (moved aside on load) rather than read with
+ * guesses, so a downgrade cannot rewrite a newer session into a lossy one. */
+#define PT_SESSION_VERSION 1
+
 /* Terminal font size, in points, for a fresh session. Kept as an alias so
  * existing callers keep compiling; pt-config.h owns the value, because the
  * config file is now the source of truth for fonts and the persisted default
@@ -31,9 +36,12 @@ void pt_session_state_free(PtSessionState *s);
 PtTabState *pt_tab_state_new(const char *title, PtSplitNode *tree /*takes*/);
 PtProjectState *pt_project_state_new(const char *name, const char *path);
 char *pt_session_to_json_text(const PtSessionState *s);            /* caller frees */
-PtSessionState *pt_session_from_json_text(const char *text);       /* NULL on bad */
+/* NULL on malformed JSON or a version newer than PT_SESSION_VERSION. */
+PtSessionState *pt_session_from_json_text(const char *text);
 gboolean pt_session_save(const PtSessionState *s, const char *path, GError **err);
-/* Load; on unreadable/corrupt file renames it to <path>.bak and returns NULL. */
+/* Load; an unreadable file (corrupt, or from a newer pt) is renamed to
+ * <path>.bak — or <path>.bak.1 if a .bak is already there — and NULL returned,
+ * which callers read as "start from defaults". */
 PtSessionState *pt_session_load(const char *path);
 char *pt_session_default_path(void);   /* ~/.config/pt/state.json, caller frees */
 /* Where `index` ends up once the project at `from` is moved to `to`. Kept

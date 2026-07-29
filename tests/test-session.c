@@ -69,6 +69,47 @@ static void test_corrupt_becomes_bak(void) {
   g_free(bak); g_free(path); g_free(dir);
 }
 
+/* A state file from a newer pt is not something this build can read: treat it
+ * like any other unreadable file — move it aside and start from defaults —
+ * rather than half-restoring a shape we do not understand. */
+static void test_future_version_becomes_bak(void) {
+  g_assert_null(pt_session_from_json_text(
+      "{\"version\":2,\"active_project\":0,\"projects\":[]}"));
+
+  char *dir = g_dir_make_tmp("pt-test-XXXXXX", NULL);
+  char *path = g_build_filename(dir, "state.json", NULL);
+  g_file_set_contents(path,
+      "{\"version\":2,\"active_project\":0,\"projects\":[]}", -1, NULL);
+  g_assert_null(pt_session_load(path));
+  char *bak = g_strconcat(path, ".bak", NULL);
+  g_assert_true(g_file_test(bak, G_FILE_TEST_EXISTS));
+  g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+  g_free(bak); g_free(path); g_free(dir);
+}
+
+/* The first rescued file is the one worth keeping: a later corruption must not
+ * overwrite it. */
+static void test_existing_bak_is_preserved(void) {
+  char *dir = g_dir_make_tmp("pt-test-XXXXXX", NULL);
+  char *path = g_build_filename(dir, "state.json", NULL);
+  char *bak = g_strconcat(path, ".bak", NULL);
+  char *bak1 = g_strconcat(path, ".bak.1", NULL);
+  g_file_set_contents(bak, "first rescue", -1, NULL);
+  g_file_set_contents(path, "{still not json", -1, NULL);
+
+  g_assert_null(pt_session_load(path));
+  char *kept = NULL;
+  g_assert_true(g_file_get_contents(bak, &kept, NULL, NULL));
+  g_assert_cmpstr(kept, ==, "first rescue");
+  char *moved = NULL;
+  g_assert_true(g_file_get_contents(bak1, &moved, NULL, NULL));
+  g_assert_cmpstr(moved, ==, "{still not json");
+  g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+
+  g_free(kept); g_free(moved);
+  g_free(bak1); g_free(bak); g_free(path); g_free(dir);
+}
+
 static void test_load_missing_returns_null(void) {
   g_assert_null(pt_session_load("/nonexistent/dir/state.json"));
 }
@@ -188,6 +229,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/session/roundtrip", test_roundtrip);
   g_test_add_func("/session/save-load", test_save_load);
   g_test_add_func("/session/corrupt", test_corrupt_becomes_bak);
+  g_test_add_func("/session/future-version", test_future_version_becomes_bak);
+  g_test_add_func("/session/bak-preserved", test_existing_bak_is_preserved);
   g_test_add_func("/session/missing", test_load_missing_returns_null);
   g_test_add_func("/session/accent-roundtrip", test_accent_roundtrip);
   g_test_add_func("/session/accent-default", test_accent_default_when_absent);
