@@ -48,6 +48,10 @@ struct PtTermCore {
   guint64 last_press_ns;
   uint16_t last_press_col, last_press_row;
 
+  /* focus reporting (mode 1004); see pt_term_core_focus_report */
+  gboolean focused;         /* last state a caller reported, mode 1004 or not */
+  gboolean was_focus_event; /* mode 1004 as of the last read, for the 0->1 edge */
+
   PtOscScan osc;            /* OSC scanner state, carried across reads */
   PtOsc52Mode osc52;        /* what OSC 52 may do to the clipboard */
 
@@ -398,6 +402,25 @@ static void on_child_exited(GPid pid, gint wait_status, gpointer ud) {
   if (c->cbs.exited != NULL) c->cbs.exited(c, c->exit_status, c->cbs_user);
 }
 
+/* ---- modes a program turning on has to be answered for ----
+ *
+ * Ghostty reports the current focus state the instant its parser sees
+ * CSI ? 1004 h (stream_handler.zig:754-756), so an editor that starts up in an
+ * already-focused pane learns it is focused without the user clicking away and
+ * back. libghostty-vt's C API has no mode-change callback (terminal.h exposes
+ * modes through ghostty_terminal_mode_get only), so pt watches the mode for a
+ * 0->1 edge once per read batch instead and reports on it. Same observable
+ * behaviour, one read of a bitfield per batch of pty bytes. */
+static void poll_mode_edges(PtTermCore *c) {
+  bool focus_event = false;
+  ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_FOCUS_EVENT,
+                            &focus_event);
+  /* Forced: the state has not changed, which is the whole point here. */
+  if (focus_event && !c->was_focus_event)
+    pt_term_core_focus_report(c, c->focused, TRUE);
+  c->was_focus_event = focus_event;
+}
+
 static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
   PtTermCore *c = ud;
   gboolean got_data = FALSE;
@@ -422,6 +445,7 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
       }
     }
   }
+  if (got_data) poll_mode_edges(c);
   if (got_data && c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
   if (c->eof) { c->fd_source = 0; return G_SOURCE_REMOVE; }
   return G_SOURCE_CONTINUE;
@@ -869,6 +893,32 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
   size_t written = 0;
   if (ghostty_mouse_encoder_encode(c->mouse_encoder, c->mouse_event, buf,
                                    sizeof(buf), &written) != GHOSTTY_SUCCESS ||
+      written == 0)
+    return FALSE;
+  pty_write_raw(c->pty_fd, buf, written);
+  return TRUE;
+}
+
+gboolean pt_term_core_focus_report(PtTermCore *c, gboolean focused,
+                                   gboolean force) {
+  /* The dedupe sits above the mode check, where ghostty puts it
+   * (Surface.zig:3309 dedupes, Termio.focusGained checks 1004 below it): the
+   * state has to be recorded even while nobody is listening, or the resend on
+   * enable has nothing to report. Ghostty keeps that state on the terminal, so
+   * RIS resets it to "focused" whatever the truth is; keeping it here instead
+   * means pt still knows. */
+  if (!force && c->focused == focused) return FALSE;
+  c->focused = focused;
+  if (c->child_exited || c->pty_fd < 0) return FALSE;
+
+  bool on = false;
+  ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_FOCUS_EVENT, &on);
+  if (!on) return FALSE;
+
+  char buf[8];   /* three bytes today; the header asks callers not to bet on it */
+  size_t written = 0;
+  if (ghostty_focus_encode(focused ? GHOSTTY_FOCUS_GAINED : GHOSTTY_FOCUS_LOST,
+                           buf, sizeof(buf), &written) != GHOSTTY_SUCCESS ||
       written == 0)
     return FALSE;
   pty_write_raw(c->pty_fd, buf, written);

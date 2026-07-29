@@ -87,6 +87,20 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
                                    GhosttyMouseButton button, GhosttyMods mods,
                                    double px, double py);
 gboolean pt_term_core_mouse_tracking(PtTermCore *c);
+
+/* ---- focus reporting (mode 1004) ----
+ *
+ * Tell the app the pane gained or lost focus (CSI I / CSI O). The core
+ * remembers the state whether or not mode 1004 is on, so a program that
+ * enables it later is told the truth right away: the core watches for that
+ * enable itself and resends, as ghostty does.
+ *
+ * The state is remembered even when nothing is written, so `force` exists for
+ * the one caller that must report an unchanged state — the resend above.
+ * Returns TRUE when bytes reached the pty. */
+gboolean pt_term_core_focus_report(PtTermCore *c, gboolean focused,
+                                   gboolean force);
+
 gboolean pt_term_core_alt_screen(PtTermCore *c);   /* alternate screen active */
 gboolean pt_term_core_alt_scroll(PtTermCore *c);   /* mode 1007, default on */
 /* Wheel on the alt screen with alt-scroll on: `count` cursor-key arrows,

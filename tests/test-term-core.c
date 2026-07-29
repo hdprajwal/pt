@@ -511,6 +511,122 @@ static void test_mouse_report_needs_tracking(void) {
   pt_term_core_free(core);
 }
 
+/* ---- focus reporting (mode 1004) ----
+ *
+ * Same `cat -v` recipe as the mouse tests. A core starts out unfocused, so the
+ * moment the child enables 1004 the core resends that state and an unsolicited
+ * "^[[O" lands in the grid ahead of anything the test drives. Every assertion
+ * below therefore matches on a pair of reports rather than a lone one, which
+ * also proves what did *not* get written between them. */
+static void test_focus_report(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1004hready'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  /* One write, so the parser has consumed 1004h by the time "ready" prints. */
+  g_assert_true(wait_for_text(core, "ready"));
+
+  g_assert_true(pt_term_core_focus_report(core, TRUE, FALSE));
+  g_assert_true(wait_for_text(core, "^[[I"));
+  g_assert_true(pt_term_core_focus_report(core, FALSE, FALSE));
+  g_assert_true(wait_for_text(core, "^[[I^[[O"));
+
+  pt_term_core_free(core);
+}
+
+static void test_focus_report_needs_mode(void) {
+  /* Without mode 1004 a focus change must not put a single byte on the pty:
+     a shell would run it as typed input. */
+  const char *argv[] = {"/bin/cat", NULL};
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  g_assert_nonnull(core);
+  g_assert_false(pt_term_core_focus_report(core, TRUE, FALSE));
+  g_assert_false(pt_term_core_focus_report(core, FALSE, FALSE));
+
+  /* cat echoes (this one has the stock line discipline), so anything written
+     would come back as "^[" in the grid. Give it time to. */
+  for (int i = 0; i < 40; i++) {
+    g_main_context_iteration(NULL, FALSE);
+    g_usleep(5000);
+  }
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "^["));
+  g_free(text);
+  pt_term_core_free(core);
+}
+
+/* How many times `needle` appears in the grid. Substring matching alone cannot
+ * tell one report from two, since "^[[I^[[I^[[O" contains "^[[I^[[O". */
+static int count_text(PtTermCore *core, const char *needle) {
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  int n = 0;
+  for (const char *p = strstr(text, needle); p != NULL;
+       p = strstr(p + strlen(needle), needle))
+    n++;
+  g_free(text);
+  return n;
+}
+
+static void test_focus_report_dedupes(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1004hready'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  g_assert_true(pt_term_core_focus_report(core, TRUE, FALSE));
+  g_assert_false(pt_term_core_focus_report(core, TRUE, FALSE));
+  g_assert_true(pt_term_core_focus_report(core, FALSE, FALSE));
+  /* The loss arriving proves the second gained had its turn and produced
+     nothing: exactly one "^[[I" is on the wire. */
+  g_assert_true(wait_for_text(core, "^[[I^[[O"));
+  g_assert_cmpint(count_text(core, "^[[I"), ==, 1);
+
+  pt_term_core_free(core);
+}
+
+static void test_focus_report_forced(void) {
+  /* The path the resend on mode enable uses: same state, written anyway. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1004hready'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  g_assert_true(pt_term_core_focus_report(core, TRUE, FALSE));
+  g_assert_true(pt_term_core_focus_report(core, TRUE, TRUE));
+  g_assert_true(wait_for_text(core, "^[[I^[[I"));
+
+  pt_term_core_free(core);
+}
+
+static void test_focus_report_resent_on_mode_enable(void) {
+  /* The pane is focused, nothing has been reported because no app was asking,
+     and then one starts and asks. It must be told without waiting for the user
+     to click away and back. `read` holds the child until the test has set the
+     focus state, so the enable can only happen afterwards. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; read x; printf '\\033[?1004h'; cat -v",
+    NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  g_assert_false(pt_term_core_focus_report(core, TRUE, FALSE));  /* 1004 off */
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_for_text(core, "^[[I"));
+
+  pt_term_core_free(core);
+}
+
 static void test_alt_screen_arrows(void) {
   /* On the alt screen with no mouse tracking, the wheel becomes cursor keys.
      Mode 1007 is on by default, and DECCKM is off here, so the normal form
@@ -1004,6 +1120,12 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/exit-marker", test_exit_marker_from_title);
   g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
   g_test_add_func("/termcore/mouse-report-off", test_mouse_report_needs_tracking);
+  g_test_add_func("/termcore/focus-report", test_focus_report);
+  g_test_add_func("/termcore/focus-report-off", test_focus_report_needs_mode);
+  g_test_add_func("/termcore/focus-report-dedupe", test_focus_report_dedupes);
+  g_test_add_func("/termcore/focus-report-forced", test_focus_report_forced);
+  g_test_add_func("/termcore/focus-report-on-enable",
+                  test_focus_report_resent_on_mode_enable);
   g_test_add_func("/termcore/alt-screen-arrows", test_alt_screen_arrows);
   g_test_add_func("/termcore/alt-screen-tracking-wheel",
                   test_alt_screen_tracking_wheel);
