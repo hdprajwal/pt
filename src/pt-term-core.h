@@ -57,6 +57,26 @@ void pt_term_core_scroll_delta(PtTermCore *c, int rows);
 /* Snap the viewport back to the active area (what typing should do). */
 void pt_term_core_scroll_bottom(PtTermCore *c);
 
+/* ---- where the viewport sits (what a scrollbar draws) ----
+ *
+ * All three are row counts on the active screen: `total` is the whole
+ * scrollable area, `offset` the distance from its top to the first visible
+ * row, `len` the visible area. So a view sitting at the bottom has
+ * offset + len == total, and a screen with nothing above it has total == len,
+ * which is the case where there is no bar to draw. Any of the three may be
+ * NULL. FALSE when the library refuses the query, and then nothing is written.
+ *
+ * The library warns that this is expensive to compute when the viewport is at
+ * an arbitrary position — it walks the page list to find the offset — so the
+ * answer is cached and only re-read when the viewport moved or the terminal
+ * was written to since the last read. Callers may therefore ask once per
+ * frame and pay for it only on the frames where it changed. Ghostty rate-
+ * limits the same read the same way and for the same reason, by taking it
+ * once per frame data update rather than on demand
+ * (renderer/generic.zig:1211-1216). */
+gboolean pt_term_core_scrollbar(PtTermCore *c, guint64 *total, guint64 *offset,
+                                guint64 *len);
+
 /* ---- mouse selection (viewport-relative pixels; PT_PAD_X/PT_PAD_Y-inset) ---- */
 void pt_term_core_selection_press(PtTermCore *c, double px, double py,
                                   guint64 time_ns);

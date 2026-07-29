@@ -1534,6 +1534,119 @@ static void test_paste_is_safe(void) {
   g_assert_false(pt_term_core_paste_is_safe("echo hi\r", 8));   /* trailing */
 }
 
+/* ---- scrollbar ---- */
+
+static void test_scrollbar_tracks_the_viewport(void) {
+  /* 500 lines into a 24-row pane: the scrollable area is taller than the
+     viewport, and the view starts at the bottom of it. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "seq 1 500; echo bottom-marker; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "bottom-marker"));
+
+  guint64 total = 0, offset = 0, len = 0;
+  g_assert_true(pt_term_core_scrollbar(core, &total, &offset, &len));
+  g_assert_cmpuint(len, ==, 24);              /* the visible area is the pane */
+  g_assert_cmpuint(total, >, 24);             /* and there is history above it */
+  g_assert_cmpuint(offset + len, ==, total);  /* sitting at the bottom */
+
+  /* Ten rows up moves the offset by exactly ten and nothing else: the
+     scrollable area does not change shape because the view moved. */
+  guint64 total_up = 0, offset_up = 0, len_up = 0;
+  pt_term_core_scroll_delta(core, -10);
+  g_assert_true(pt_term_core_scrollbar(core, &total_up, &offset_up, &len_up));
+  g_assert_cmpuint(offset_up, ==, offset - 10);
+  g_assert_cmpuint(total_up, ==, total);
+  g_assert_cmpuint(len_up, ==, len);
+
+  guint64 offset_back = 0, len_back = 0, total_back = 0;
+  pt_term_core_scroll_bottom(core);
+  g_assert_true(pt_term_core_scrollbar(core, &total_back, &offset_back,
+                                       &len_back));
+  g_assert_cmpuint(offset_back, ==, offset);
+  g_assert_cmpuint(offset_back + len_back, ==, total_back);
+
+  pt_term_core_free(core);
+}
+
+static void test_scrollbar_without_scrollback(void) {
+  /* Nothing has been printed, so there is nothing above the viewport: the
+     whole scrollable area is the viewport. This is the case where the bar
+     must be hidden, and it is the state every fresh pane starts in. */
+  const char *argv[] = {"/bin/sh", "-c", "sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+
+  guint64 total = 0, offset = 0, len = 0;
+  g_assert_true(pt_term_core_scrollbar(core, &total, &offset, &len));
+  g_assert_cmpuint(total, ==, len);
+  g_assert_cmpuint(total, ==, 24);
+  g_assert_cmpuint(offset, ==, 0);
+
+  pt_term_core_free(core);
+}
+
+static void test_scrollbar_hidden_on_the_alt_screen(void) {
+  /* The alt screen keeps no scrollback (Terminal.zig:2994 gives it
+     max_scrollback 0), so the numbers themselves say there is no bar to draw
+     there, whichever screen the primary one is holding. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "seq 1 500; stty -echo -icanon; printf '\\033[?1049h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(alt_screen_on, core));
+
+  guint64 total = 0, offset = 0, len = 0;
+  g_assert_true(pt_term_core_scrollbar(core, &total, &offset, &len));
+  g_assert_cmpuint(total, ==, len);
+  g_assert_cmpuint(offset, ==, 0);
+
+  pt_term_core_free(core);
+}
+
+static void test_scrollbar_read_is_cached(void) {
+  /* The library warns this query is expensive, so it is read at most once
+     after each thing that can move the numbers, however often it is asked.
+     Nothing is pumped between the calls below, so the only thing that can
+     dirty the cache is the call under test. */
+  const char *argv[] = {"/bin/sh", "-c", "echo cached-marker; cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_cmpuint(pt_term_core_scrollbar_reads(core), ==, 0);  /* never eager */
+  g_assert_true(wait_for_text(core, "cached-marker"));
+
+  /* Output arrived, so the first ask goes to the library. */
+  g_assert_true(pt_term_core_scrollbar(core, NULL, NULL, NULL));
+  guint64 reads = pt_term_core_scrollbar_reads(core);
+  g_assert_cmpuint(reads, ==, 1);
+
+  /* Asking again with nothing moved is free, however many frames ask. */
+  for (int i = 0; i < 10; i++)
+    g_assert_true(pt_term_core_scrollbar(core, NULL, NULL, NULL));
+  g_assert_cmpuint(pt_term_core_scrollbar_reads(core), ==, reads);
+
+  /* The viewport moving costs exactly one more read, not one per ask. */
+  pt_term_core_scroll_delta(core, -5);
+  g_assert_true(pt_term_core_scrollbar(core, NULL, NULL, NULL));
+  g_assert_true(pt_term_core_scrollbar(core, NULL, NULL, NULL));
+  g_assert_cmpuint(pt_term_core_scrollbar_reads(core), ==, reads + 1);
+
+  /* And so does the terminal being written to. `cat` is on the far end, so
+     the text coming back is proof the read path ran. */
+  pt_term_core_write(core, "probe-echo\n", -1);
+  g_assert_true(wait_for_text(core, "probe-echo"));
+  g_assert_true(pt_term_core_scrollbar(core, NULL, NULL, NULL));
+  g_assert_true(pt_term_core_scrollbar(core, NULL, NULL, NULL));
+  g_assert_cmpuint(pt_term_core_scrollbar_reads(core), ==, reads + 2);
+
+  pt_term_core_free(core);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
@@ -1576,6 +1689,12 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/color-scheme-needs-mode",
                   test_color_scheme_needs_mode);
   g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
+  g_test_add_func("/termcore/scrollbar", test_scrollbar_tracks_the_viewport);
+  g_test_add_func("/termcore/scrollbar-empty",
+                  test_scrollbar_without_scrollback);
+  g_test_add_func("/termcore/scrollbar-alt-screen",
+                  test_scrollbar_hidden_on_the_alt_screen);
+  g_test_add_func("/termcore/scrollbar-cached", test_scrollbar_read_is_cached);
   g_test_add_func("/termcore/reset-mouse-tracking",
                   test_reset_clears_mouse_tracking);
   g_test_add_func("/termcore/reset-grid", test_reset_clears_grid_and_scrollback);

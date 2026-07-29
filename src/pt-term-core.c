@@ -59,6 +59,12 @@ struct PtTermCore {
   /* color scheme (CSI ? 996 n, mode 2031); see pt_term_core_set_color_scheme */
   gboolean dark;
 
+  /* scrollbar cache; see pt_term_core_scrollbar */
+  GhosttyTerminalScrollbar sb;   /* the last answer the library gave */
+  gboolean sb_valid;             /* sb has been filled at least once */
+  gboolean sb_dirty;             /* something moved since it was filled */
+  guint64 sb_reads;              /* library reads, counted for the tests */
+
   PtTermCoreCallbacks cbs;
   gpointer cbs_user;
 };
@@ -504,6 +510,10 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
       }
     }
   }
+  /* Bytes reached the parser, so rows may have been added, scrolled away or
+   * reflowed and the cached scrollbar is stale. This is the only place the
+   * terminal is written to. */
+  if (got_data) c->sb_dirty = TRUE;
   if (got_data) poll_mode_edges(c);
   if (got_data && c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
   if (c->eof) { c->fd_source = 0; return G_SOURCE_REMOVE; }
@@ -691,6 +701,8 @@ void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
   if (c->pty_fd >= 0) ioctl(c->pty_fd, TIOCSWINSZ, &ws);
   ghostty_terminal_resize(c->terminal, cols, rows,
                           (uint32_t)cell_w, (uint32_t)cell_h);
+  /* A reflow rewrites the row count and the visible area both. */
+  c->sb_dirty = TRUE;
 }
 
 void pt_term_core_write(PtTermCore *c, const char *buf, gssize len) {
@@ -736,14 +748,47 @@ void pt_term_core_scroll_delta(PtTermCore *c, int rows) {
     .value = { .delta = rows },
   };
   ghostty_terminal_scroll_viewport(c->terminal, sv);
+  c->sb_dirty = TRUE;
   if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
 }
 
 void pt_term_core_scroll_bottom(PtTermCore *c) {
   GhosttyTerminalScrollViewport sv = { .tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM };
   ghostty_terminal_scroll_viewport(c->terminal, sv);
+  c->sb_dirty = TRUE;
   if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
 }
+
+/* ---- scrollbar ----
+ *
+ * The cached read the header describes. The dirty flag is set wherever the two
+ * things that can move the numbers happen: bytes reaching the parser, and the
+ * viewport being moved, resized or reset. Everything else — keys, mouse
+ * reports, pastes — reaches the terminal by way of the pty and comes back
+ * through the read path, so it is covered by the first of those.
+ *
+ * A stale read is impossible in the other direction: a caller that never asks
+ * costs nothing, and a caller that asks on every frame pays the library's walk
+ * only on the frames where something actually changed. */
+gboolean pt_term_core_scrollbar(PtTermCore *c, guint64 *total, guint64 *offset,
+                                guint64 *len) {
+  if (!c->sb_valid || c->sb_dirty) {
+    GhosttyTerminalScrollbar sb = {0};
+    if (ghostty_terminal_get(c->terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR,
+                             &sb) != GHOSTTY_SUCCESS)
+      return FALSE;
+    c->sb = sb;
+    c->sb_valid = TRUE;
+    c->sb_dirty = FALSE;
+    c->sb_reads++;
+  }
+  if (total != NULL) *total = c->sb.total;
+  if (offset != NULL) *offset = c->sb.offset;
+  if (len != NULL) *len = c->sb.len;
+  return TRUE;
+}
+
+guint64 pt_term_core_scrollbar_reads(PtTermCore *c) { return c->sb_reads; }
 
 /* ---- mouse selection ----
  *
@@ -1141,6 +1186,7 @@ void pt_term_core_reset(PtTermCore *c) {
   c->last_press_ns = 0;         /* the next press starts a fresh click run */
 
   ghostty_terminal_reset(c->terminal);
+  c->sb_dirty = TRUE;           /* the scrollback it just threw away */
 
   /* No ghostty precedent — it does not reset its VT parser either — but it has
    * no scanner of its own to reset. pt's runs beside the library parser and can

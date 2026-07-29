@@ -74,3 +74,12 @@ char *pt_osc52_decode(const char *payload, gsize len, gboolean *primary,
 /* The visible grid of a bare terminal, as pt_term_core_grid_text() renders it
  * for a live core. Lets a test compare grids without spawning anything. */
 char *pt_term_grid_text_raw(GhosttyTerminal t);
+
+/* ---- scrollbar reads ----
+ *
+ * How many times pt_term_core_scrollbar() has gone to the library rather than
+ * answering from its cache. The library warns the query is expensive, so the
+ * count is the only way to prove the cache is doing its job; nothing outside
+ * tests/ has any business reading it. */
+typedef struct PtTermCore PtTermCore;
+guint64 pt_term_core_scrollbar_reads(PtTermCore *c);
