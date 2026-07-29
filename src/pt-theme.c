@@ -341,3 +341,21 @@ gboolean pt_theme_is_dark(const char *dir, const char *name) {
   g_free(text);
   return dark;
 }
+
+char **pt_theme_filter_appearance(const char *const *names, gboolean dark,
+                                  PtThemeDarkFn classify, gpointer user) {
+  GPtrArray *arr = g_ptr_array_new_with_free_func(g_free);
+  /* One classify() call per name, in order: the caller pays for reading and
+   * parsing each theme file once, and the two subsets it builds keep the same
+   * order as the list it started from. */
+  if (names != NULL && classify != NULL) {
+    for (int i = 0; names[i] != NULL; i++) {
+      /* Compared as truths, not as ints: a classifier is free to answer with
+       * any non-zero value for dark. */
+      if (!classify(names[i], user) == !dark)
+        g_ptr_array_add(arr, g_strdup(names[i]));
+    }
+  }
+  g_ptr_array_add(arr, NULL);
+  return (char **)g_ptr_array_free(arr, FALSE);
+}

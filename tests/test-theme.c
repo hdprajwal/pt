@@ -279,6 +279,93 @@ static void test_is_dark_by_name(void) {
   g_free(dir);
 }
 
+/* A classifier that reads no files: the filtering has to be right on its own,
+ * whatever is (or is not) installed. Names ending in "-dark" are dark. */
+static gboolean classify_by_suffix(const char *name, gpointer user) {
+  int *calls = user;
+  if (calls != NULL) (*calls)++;
+  return g_str_has_suffix(name, "-dark");
+}
+
+/* What the dialog passes: the shipped classifier, bound to a theme dir. */
+static gboolean classify_on_disk(const char *name, gpointer user) {
+  return pt_theme_is_dark((const char *)user, name);
+}
+
+static void assert_names(char **got, const char *const *want) {
+  guint n = 0;
+  while (want[n] != NULL) n++;
+  g_assert_cmpuint(g_strv_length(got), ==, n);
+  for (guint i = 0; i < n; i++) g_assert_cmpstr(got[i], ==, want[i]);
+}
+
+/* What the settings dialog splits its theme list with. */
+static void test_filter_appearance(void) {
+  const char *const names[] = { "ayu", "one-dark", "github-light", "pt-dark",
+                                "vercel", NULL };
+  int calls = 0;
+  char **dark = pt_theme_filter_appearance(names, TRUE, classify_by_suffix,
+                                           &calls);
+  char **light = pt_theme_filter_appearance(names, FALSE, classify_by_suffix,
+                                            &calls);
+  /* Input order survives, and the two subsets partition the list. */
+  assert_names(dark, (const char *const[]){ "one-dark", "pt-dark", NULL });
+  assert_names(light,
+               (const char *const[]){ "ayu", "github-light", "vercel", NULL });
+  /* One classify call per name per pass — no rescanning, nothing skipped. */
+  g_assert_cmpint(calls, ==, 10);
+  g_strfreev(dark);
+  g_strfreev(light);
+
+  /* An appearance nothing matches is an empty vector, never NULL: the caller
+   * tests it to know the appearance is not worth offering. */
+  const char *const only_dark[] = { "pt-dark", NULL };
+  char **none = pt_theme_filter_appearance(only_dark, FALSE, classify_by_suffix,
+                                           NULL);
+  g_assert_nonnull(none);
+  g_assert_null(none[0]);
+  g_strfreev(none);
+
+  /* Empty and NULL lists behave the same way. */
+  const char *const empty[] = { NULL };
+  char **from_empty = pt_theme_filter_appearance(empty, TRUE,
+                                                 classify_by_suffix, NULL);
+  char **from_null = pt_theme_filter_appearance(NULL, TRUE, classify_by_suffix,
+                                                NULL);
+  g_assert_null(from_empty[0]);
+  g_assert_null(from_null[0]);
+  g_strfreev(from_empty);
+  g_strfreev(from_null);
+}
+
+/* The same split, driven by the real classifier over real theme files: a light
+ * background lands in the light list and a dark one in the dark list. */
+static void test_filter_appearance_on_disk(void) {
+  char *dir = g_dir_make_tmp("pt-themes-XXXXXX", NULL);
+  char *lightf = g_build_filename(dir, "sunny", NULL);
+  char *darkf = g_build_filename(dir, "midnight", NULL);
+  g_file_set_contents(lightf, "background = #f4f4f4\n", -1, NULL);
+  g_file_set_contents(darkf, "background = #15141b\n", -1, NULL);
+
+  char **names = pt_theme_list_names(dir);   /* midnight, pt-dark, sunny */
+  char **dark = pt_theme_filter_appearance((const char *const *)names, TRUE,
+                                           classify_on_disk, dir);
+  char **light = pt_theme_filter_appearance((const char *const *)names, FALSE,
+                                            classify_on_disk, dir);
+  assert_names(dark, (const char *const[]){ "midnight", "pt-dark", NULL });
+  assert_names(light, (const char *const[]){ "sunny", NULL });
+
+  g_strfreev(dark);
+  g_strfreev(light);
+  g_strfreev(names);
+  g_remove(lightf);
+  g_remove(darkf);
+  g_rmdir(dir);
+  g_free(lightf);
+  g_free(darkf);
+  g_free(dir);
+}
+
 int main(void) {
   test_color_parse();
   test_pt_dark_identity();
@@ -290,6 +377,8 @@ int main(void) {
   test_discovery();
   test_dark_classification();
   test_is_dark_by_name();
+  test_filter_appearance();
+  test_filter_appearance_on_disk();
   g_print("test-theme: OK\n");
   return 0;
 }
