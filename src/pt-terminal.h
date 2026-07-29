@@ -25,6 +25,9 @@ char *pt_terminal_current_cwd(PtTerminal *t);  /* /proc/<pid>/cwd, caller frees 
 void pt_terminal_paste(PtTerminal *t);          /* async clipboard paste */
 void pt_terminal_copy(PtTerminal *t);           /* copy selection to clipboard */
 const char *pt_terminal_last_command(PtTerminal *t);  /* fg comm; NULL before first poll */
+/* The shell's own name ("zsh"), not the foreground command — cached once at
+ * spawn, so no /proc read per call. NULL only before the pane has spawned. */
+const char *pt_terminal_shell_name(PtTerminal *t);
 int pt_terminal_font_size(void);            /* shared across all terminals */
 void pt_terminal_set_font_size(int pts);    /* clamped; re-measures all panes */
 /* Module-level terminal colors; re-applies to every live terminal and

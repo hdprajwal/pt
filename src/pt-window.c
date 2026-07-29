@@ -1,6 +1,7 @@
 #include "pt-window.h"
 
 #include <glib/gstdio.h>   /* g_mkdir_with_parents */
+#include <string.h>        /* strrchr */
 
 #include "pt-terminal.h"
 #include "pt-sidebar.h"
@@ -47,6 +48,7 @@ struct _PtWindow {
   GtkWidget *settings;  /* overlay child, same stack as the palette; ⌃, */
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
+  guint sidebar_idle;   /* pending coalesced refresh_sidebar; 0 = none */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
   PtConfig *config;
   GFileMonitor *config_monitor;
@@ -309,6 +311,24 @@ static void refresh_sidebar(PtWindow *w) {
   refresh_projectbar(w);
 }
 
+/* refresh_sidebar walks every pane of every project, so callers that can fire
+ * in bursts (one "command-changed" per pane after a broadcast keystroke, git
+ * monitors of several projects polling together) queue it instead: however
+ * many requests land in one main-loop iteration, the walk happens once. The
+ * pending source id doubles as the dirty flag; dispose removes it, so the
+ * callback can never see a dead window. */
+static gboolean sidebar_refresh_idle(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->sidebar_idle = 0;
+  refresh_sidebar(w);
+  return G_SOURCE_REMOVE;
+}
+
+static void queue_refresh_sidebar(PtWindow *w) {
+  if (w->sidebar_idle == 0)
+    w->sidebar_idle = g_idle_add(sidebar_refresh_idle, w);
+}
+
 static void refresh_tabstrip(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   int n = p != NULL ? (int)p->tabs->len : 0;
@@ -345,25 +365,16 @@ static void refresh_statusline(PtWindow *w) {
   PtProgress prog;
   gboolean has_prog = FALSE;
   const char *task = NULL;
-  /* Only a running command can have progress, and scraping the grid is not
-   * free — so this whole block is skipped while the pane sits at a prompt. */
+  /* Only a running command can have progress, so the row read is skipped while
+   * the pane sits at a prompt. Progress counters live on the last non-empty
+   * row of the visible grid; anything above it is scrollback of an older
+   * state. `running` implies the core exists (pt_terminal_running is FALSE
+   * before spawn). */
   if (running) {
     task = pt_terminal_last_command(term);
-    char *grid = pt_term_core_grid_text(pt_terminal_core(term));
-    if (grid != NULL) {
-      /* Progress counters live on the last non-empty row of the visible grid;
-       * anything above it is scrollback of an older state. */
-      char **lines = g_strsplit(grid, "\n", -1);
-      for (int i = (int)g_strv_length(lines) - 1; i >= 0; i--) {
-        g_strchomp(lines[i]);
-        if (lines[i][0] != '\0') {
-          has_prog = pt_progress_parse_line(lines[i], &prog);
-          break;
-        }
-      }
-      g_strfreev(lines);
-      g_free(grid);
-    }
+    char row[1024];
+    if (pt_term_core_last_nonempty_row(pt_terminal_core(term), row, sizeof row))
+      has_prog = pt_progress_parse_line(row, &prog);
   }
   pt_statusline_update(PT_STATUSLINE(w->statusline), running, last_exit,
                        has_prog ? &prog : NULL, task,
@@ -383,22 +394,16 @@ static char *panel_dir(PtWindow *w) {
 }
 
 /* The shell's own name, not the foreground command: the pane's shell pid is a
- * direct child, so its comm stays "zsh" while a build runs under it. $SHELL
- * covers a pid we cannot read. Caller frees. */
-static char *shell_name_for(int pid) {
-  if (pid > 0) {
-    char *path = g_strdup_printf("/proc/%d/comm", pid);
-    char *comm = NULL;
-    gboolean ok = g_file_get_contents(path, &comm, NULL, NULL);
-    g_free(path);
-    if (ok) {
-      g_strstrip(comm);
-      if (comm[0] != '\0') return comm;
-    }
-    g_free(comm);
-  }
+ * direct child, so its comm stays "zsh" while a build runs under it. The pane
+ * caches it at spawn, so this costs nothing; $SHELL/"sh" cover a pane that has
+ * not spawned yet (a tab restored into the background). Borrowed, not freed. */
+static const char *shell_name_for(PtTerminal *term) {
+  const char *name = term != NULL ? pt_terminal_shell_name(term) : NULL;
+  if (name != NULL) return name;
   const char *sh = g_getenv("SHELL");
-  return g_path_get_basename(sh != NULL && sh[0] != '\0' ? sh : "sh");
+  if (sh == NULL || sh[0] == '\0') return "sh";
+  const char *slash = strrchr(sh, '/');
+  return slash != NULL ? slash + 1 : sh;
 }
 
 /* Hidden is the default state, and the 500ms tick calls this unconditionally —
@@ -412,12 +417,11 @@ static void refresh_infopanel(PtWindow *w) {
    * show until it does. */
   PtTermCore *core = term != NULL ? pt_terminal_core(term) : NULL;
   int pid = core != NULL ? (int)pt_term_core_shell_pid(core) : 0;
-  char *shell = shell_name_for(pid);
+  const char *shell = shell_name_for(term);
   char *dir = panel_dir(w);
   pt_info_panel_set_info(PT_INFO_PANEL(w->infopanel), shell, pid,
                          dir != NULL ? dir : "",
                          p != NULL ? p->accent : 0);
-  g_free(shell);
   g_free(dir);
   PtGitStatus none = {0};
   pt_info_panel_set_git(PT_INFO_PANEL(w->infopanel),
@@ -552,7 +556,7 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
          * something is running), so the "✓ / ✗ exit N" settle happens here. */
         refresh_statusline(w);
       }
-      refresh_sidebar(w);
+      queue_refresh_sidebar(w);
       return;
     }
   }
@@ -654,7 +658,7 @@ static void on_git_update(const PtGitStatus *st, GPtrArray *files,
   /* No refresh_statusline here: the status bar stopped speaking for git in the
    * rebuild (that moved to the project bar), and scraping the terminal grid on
    * every git poll would be pure waste. */
-  refresh_sidebar(p->window);
+  queue_refresh_sidebar(p->window);
   refresh_infopanel(p->window);
 }
 
@@ -1735,6 +1739,10 @@ static void pt_window_dispose(GObject *obj) {
   if (w->status_source != 0) {
     g_source_remove(w->status_source);
     w->status_source = 0;
+  }
+  if (w->sidebar_idle != 0) {
+    g_source_remove(w->sidebar_idle);
+    w->sidebar_idle = 0;
   }
   g_clear_object(&w->config_monitor);
   g_clear_object(&w->theme_monitor);
