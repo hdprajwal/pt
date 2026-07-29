@@ -109,6 +109,16 @@ struct _PtTerminal {
   gint64 bar_at;
   guint bar_hold;
   guint bar_tick;
+
+  /* cursor blink. `blink_source` is the toggle timer and is non-zero exactly
+   * while this pane is drawing a blinking cursor; `blink_visible` is which
+   * half of the cycle we are in, and means nothing while no timer runs (it is
+   * parked at TRUE, so a steady cursor is never hidden). `blink_reset_at` is
+   * the last time output pushed the phase back to visible, for the debounce. */
+  guint blink_source;
+  gboolean blink_visible;
+  gboolean blink_wanted;     /* last synced: the app asked for a blinking cursor */
+  gint64 blink_reset_at;
 };
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
@@ -118,10 +128,73 @@ G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
  * mouse code it belongs with. */
 static void update_link_cursor(PtTerminal *t);
 
+/* ---- cursor blink ----
+ *
+ * ghostty toggles the cursor every 600ms from a timer it runs only while the
+ * surface is focused (renderer/Thread.zig:20 and :401-429), so the full cycle
+ * is 600 on, 600 off. It reads nothing from the desktop — no
+ * gtk-cursor-blink-time — and offers no setting for the rate, and neither does
+ * pt: this is one literal, matched to the reference implementation.
+ *
+ * The phase goes back to visible whenever output arrives, debounced to at most
+ * once every 500ms (termio/Termio.zig:651-673). Hooking output rather than the
+ * key event is ghostty's choice and it is the better one: it keeps the cursor
+ * solid while you type into a shell that echoes you, and equally while a
+ * program is redrawing itself around a cursor you are not touching, which is
+ * the case a keypress hook would blink straight through. */
+#define PT_CURSOR_BLINK_MS 600
+#define PT_CURSOR_BLINK_RESET_MS 500
+
+static gboolean blink_tick(gpointer user) {
+  PtTerminal *t = PT_TERMINAL(user);
+  t->blink_visible = !t->blink_visible;
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+  return G_SOURCE_CONTINUE;
+}
+
+/* The two — and only two — places the timer is created and destroyed. */
+static void blink_timer_stop(PtTerminal *t) {
+  g_clear_handle_id(&t->blink_source, g_source_remove);
+  /* Nothing may hide the cursor while no timer is running to bring it back. */
+  t->blink_visible = TRUE;
+}
+
+static void blink_timer_start(PtTerminal *t) {
+  blink_timer_stop(t);         /* restarting means the interval starts over */
+  t->blink_source = g_timeout_add(PT_CURSOR_BLINK_MS, blink_tick, t);
+}
+
+/* The one place that decides whether a timer should exist. A blink timer runs
+ * exactly while this pane is focused, still has a shell, and the app has asked
+ * for a blinking cursor — an unfocused pane draws a hollow block whatever it
+ * was asked for, so a timer there would burn a wakeup a second to animate
+ * nothing. Every input to that answer calls back here when it changes:
+ * focus-in, focus-out, the sync in snapshot, the child exiting, and dispose. */
+static void sync_blink_timer(PtTerminal *t) {
+  gboolean want = t->focused && !t->exited && t->blink_wanted;
+  if (want == (t->blink_source != 0)) return;
+  if (want)
+    blink_timer_start(t);
+  else
+    blink_timer_stop(t);
+}
+
+/* Output means something is happening at the cursor: show it. */
+static void blink_phase_reset(PtTerminal *t) {
+  gint64 now = g_get_monotonic_time();
+  if (t->blink_reset_at != 0 &&
+      now - t->blink_reset_at <= PT_CURSOR_BLINK_RESET_MS * 1000)
+    return;                    /* a busy reader must not restart the timer per read */
+  t->blink_reset_at = now;
+  t->blink_visible = TRUE;
+  if (t->blink_source != 0) blink_timer_start(t);
+}
+
 /* ---- core callbacks ---- */
 static void core_draw(PtTermCore *core, gpointer user) {
   (void)core;
   PtTerminal *t = PT_TERMINAL(user);
+  blink_phase_reset(t);
   gtk_widget_queue_draw(GTK_WIDGET(t));
   update_link_cursor(t);       /* the grid just moved under the pointer */
   g_signal_emit(t, signals[SIG_ACTIVITY], 0);
@@ -132,6 +205,7 @@ static void core_exited(PtTermCore *core, int status, gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
   t->exited = TRUE;
   t->exit_status = status;
+  sync_blink_timer(t);         /* nothing left to point at */
   gtk_widget_queue_draw(GTK_WIDGET(t));
   g_signal_emit(t, signals[SIG_EXITED], 0, status);
 }
@@ -590,6 +664,67 @@ static void bar_reveal(PtTerminal *t) {
 }
 
 /* ---- rendering ---- */
+
+/* What to actually draw at the cursor, which is not the same question as what
+ * the app asked for. */
+typedef enum {
+  PT_CURSOR_NONE,            /* draw nothing at all */
+  PT_CURSOR_BLOCK,
+  PT_CURSOR_BLOCK_HOLLOW,
+  PT_CURSOR_BAR,
+  PT_CURSOR_UNDERLINE,
+} PtCursorShape;
+
+/* pt's port of ghostty's renderer/cursor.zig:36-68. The order of the tests is
+ * the whole point: it is a priority list of what overrides what, and reading it
+ * top to bottom is how you check that exactly one filled cursor can be on
+ * screen at a time.
+ *
+ * Two deliberate departures from ghostty. It has a preedit case above the rest
+ * (an IME composing over the cursor forces a block); pt has no IM context at
+ * all, so there is no state to test. And where ghostty draws a Nerd Font lock
+ * glyph at a password prompt, pt draws a plain block: pt does not ship a font
+ * and cannot promise U+F023 exists, and a missing-glyph box at the moment
+ * someone is typing a password is the worst place to find out. */
+static PtCursorShape cursor_shape(PtTerminal *t, GhosttyRenderState rs) {
+  /* No shell: the exited banner is up and there is nothing to point at. */
+  if (t->exited) return PT_CURSOR_NONE;
+
+  /* Scrolled out of the viewport, or otherwise nowhere to draw. */
+  bool in_vp = false;
+  ghostty_render_state_get(rs,
+      GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE, &in_vp);
+  if (!in_vp) return PT_CURSOR_NONE;
+
+  /* A password prompt outranks everything below, hiding and blinking
+   * included: whatever else is true, the cursor stays put and stays obvious. */
+  if (pt_term_core_cursor_password_input(t->core)) return PT_CURSOR_BLOCK;
+
+  /* The app hid the cursor (DECTCEM). */
+  bool visible = false;
+  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE,
+                           &visible);
+  if (!visible) return PT_CURSOR_NONE;
+
+  /* An unfocused pane is hollow whatever it asked for, and never blinks —
+   * which is also what makes the focused pane findable in a split. */
+  if (!t->focused) return PT_CURSOR_BLOCK_HOLLOW;
+
+  /* Blinking, and this is the off half of the cycle. */
+  if (t->blink_wanted && !t->blink_visible) return PT_CURSOR_NONE;
+
+  switch (pt_term_core_cursor_style(t->core)) {
+    case GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR:
+      return PT_CURSOR_BAR;
+    case GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE:
+      return PT_CURSOR_UNDERLINE;
+    case GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW:
+      return PT_CURSOR_BLOCK_HOLLOW;
+    default:
+      return PT_CURSOR_BLOCK;
+  }
+}
+
 static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   PtTerminal *t = PT_TERMINAL(widget);
   int w = gtk_widget_get_width(widget);
@@ -764,34 +899,58 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   pango_glyph_string_free(run);
 
   /* cursor */
-  bool cur_visible = false, cur_in_vp = false;
-  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE,
-                           &cur_visible);
-  ghostty_render_state_get(rs,
-      GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE, &cur_in_vp);
-  if (cur_visible && cur_in_vp && !t->exited) {
+  t->blink_wanted = pt_term_core_cursor_blinking(t->core);
+  sync_blink_timer(t);         /* the app may have just started or stopped it */
+  PtCursorShape shape = cursor_shape(t, rs);
+  if (shape != PT_CURSOR_NONE) {
     uint16_t cx = 0, cy = 0;
     ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &cx);
     ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cy);
+    /* On the tail of a wide character the cell under the cursor holds nothing:
+     * the glyph belongs to the cell on its left. Back up onto it and cover
+     * both, as ghostty does (renderer/generic.zig:3232), or the cursor lands
+     * over the right half of a character and looks like a rendering fault. */
+    int cells = 1;
+    if (pt_term_core_cursor_wide_tail(t->core) && cx > 0) { cx--; cells = 2; }
+    float x = PT_PAD_X + cx * t->cell_w;
+    float y = PT_PAD_Y + cy * t->cell_h;
+    float w_cur = (float)(cells * t->cell_w);
     GhosttyColorRgb cc = cursor_has_value ? cursor_color : fg_default;
-    if (t->focused) {
-      gtk_snapshot_append_color(snapshot,
-          &(GdkRGBA){cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.55f},
-          &GRAPHENE_RECT_INIT(PT_PAD_X + cx * t->cell_w,
-                              PT_PAD_Y + cy * t->cell_h,
-                              t->cell_w, t->cell_h));
-    } else {
-      /* unfocused pane: hollow cursor. The alpha is higher than the filled
-       * block's because a 1px outline reads much fainter at 0.55f. */
-      GdkRGBA out = { cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.8f };
-      GskRoundedRect cr;
-      gsk_rounded_rect_init_from_rect(&cr,
-          &GRAPHENE_RECT_INIT(PT_PAD_X + cx * t->cell_w,
-                              PT_PAD_Y + cy * t->cell_h,
-                              t->cell_w, t->cell_h), 0);
-      gtk_snapshot_append_border(snapshot, &cr,
-          (float[4]){ 1, 1, 1, 1 },
-          (GdkRGBA[4]){ out, out, out, out });
+    /* A filled block sits on top of its glyph, so it stays translucent enough
+     * to read through. The thin shapes have nothing under them to preserve and
+     * would read as a smudge at the same alpha, so they are drawn solid — the
+     * same reason the hollow outline has always been drawn brighter. */
+    GdkRGBA solid = { cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 1.0f };
+    switch (shape) {
+      case PT_CURSOR_BLOCK:
+        gtk_snapshot_append_color(snapshot,
+            &(GdkRGBA){cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.55f},
+            &GRAPHENE_RECT_INIT(x, y, w_cur, t->cell_h));
+        break;
+      case PT_CURSOR_BAR:
+        /* Half the rule's thickness hangs over the left cell edge, so the bar
+         * sits between two characters rather than biased onto the one it is
+         * in front of (font/sprite/draw/special.zig:325). */
+        gtk_snapshot_append_color(snapshot, &solid,
+            &GRAPHENE_RECT_INIT(x - 1, y, 2, t->cell_h));
+        break;
+      case PT_CURSOR_UNDERLINE:
+        gtk_snapshot_append_color(snapshot, &solid,
+            &GRAPHENE_RECT_INIT(x, y + t->cell_h - 2, w_cur, 2));
+        break;
+      case PT_CURSOR_BLOCK_HOLLOW: {
+        /* The alpha is higher than the filled block's because a 1px outline
+         * reads much fainter at 0.55f. */
+        GdkRGBA out = { cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.8f };
+        GskRoundedRect cr;
+        gsk_rounded_rect_init_from_rect(&cr,
+            &GRAPHENE_RECT_INIT(x, y, w_cur, t->cell_h), 0);
+        gtk_snapshot_append_border(snapshot, &cr,
+            (float[4]){ 1, 1, 1, 1 },
+            (GdkRGBA[4]){ out, out, out, out });
+        break;
+      }
+      case PT_CURSOR_NONE: break;   /* unreachable; keeps the switch total */
     }
   }
 
@@ -865,6 +1024,7 @@ static void restart_shell(PtTerminal *t) {
   if (t->core != NULL) pt_term_core_free(t->core);
   t->core = NULL;
   t->exited = FALSE;
+  sync_blink_timer(t);
   g_free(t->start_cwd);
   t->start_cwd = cwd != NULL ? cwd : g_strdup(g_get_home_dir());
   ensure_core(t);
@@ -876,6 +1036,7 @@ static void on_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   t->focused = TRUE;
+  sync_blink_timer(t);         /* only the focused pane blinks */
   /* Deliberately synchronous, where ghostty defers to a glib idle
    * (apprt/gtk/class/surface.zig:2750): it does so to avoid re-entering
    * libghostty while the renderer lock is held, and pt has no such lock. */
@@ -888,6 +1049,7 @@ static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
   (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   t->focused = FALSE;
+  sync_blink_timer(t);         /* and the timer goes with the focus */
   /* Also fires when the pane is unparented on a tab or project switch, and
    * when the window itself goes inactive, both by way of GTK's own crossing
    * events — so a backgrounded pane counts as unfocused with no code here. */
@@ -1508,6 +1670,7 @@ static void pt_terminal_dispose(GObject *obj) {
     t->bar_tick = 0;
   }
   g_clear_handle_id(&t->bar_hold, g_source_remove);
+  blink_timer_stop(t);         /* the timer holds a pointer to this widget */
   g_clear_pointer(&t->core, pt_term_core_free);
   g_clear_object(&t->layout);
   g_clear_pointer(&t->font_desc, pango_font_description_free);
@@ -1547,6 +1710,7 @@ static void pt_terminal_init(PtTerminal *t) {
   pango_layout_set_font_description(t->layout, t->font_desc);
   t->report_mouse = mouse_reporting_default;
   t->osc52 = osc52_default;
+  t->blink_visible = TRUE;
   live_terminals = g_slist_prepend(live_terminals, t);
 
   GtkEventController *key = gtk_event_controller_key_new();
