@@ -100,9 +100,9 @@ static char accent_env[PT_ACCENT_COUNT][8] =
  * "changed" at key-repeat rate when an arrow is held on a row, and re-reading
  * and re-parsing the theme file per repeat is pure waste when neither the
  * name nor the file moved. Keyed by name + file stamp, and dropped outright
- * when the themes-dir monitor fires — which also covers a same-second rewrite
- * the stamp cannot see. Module-level like accent_env: the themes dir is
- * per-user, not per-window. */
+ * when the themes-dir monitor fires — belt over the stamp's braces for a
+ * same-size rewrite on a filesystem without subsecond mtimes. Module-level
+ * like accent_env: the themes dir is per-user, not per-window. */
 static char *theme_cache_name;
 static char *theme_cache_stamp;   /* NULL = no file backing (builtin/missing) */
 static PtTheme *theme_cache_theme;
@@ -113,17 +113,30 @@ static void theme_cache_drop(void) {
   g_clear_pointer(&theme_cache_theme, pt_theme_free);
 }
 
-/* mtime+size of the named theme's file; NULL when there is no file (the
+/* mtime.usec+size of the named theme's file — subsecond, same fingerprint the
+ * pt_theme_is_dark cache uses, so a same-size in-place rewrite within one
+ * second still moves the stamp and a settings preview racing the monitor
+ * delivery cannot render a stale parse. NULL when there is no file (the
  * builtin, or a missing name — both render the same fallback text every time,
  * so "no file" is itself a valid stamp for the cached name). */
 static char *theme_file_stamp(const char *dir, const char *name) {
   char *path = g_build_filename(dir, name, NULL);
-  GStatBuf st;
-  char *stamp = NULL;
-  if (g_stat(path, &st) == 0)
-    stamp = g_strdup_printf("%" G_GINT64_FORMAT ":%" G_GINT64_FORMAT,
-                            (gint64)st.st_mtime, (gint64)st.st_size);
+  GFile *f = g_file_new_for_path(path);
+  GFileInfo *info = g_file_query_info(
+      f,
+      G_FILE_ATTRIBUTE_TIME_MODIFIED "," G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC
+      "," G_FILE_ATTRIBUTE_STANDARD_SIZE,
+      G_FILE_QUERY_INFO_NONE, NULL, NULL);
+  g_object_unref(f);
   g_free(path);
+  if (info == NULL) return NULL;
+  char *stamp = g_strdup_printf(
+      "%" G_GUINT64_FORMAT ".%06u:%" G_GINT64_FORMAT,
+      g_file_info_get_attribute_uint64(info, G_FILE_ATTRIBUTE_TIME_MODIFIED),
+      g_file_info_get_attribute_uint32(info,
+                                       G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC),
+      (gint64)g_file_info_get_size(info));
+  g_object_unref(info);
   return stamp;
 }
 
@@ -251,10 +264,16 @@ static gboolean theme_reload_now(gpointer user) {
   PtWindow *w = PT_WINDOW(user);
   w->theme_reload_source = 0;
   /* Same as config_reload_now: the candidate on screen wins while the dialog
-   * is open. Notably the mkdir in action_open_settings makes the themes dir
-   * fire a CREATED event on the first-ever ⌃,. */
-  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)))
+   * is open — but a theme-file edit must still reach the preview, so the
+   * candidate itself is re-rendered rather than skipped (re-applying w->config
+   * here would snap the preview back mid-edit). Notably the mkdir in
+   * action_open_settings makes the themes dir fire a CREATED event on the
+   * first-ever ⌃,; rendering the candidate again is a no-op for it. */
+  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings))) {
+    const PtConfig *cand = pt_settings_config(PT_SETTINGS(w->settings));
+    if (cand != NULL) render_config(cand);
     return G_SOURCE_REMOVE;
+  }
   apply_config(w);
   return G_SOURCE_REMOVE;
 }
