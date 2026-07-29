@@ -30,10 +30,8 @@ PtTerminal *pt_pane_grid_pane_by_id(PtPaneGrid *g, guint64 id);
 /* Same lookup, but focus what it finds. */
 gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id);
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
-int pt_pane_grid_pane_count(PtPaneGrid *g);
 /* TRUE when any pane in the grid has a foreground process other than the shell. */
 gboolean pt_pane_grid_any_running(PtPaneGrid *g);
-int pt_pane_grid_focused_index(PtPaneGrid *g);
 void pt_pane_grid_sync_cwds(PtPaneGrid *g); /* leaf->cwd ← live terminal cwd */
 void pt_pane_grid_focus_terminal(PtPaneGrid *g); /* grab focus on focused pane */
 /* Signals: "structure-changed" (void) — split/close happened (persist!);

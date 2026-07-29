@@ -58,25 +58,41 @@ PtSplitNode *pt_split_first_leaf(PtSplitNode *root) {
   return root;
 }
 
-static void collect_leaves(PtSplitNode *n, GPtrArray *arr) {
-  if (n == NULL) return;
-  if (n->kind == PT_SPLIT_LEAF) { g_ptr_array_add(arr, n); return; }
-  collect_leaves(n->a, arr);
-  collect_leaves(n->b, arr);
+static PtSplitNode *last_leaf(PtSplitNode *n) {
+  while (n->kind != PT_SPLIT_LEAF) n = n->b;
+  return n;
 }
 
+/* O(depth), no allocation: climb while we are the second child, then the
+ * neighbor is the first leaf under the parent's other side; climbing off the
+ * root means `leaf` was the last leaf, so wrap to the first. */
 PtSplitNode *pt_split_next_leaf(PtSplitNode *root, PtSplitNode *leaf) {
-  GPtrArray *arr = g_ptr_array_new();
-  collect_leaves(root, arr);
-  PtSplitNode *result = leaf;
-  for (guint i = 0; i < arr->len; i++) {
-    if (g_ptr_array_index(arr, i) == leaf) {
-      result = g_ptr_array_index(arr, (i + 1) % arr->len);
-      break;
-    }
-  }
-  g_ptr_array_free(arr, TRUE);
-  return result;
+  if (root == NULL || leaf == NULL) return leaf;
+  PtSplitNode *n = leaf;
+  while (n->parent != NULL && n->parent->b == n) n = n->parent;
+  if (n->parent == NULL) return pt_split_first_leaf(root); /* wrap */
+  return pt_split_first_leaf(n->parent->b);
+}
+
+PtSplitNode *pt_split_prev_leaf(PtSplitNode *root, PtSplitNode *leaf) {
+  if (root == NULL || leaf == NULL) return leaf;
+  PtSplitNode *n = leaf;
+  while (n->parent != NULL && n->parent->a == n) n = n->parent;
+  if (n->parent == NULL) return last_leaf(root); /* wrap */
+  return last_leaf(n->parent->a);
+}
+
+PtSplitNode *pt_split_copy(const PtSplitNode *n) {
+  if (n == NULL) return NULL;
+  PtSplitNode *c = g_new0(PtSplitNode, 1); /* user stays NULL by design */
+  c->kind = n->kind;
+  c->ratio = n->ratio;
+  c->cwd = g_strdup(n->cwd);
+  c->a = pt_split_copy(n->a);
+  c->b = pt_split_copy(n->b);
+  if (c->a != NULL) c->a->parent = c;
+  if (c->b != NULL) c->b->parent = c;
+  return c;
 }
 
 int pt_split_count_leaves(PtSplitNode *root) {

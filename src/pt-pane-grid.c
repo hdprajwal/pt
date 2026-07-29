@@ -275,11 +275,7 @@ void pt_pane_grid_focus_next(PtPaneGrid *g) {
 
 void pt_pane_grid_focus_prev(PtPaneGrid *g) {
   if (g->focused == NULL) return;
-  /* Cyclic list only walks forward; the previous leaf is the one whose
-   * successor is the focused leaf. */
-  PtSplitNode *leaf = g->focused;
-  while (pt_split_next_leaf(g->tree, leaf) != g->focused)
-    leaf = pt_split_next_leaf(g->tree, leaf);
+  PtSplitNode *leaf = pt_split_prev_leaf(g->tree, g->focused);
   if (leaf == g->focused) return;
   g->focused = leaf;
   pt_pane_grid_focus_terminal(g);
@@ -377,10 +373,6 @@ PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g) {
   return g->focused != NULL ? PT_TERMINAL(g->focused->user) : NULL;
 }
 
-int pt_pane_grid_pane_count(PtPaneGrid *g) {
-  return pt_split_count_leaves(g->tree);
-}
-
 static gboolean any_running_walk(PtSplitNode *n) {
   if (n == NULL) return FALSE;
   if (n->kind == PT_SPLIT_LEAF)
@@ -390,24 +382,6 @@ static gboolean any_running_walk(PtSplitNode *n) {
 
 gboolean pt_pane_grid_any_running(PtPaneGrid *g) {
   return any_running_walk(g->tree);
-}
-
-static void index_walk(PtSplitNode *n, PtSplitNode *target, int *idx,
-                       int *found) {
-  if (n == NULL || *found >= 0) return;
-  if (n->kind == PT_SPLIT_LEAF) {
-    if (n == target) *found = *idx;
-    (*idx)++;
-    return;
-  }
-  index_walk(n->a, target, idx, found);
-  index_walk(n->b, target, idx, found);
-}
-
-int pt_pane_grid_focused_index(PtPaneGrid *g) {
-  int idx = 0, found = -1;
-  index_walk(g->tree, g->focused, &idx, &found);
-  return found >= 0 ? found : 0;
 }
 
 static void sync_cwd_walk(PtSplitNode *n) {

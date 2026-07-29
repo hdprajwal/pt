@@ -1750,10 +1750,7 @@ static PtSessionState *capture_state(PtWindow *w) {
       PtTabUI *t = g_ptr_array_index(p->tabs, j);
       PtPaneGrid *grid = PT_PANE_GRID(t->grid);
       pt_pane_grid_sync_cwds(grid);
-      /* Deep-copy the live tree via JSON round-trip (cheap, reuses code). */
-      JsonNode *j_tree = pt_split_to_json(pt_pane_grid_tree(grid));
-      PtSplitNode *copy = pt_split_from_json(j_tree);
-      json_node_unref(j_tree);
+      PtSplitNode *copy = pt_split_copy(pt_pane_grid_tree(grid));
       g_ptr_array_add(ps->tabs, pt_tab_state_new(t->title, copy));
     }
     g_ptr_array_add(s->projects, ps);

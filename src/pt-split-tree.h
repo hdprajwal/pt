@@ -24,6 +24,10 @@ PtSplitNode *pt_split_split(PtSplitNode **root, PtSplitNode *leaf, PtSplitKind k
 PtSplitNode *pt_split_close(PtSplitNode **root, PtSplitNode *leaf);
 PtSplitNode *pt_split_first_leaf(PtSplitNode *root);
 PtSplitNode *pt_split_next_leaf(PtSplitNode *root, PtSplitNode *leaf); /* cyclic */
+PtSplitNode *pt_split_prev_leaf(PtSplitNode *root, PtSplitNode *leaf); /* cyclic */
+/* Deep copy of the whole subtree; `user` pointers are NOT copied (NULL in the
+ * copy). Parent pointers are rebuilt; the copy's root parent is NULL. */
+PtSplitNode *pt_split_copy(const PtSplitNode *n);
 int pt_split_count_leaves(PtSplitNode *root);
 void pt_split_free(PtSplitNode *root);
 JsonNode *pt_split_to_json(const PtSplitNode *root);       /* transfer full */
