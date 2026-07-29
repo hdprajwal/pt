@@ -540,6 +540,28 @@ char *pt_osc52_decode(const char *payload, gsize len, gboolean *primary,
   return (char *)raw;
 }
 
+/* An OSC 9 or OSC 777 that asked for a desktop notification, on its way to the
+ * consumer. Everything that can refuse it is here, cheapest first. */
+static void core_notification(PtTermCore *c, int code, const char *payload,
+                              gsize len) {
+  PtOscNotification n = {0};
+  if (pt_osc_notification(code, payload, len, &n) != PT_OSC_NOTIFY_SHOW)
+    return;
+  /* The pane the user is looking at right now says what it has to say on
+   * screen. Checked before the rate limit, not after: a focused pane in a
+   * loop must not spend the budget that an unfocused pane's one real
+   * notification needs. c->focused follows the widget's focus, and GTK takes
+   * focus away from the pane when the window itself goes inactive, so this is
+   * "the focused pane of the focused window" and not just "the focused pane". */
+  if (c->focused) return;
+  char title[PT_NOTIFY_TITLE_MAX + 1];
+  char body[PT_NOTIFY_BODY_MAX + 1];
+  if (!notify_copy(title, PT_NOTIFY_TITLE_MAX, n.title, n.title_len)) return;
+  if (!notify_copy(body, PT_NOTIFY_BODY_MAX, n.body, n.body_len)) return;
+  if (!pt_notify_gate(g_get_monotonic_time(), title, body)) return;
+  c->cbs.notification(c, title, body, c->cbs_user);
+}
+
 static void core_osc_dispatch(int code, const char *payload, gsize len,
                               gpointer user) {
   PtTermCore *c = user;
@@ -547,6 +569,8 @@ static void core_osc_dispatch(int code, const char *payload, gsize len,
    * several sequences, and a consumer is allowed to unregister itself from
    * inside its own handler. Without this the next sequence in the same read
    * would call through a NULL pointer. */
+  if ((code == 9 || code == 777) && c->cbs.notification != NULL)
+    core_notification(c, code, payload, len);
   if (code == 52 && c->osc52 != PT_OSC52_OFF &&
       c->cbs.clipboard_write != NULL) {
     gboolean primary = FALSE;
@@ -647,7 +671,8 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
         /* After the parser, so an OSC consumer sees terminal state that
          * already includes the bytes it is reacting to. Skipped entirely
          * when nobody is listening. */
-        if (c->cbs.osc != NULL || c->cbs.clipboard_write != NULL)
+        if (c->cbs.osc != NULL || c->cbs.clipboard_write != NULL ||
+            c->cbs.notification != NULL)
           pt_osc_scan_feed(&c->osc, buf, (size_t)n, core_osc_dispatch, c);
         got_data = TRUE;
       } else if (n == 0) { c->eof = TRUE; break; }
