@@ -182,6 +182,38 @@ static void test_parse_out_of_range_font_size(void) {
   pt_config_free(hi);
 }
 
+/* ui-font-size lands in a CSS length, so "not a number" has to be caught here:
+ * strtod spells nan and inf as numbers, and NaN compares false against any
+ * range, which is how "nanpx" reaches the stylesheet. */
+static void test_parse_ui_font_size_not_a_number(void) {
+  const char *bad[] = {
+    "ui-font-size = nan\n",  "ui-font-size = NaN\n",
+    "ui-font-size = -nan\n", "ui-font-size = inf\n",
+    "ui-font-size = -inf\n", "ui-font-size = infinity\n",
+    "ui-font-size = 0\n",    "ui-font-size = -3.5\n",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
+    PtConfig *c = pt_config_parse(bad[i]);
+    g_assert_cmpfloat(c->ui_font_size, ==, 12.5);
+    pt_config_free(c);
+  }
+  /* Absurdly small is still positive and still finite: accepted, the same as
+   * before there was a lower bound at all. Nobody can read it; that is the
+   * UI's business, not the parser's. */
+  PtConfig *tiny = pt_config_parse("ui-font-size = 1e-320\n");
+  g_assert_cmpfloat(tiny->ui_font_size, ==, 1e-320);
+  pt_config_free(tiny);
+  /* And a large one round-trips through the rewrite unharmed. */
+  PtConfig *big = pt_config_parse("ui-font-size = 1e300\n");
+  g_assert_cmpfloat(big->ui_font_size, ==, 1e300);
+  char *out = pt_config_rewrite("", big);
+  PtConfig *back = pt_config_parse(out);
+  g_assert_true(pt_config_equal(big, back));
+  g_free(out);
+  pt_config_free(big);
+  pt_config_free(back);
+}
+
 static void test_copy_equal(void) {
   PtConfig *a = pt_config_parse("theme = x\napp-ok = #00ff00\n");
   PtConfig *b = pt_config_copy(a);
@@ -256,6 +288,7 @@ int main(void) {
   test_parse_osc52();
   test_rewrite_osc52();
   test_parse_out_of_range_font_size();
+  test_parse_ui_font_size_not_a_number();
   test_copy_equal();
   test_rewrite_preserves();
   test_rewrite_roundtrip();

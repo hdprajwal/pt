@@ -1,5 +1,6 @@
 #include "pt-config.h"
 #include <glib/gstdio.h>   /* g_mkdir_with_parents */
+#include <math.h>          /* isfinite */
 #include <stdlib.h>
 #include <string.h>
 
@@ -59,8 +60,10 @@ typedef struct {
   const char *key;
   size_t offset;             /* into PtConfig */
   PtFieldType type;
-  /* FLD_INT/FLD_DOUBLE only: inclusive range the parser accepts. Values
-   * outside it warn and keep the default. */
+  /* The range the parser accepts; anything outside it warns and keeps the
+   * default. FLD_INT is inclusive at both ends. FLD_DOUBLE's low end is
+   * exclusive and its values must be finite, so `min = 0` reads as "any
+   * positive real" — see field_parse. */
   double min, max;
   const char *const *names;  /* FLD_ENUM: NULL-terminated spellings, in order */
   const char *hint;          /* spelled out in the warning when non-NULL */
@@ -77,9 +80,9 @@ static const PtConfigField config_fields[] = {
     FLD_INT,    PT_CONFIG_FONT_SIZE_MIN, PT_CONFIG_FONT_SIZE_MAX, NULL, NULL },
   { "font-family",     G_STRUCT_OFFSET(PtConfig, font_family),
     FLD_STR,    0, 0, NULL, NULL },
-  /* G_MINDOUBLE, not 0: a UI font size has to be positive. */
+  /* Any positive, finite size: this one ends up in a CSS length. */
   { "ui-font-size",    G_STRUCT_OFFSET(PtConfig, ui_font_size),
-    FLD_DOUBLE, G_MINDOUBLE, G_MAXDOUBLE, NULL, NULL },
+    FLD_DOUBLE, 0, G_MAXDOUBLE, NULL, NULL },
   { "ui-font-family",  G_STRUCT_OFFSET(PtConfig, ui_font_family),
     FLD_STR,    0, 0, NULL, NULL },
   { "mouse-reporting", G_STRUCT_OFFSET(PtConfig, mouse_reporting),
@@ -132,7 +135,14 @@ static gboolean field_parse(const PtConfigField *f, PtConfig *c,
     case FLD_DOUBLE: {
       char *end = NULL;
       double v = g_ascii_strtod(value, &end);
-      if (end == value || *end != '\0' || v < f->min || v > f->max)
+      /* isfinite first, and on its own: strtod spells `nan` and `inf` as
+       * numbers, and NaN compares false against every bound, so a range test
+       * alone lets `ui-font-size = nan` through and puts "nanpx" in the CSS.
+       * The low end is exclusive rather than clamped to G_MINDOUBLE so the
+       * smallest positive value a double can hold still counts — what a size
+       * has to be is positive, not normalised. */
+      if (end == value || *end != '\0' || !isfinite(v) || v <= f->min ||
+          v > f->max)
         return FALSE;
       *(double *)p = v;
       return TRUE;
