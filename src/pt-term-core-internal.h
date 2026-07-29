@@ -57,6 +57,67 @@ void pt_osc_scan_feed(PtOscScan *s, const guint8 *data, gsize len,
 /* Release the buffer and return to the ground state. */
 void pt_osc_scan_clear(PtOscScan *s);
 
+/* ---- desktop notifications (OSC 9, OSC 777) ----
+ *
+ * Two codes carry the same thing. `ESC ] 9 ; body BEL` is iTerm2's, and has no
+ * title; `ESC ] 777 ; notify ; title ; body BEL` is rxvt's, and has both.
+ *
+ * OSC 9 is shared with ConEmu, which hangs a dozen unrelated extensions off
+ * subcodes (`9;1;` sleep, `9;4;` progress, `9;9;` cwd, ...), so telling a
+ * notification from one of those is the whole job here. The rule replicated
+ * below is ghostty's, byte for byte, from
+ * terminal/osc/parsers/osc9.zig: a payload is a ConEmu extension only when it
+ * matches one exactly, and *anything* else — including a truncated or
+ * misspelled extension — is a notification whose body is the whole payload.
+ * That is why `9;4` and `9;4;` are notifications while `9;4;1` is a progress
+ * report; ghostty's own tests pin each of those cases.
+ *
+ * Progress reports come back named rather than merged into "not a
+ * notification", so the ConEmu progress work (issue #17) has somewhere to
+ * attach without re-deciding any of this. */
+typedef enum {
+  PT_OSC_NOTIFY_NONE = 0,  /* a ConEmu extension pt does not implement */
+  PT_OSC_NOTIFY_SHOW,      /* raise it: `out` is filled in */
+  PT_OSC_NOTIFY_PROGRESS,  /* ConEmu `9;4;...` progress report — issue #17 */
+} PtOscNotifyKind;
+
+/* Both halves point into `payload` and are valid only as long as it is.
+ * Neither is NUL-terminated (the body of an OSC 777 ends where the payload
+ * does, but the title does not), so both come with a length. `title` is the
+ * empty string for OSC 9, which never carries one. */
+typedef struct {
+  const char *title;
+  gsize title_len;
+  const char *body;
+  gsize body_len;
+} PtOscNotification;
+
+/* `code` and `payload` straight from the scanner. Answers NONE for every code
+ * that is not 9 or 777, so callers can hand it everything. */
+PtOscNotifyKind pt_osc_notification(int code, const char *payload, gsize len,
+                                    PtOscNotification *out);
+
+/* Ghostty's caps, from the fixed-size message it posts to the apprt
+ * (apprt/surface.zig: `title: [63:0]u8`, `body: [255:0]u8`). Over-long text is
+ * truncated rather than dropped — a build log line that runs long should still
+ * notify. pt truncates on a character boundary where ghostty cuts mid-byte:
+ * the text leaves here for a GNotification, i.e. for the session bus, and half
+ * a codepoint is not something a D-Bus string may carry. */
+#define PT_NOTIFY_TITLE_MAX  63
+#define PT_NOTIFY_BODY_MAX  255
+
+/* The rate limit, process-wide because ghostty's is too: it lives on the App
+ * and not on the Surface (Surface.zig showDesktopNotification), so one pane in
+ * a loop cannot drown out every other pane. One per second, plus a longer
+ * window in which the same text cannot repeat at all.
+ *
+ * `now_us` is g_get_monotonic_time() in the app and a synthetic clock in the
+ * tests. Returns TRUE when the notification may be shown, and only then
+ * records it — a suppressed notification does not push the window forward,
+ * or a fast enough loop would suppress everything forever. */
+gboolean pt_notify_gate(gint64 now_us, const char *title, const char *body);
+void pt_notify_gate_reset(void);   /* tests only: the state is process-wide */
+
 /* ---- OSC 52 payloads ----
  *
  * `<targets>;<base64>`, as it arrives from the scanner. Returns the decoded
