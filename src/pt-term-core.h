@@ -35,6 +35,22 @@ typedef struct {
    * read form of OSC 52; see pt_term_core_set_osc52(). */
   void (*clipboard_write)(PtTermCore *core, const char *text, gsize len,
                           gboolean primary, gpointer user);
+  /* A program asked for a desktop notification with OSC 9 or OSC 777 — a
+   * build that finished while the pane was somewhere the user is not looking.
+   *
+   * Everything the payload had to survive has already happened: the ConEmu
+   * extensions that share OSC 9 are gone, the text is valid UTF-8 and capped
+   * (see PT_NOTIFY_TITLE_MAX / PT_NOTIFY_BODY_MAX), and the rate limit has
+   * been paid. Both strings are NUL-terminated and valid for the call only.
+   *
+   * `title` is "" whenever the sequence carried none, which OSC 9 always
+   * does; the consumer names the notification itself in that case.
+   *
+   * Never fires while the pane is focused — see pt_term_core_focus_report. A
+   * notification for the pane the user is already reading is noise, so the
+   * core drops it before it can cost the rate limit anything. */
+  void (*notification)(PtTermCore *core, const char *title, const char *body,
+                       gpointer user);
 } PtTermCoreCallbacks;
 
 /* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh).

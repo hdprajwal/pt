@@ -10,7 +10,9 @@ typedef struct { GMainLoop *loop; PtTermCore *core;
                  int osc_code; char osc_payload[128]; int osc_count;
                  char clip[256]; gsize clip_len; gboolean clip_primary;
                  int clip_count;
-                 int draw_count, output_count; } Ctx;
+                 int draw_count, output_count;
+                 char notif_title[128]; char notif_body[512];
+                 int notif_count; } Ctx;
 
 static void on_draw(PtTermCore *core, gpointer user) {
   Ctx *ctx = user;
@@ -1852,6 +1854,184 @@ static void test_output_callback_is_output_only(void) {
   pt_term_core_free(core);
 }
 
+/* ---- desktop notifications (OSC 9, OSC 777) ----
+ *
+ * How each payload is classified is pinned in test-osc-scan against ghostty's
+ * own tests. What is proved here is the rest of the path: that the scanner is
+ * wired to the notification callback on a live pty, that a focused pane is
+ * silent, that the rate limit holds, and that a long body is cut rather than
+ * dropped. */
+
+static void on_notification(PtTermCore *core, const char *title,
+                            const char *body, gpointer user) {
+  (void)core;
+  Ctx *ctx = user;
+  ctx->notif_count++;
+  g_strlcpy(ctx->notif_title, title, sizeof ctx->notif_title);
+  g_strlcpy(ctx->notif_body, body, sizeof ctx->notif_body);
+}
+
+/* A shell that echoes whatever is written to it back down the pty, raw, so a
+ * test can post arbitrary sequences with pt_term_core_write and know the
+ * scanner saw exactly those bytes. `cat` and not `cat -v`: the escapes have to
+ * come back as escapes. */
+static PtTermCore *notify_core(Ctx *ctx) {
+  /* The rate limit is process-wide (as ghostty's is), so back-to-back tests in
+     one binary would rate-limit each other. */
+  pt_notify_gate_reset();
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready-marker; cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .notification = on_notification };
+  pt_term_core_set_callbacks(core, &cbs, ctx);
+  g_assert_true(wait_for_text(core, "ready-marker"));
+  return core;
+}
+
+static void test_notification_osc9(void) {
+  Ctx ctx = {0};
+  PtTermCore *core = notify_core(&ctx);
+  pt_term_core_write(core, "\033]9;build done\007PROBE-9\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-9"));
+  g_assert_cmpint(ctx.notif_count, ==, 1);
+  g_assert_cmpstr(ctx.notif_body, ==, "build done");
+  /* OSC 9 carries no title; naming it is the consumer's job. */
+  g_assert_cmpstr(ctx.notif_title, ==, "");
+  pt_term_core_free(core);
+}
+
+static void test_notification_osc777(void) {
+  Ctx ctx = {0};
+  PtTermCore *core = notify_core(&ctx);
+  pt_term_core_write(core, "\033]777;notify;Build;done\007PROBE-777\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-777"));
+  g_assert_cmpint(ctx.notif_count, ==, 1);
+  g_assert_cmpstr(ctx.notif_title, ==, "Build");
+  g_assert_cmpstr(ctx.notif_body, ==, "done");
+  pt_term_core_free(core);
+}
+
+/* The two payloads that must reach the callback as nothing at all: an OSC 777
+   extension pt does not implement, and the ConEmu progress report that shares
+   OSC 9 with the notification (issue #17 owns that one). */
+static void test_notification_ignores_the_rest(void) {
+  Ctx ctx = {0};
+  PtTermCore *core = notify_core(&ctx);
+  pt_term_core_write(core,
+      "\033]777;something-else;a;b\007"
+      "\033]9;4;1;40\007"
+      "\033]9;9;/home/me\007"
+      "PROBE-NONE\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-NONE"));
+  g_assert_cmpint(ctx.notif_count, ==, 0);
+  pt_term_core_free(core);
+}
+
+/* A pane the user is reading says what it has to say on screen; the desktop
+   does not need telling. c->focused is what the widget reported, and GTK takes
+   focus off a pane when its window goes inactive, so this covers "the focused
+   pane of the focused window" and nothing wider. */
+static void test_notification_silent_while_focused(void) {
+  Ctx ctx = {0};
+  PtTermCore *core = notify_core(&ctx);
+  pt_term_core_focus_report(core, TRUE, FALSE);
+  pt_term_core_write(core, "\033]9;while focused\007PROBE-FOCUSED\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-FOCUSED"));
+  g_assert_cmpint(ctx.notif_count, ==, 0);
+
+  /* And the same pane notifies again the moment focus leaves it — the
+     suppressed one must not have spent the rate limit on the way past. */
+  pt_term_core_focus_report(core, FALSE, FALSE);
+  pt_term_core_write(core, "\033]9;while away\007PROBE-AWAY\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-AWAY"));
+  g_assert_cmpint(ctx.notif_count, ==, 1);
+  g_assert_cmpstr(ctx.notif_body, ==, "while away");
+  pt_term_core_free(core);
+}
+
+/* A program in a loop must not be able to queue thousands of notifications at
+   the desktop. Bodies are all different so it is the one-per-second limit
+   being measured and not the identical-text suppressor. */
+static void test_notification_rate_limited(void) {
+  Ctx ctx = {0};
+  PtTermCore *core = notify_core(&ctx);
+  GString *burst = g_string_new(NULL);
+  for (int i = 0; i < 100; i++)
+    g_string_append_printf(burst, "\033]9;notification %d\007", i);
+  g_string_append(burst, "PROBE-BURST\n");
+  gint64 started = g_get_monotonic_time();
+  pt_term_core_write(core, burst->str, (gssize)burst->len);
+  g_string_free(burst, TRUE);
+  g_assert_true(wait_for_text(core, "PROBE-BURST"));
+  /* One per second, so a burst that took under a second to arrive can only
+     have produced one — two if the pty split it either side of a tick. */
+  g_assert_cmpint(ctx.notif_count, >=, 1);
+  g_assert_cmpint(ctx.notif_count, <=, 2);
+  g_assert_cmpint(g_get_monotonic_time() - started, <, 2 * G_USEC_PER_SEC);
+  pt_term_core_free(core);
+}
+
+/* Truncated, not dropped: a build that ends by printing a long line should
+   still notify, even if the notification only carries the front of it. */
+static void test_notification_body_is_capped(void) {
+  Ctx ctx = {0};
+  PtTermCore *core = notify_core(&ctx);
+  GString *big = g_string_new("\033]9;");
+  for (int i = 0; i < PT_NOTIFY_BODY_MAX + 200; i++)
+    g_string_append_c(big, 'x');
+  g_string_append(big, "\007PROBE-CAP\n");
+  pt_term_core_write(core, big->str, (gssize)big->len);
+  g_string_free(big, TRUE);
+  g_assert_true(wait_for_text(core, "PROBE-CAP"));
+  g_assert_cmpint(ctx.notif_count, ==, 1);
+  g_assert_cmpuint(strlen(ctx.notif_body), ==, PT_NOTIFY_BODY_MAX);
+  for (gsize i = 0; i < PT_NOTIFY_BODY_MAX; i++)
+    g_assert_cmpint(ctx.notif_body[i], ==, 'x');
+  pt_term_core_free(core);
+}
+
+/* The cap lands on a character boundary. A body of three-byte characters is
+   the awkward case: 255 is not a multiple of 3, so cutting at the byte cap
+   would hand the session bus half a codepoint. */
+static void test_notification_cap_keeps_utf8_whole(void) {
+  Ctx ctx = {0};
+  PtTermCore *core = notify_core(&ctx);
+  GString *big = g_string_new("\033]9;");
+  for (int i = 0; i < 200; i++) g_string_append(big, "\344\270\200");  /* U+4E00 */
+  g_string_append(big, "\007PROBE-UTF8\n");
+  pt_term_core_write(core, big->str, (gssize)big->len);
+  g_string_free(big, TRUE);
+  g_assert_true(wait_for_text(core, "PROBE-UTF8"));
+  g_assert_cmpint(ctx.notif_count, ==, 1);
+  g_assert_true(g_utf8_validate(ctx.notif_body, -1, NULL));
+  /* 85 whole characters is as many as fit in 255 bytes, so the cut is at 255
+     here; 254 would mean a character was dropped that fitted. */
+  g_assert_cmpuint(strlen(ctx.notif_body), ==, 255);
+  pt_term_core_free(core);
+}
+
+/* A notification body is offered to the desktop as UTF-8, and the payload came
+   from whatever was writing to the pty. Bytes that are not text are refused
+   outright rather than sent on as something the session bus will reject —
+   the same rule pt already applies to OSC 52 clipboard writes. */
+static void test_notification_rejects_non_utf8(void) {
+  Ctx ctx = {0};
+  PtTermCore *core = notify_core(&ctx);
+  pt_term_core_write(core, "\033]9;bad \377\376 bytes\007PROBE-BYTES\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-BYTES"));
+  g_assert_cmpint(ctx.notif_count, ==, 0);
+
+  /* And a well-formed one right behind it still gets through, so the refusal
+     costs the next notification nothing. */
+  pt_term_core_write(core, "\033]9;good\007PROBE-GOOD\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-GOOD"));
+  g_assert_cmpint(ctx.notif_count, ==, 1);
+  g_assert_cmpstr(ctx.notif_body, ==, "good");
+  pt_term_core_free(core);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
@@ -1927,6 +2107,20 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/paste-unbracketed",
                   test_paste_unbracketed_newline_becomes_cr);
   g_test_add_func("/termcore/paste-is-safe", test_paste_is_safe);
+  g_test_add_func("/termcore/notification-osc9", test_notification_osc9);
+  g_test_add_func("/termcore/notification-osc777", test_notification_osc777);
+  g_test_add_func("/termcore/notification-ignores-the-rest",
+                  test_notification_ignores_the_rest);
+  g_test_add_func("/termcore/notification-focused",
+                  test_notification_silent_while_focused);
+  g_test_add_func("/termcore/notification-rate-limit",
+                  test_notification_rate_limited);
+  g_test_add_func("/termcore/notification-body-cap",
+                  test_notification_body_is_capped);
+  g_test_add_func("/termcore/notification-cap-utf8",
+                  test_notification_cap_keeps_utf8_whole);
+  g_test_add_func("/termcore/notification-non-utf8",
+                  test_notification_rejects_non_utf8);
   g_test_add_func("/termcore/cursor-defaults", test_cursor_style_defaults);
   g_test_add_func("/termcore/cursor-style-decscusr", test_cursor_style_decscusr);
   g_test_add_func("/termcore/cursor-blink-decscusr", test_cursor_blink_decscusr);
