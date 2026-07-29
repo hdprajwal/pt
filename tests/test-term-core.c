@@ -1,12 +1,13 @@
 #include "pt-term-core.h"
 #include "pt-term-core-internal.h"   /* pt_osc52_decode, the OSC 52 caps */
 #include "pt-config.h"
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 
 typedef struct { GMainLoop *loop; PtTermCore *core;
                  gboolean found; int exit_status; gboolean exited;
-                 char comm[64]; char title[128];
+                 char comm[64]; char title[128]; int title_count;
                  int osc_code; char osc_payload[128]; int osc_count;
                  char clip[256]; gsize clip_len; gboolean clip_primary;
                  int clip_count;
@@ -345,18 +346,31 @@ static gboolean fg_is_not_child(PtTermCore *c) {
   return tp > 0 && tp != pt_term_core_shell_pid(c);
 }
 
+static gboolean core_running(PtTermCore *c) {
+  return pt_term_core_running(c);
+}
+
+static gboolean core_not_running(PtTermCore *c) {
+  return !pt_term_core_running(c);
+}
+
+static gboolean core_exited(PtTermCore *c) {
+  return pt_term_core_exited(c, NULL);
+}
+
 static void test_running_state_idle(void) {
   /* Negative case: the spawned program is itself the pty's foreground
      process-group leader (forkpty/login_tty), so nothing is "running" on top
      of it. Wait for the tty to actually settle on the child first, otherwise
-     the assertion would only exercise the `fg > 0` guard. */
+     the assertion would only exercise the `fg > 0` guard. The answer comes
+     from the 700ms foreground poll, so it is waited for, not read once. */
   const char *argv[] = {"/bin/cat", NULL};
   GError *err = NULL;
   PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
   g_assert_no_error(err);
   g_assert_nonnull(core);
   g_assert_true(wait_until(fg_is_child, core));       /* tty settled on cat */
-  g_assert_false(pt_term_core_running(core));
+  g_assert_true(wait_until(core_not_running, core));
   /* No prompt snippet has reported an exit code yet. */
   g_assert_cmpint(pt_term_core_last_exit(core), ==, -1);
   pt_term_core_free(core);
@@ -371,7 +385,25 @@ static void test_running_state_foreground_job(void) {
   g_assert_no_error(err);
   g_assert_nonnull(core);
   g_assert_true(wait_until(fg_is_not_child, core));   /* sleep owns the tty */
-  g_assert_true(pt_term_core_running(core));
+  g_assert_true(wait_until(core_running, core));
+  pt_term_core_free(core);
+}
+
+static void test_running_state_cleared_on_exit(void) {
+  /* The moment the child is gone nothing is running, however recently the
+     foreground poll saw a job on the tty — a tab must not keep its spinner
+     for up to a poll interval after the shell died. */
+  const char *argv[] = {"/bin/sh", "-mc", "sleep 30; true", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_nonnull(core);
+  g_assert_true(wait_until(fg_is_not_child, core));   /* sleep owns the tty */
+  g_assert_true(wait_until(core_running, core));
+
+  kill(pt_term_core_shell_pid(core), SIGKILL);
+  g_assert_true(wait_until(core_exited, core));
+  g_assert_false(pt_term_core_running(core));
   pt_term_core_free(core);
 }
 
@@ -411,6 +443,7 @@ static void test_spawn_env(void) {
 static void on_title_cb(PtTermCore *core, const char *title, gpointer user) {
   (void)core;
   Ctx *ctx = user;
+  ctx->title_count++;
   g_strlcpy(ctx->title, title, sizeof(ctx->title));
 }
 
@@ -1537,6 +1570,81 @@ static void test_paste_is_safe(void) {
   g_assert_false(pt_term_core_paste_is_safe("echo hi\r", 8));   /* trailing */
 }
 
+/* ---- title dedupe ---- */
+
+static void test_title_dedupes(void) {
+  /* Shells re-emit the same OSC 2 title on every prompt; only a real change
+     should reach the consumer, which invalidates a tab label off it. Plain
+     `cat` echoes the escapes raw, so the parser sees them; the probes prove
+     each batch had its turn (the pty is FIFO). */
+  Ctx ctx = {0};
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready-marker; cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .title = on_title_cb };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  g_assert_true(wait_for_text(core, "ready-marker"));
+
+  pt_term_core_write(core,
+      "\033]2;same-title\007\033]2;same-title\007PROBE-1\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-1"));
+  g_assert_cmpint(ctx.title_count, ==, 1);
+  g_assert_cmpstr(ctx.title, ==, "same-title");
+
+  /* A different title still comes through: the dedupe compares, not counts. */
+  pt_term_core_write(core, "\033]2;other-title\007PROBE-2\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-2"));
+  g_assert_cmpint(ctx.title_count, ==, 2);
+  g_assert_cmpstr(ctx.title, ==, "other-title");
+
+  pt_term_core_free(core);
+}
+
+/* ---- last non-empty row ---- */
+
+static void test_last_nonempty_row(void) {
+  /* `cat` echoes what the test writes back through the parser; the newlines
+     after "world" leave blank rows below it, so "world" is the last row with
+     anything on it and the trailing blanks of its own row are stripped. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready-marker"));
+
+  pt_term_core_write(core, "hello\nworld\n\n\n", -1);
+  g_assert_true(wait_for_text(core, "world"));
+  pt_term_core_sync(core);
+
+  char buf[64];
+  g_assert_true(pt_term_core_last_nonempty_row(core, buf, sizeof buf));
+  g_assert_cmpstr(buf, ==, "world");
+
+  /* Truncation at cap is NUL-terminated: 4 bytes hold "wor" and the NUL. */
+  char small[4];
+  memset(small, 'X', sizeof small);
+  g_assert_true(pt_term_core_last_nonempty_row(core, small, sizeof small));
+  g_assert_cmpuint(strlen(small), <, sizeof small);
+  g_assert_cmpstr(small, ==, "wor");
+
+  pt_term_core_free(core);
+}
+
+static void test_last_nonempty_row_empty_grid(void) {
+  /* A fresh grid nothing has printed to: no row qualifies. */
+  const char *argv[] = {"/bin/sh", "-c", "sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  pt_term_core_sync(core);
+  char buf[64];
+  g_assert_false(pt_term_core_last_nonempty_row(core, buf, sizeof buf));
+  pt_term_core_free(core);
+}
+
 /* ---- scrollbar ---- */
 
 static void test_scrollbar_tracks_the_viewport(void) {
@@ -2045,8 +2153,11 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/running-state-idle", test_running_state_idle);
   g_test_add_func("/termcore/running-state-job",
                   test_running_state_foreground_job);
+  g_test_add_func("/termcore/running-state-exit",
+                  test_running_state_cleared_on_exit);
   g_test_add_func("/termcore/spawn-env", test_spawn_env);
   g_test_add_func("/termcore/exit-marker", test_exit_marker_from_title);
+  g_test_add_func("/termcore/title-dedupe", test_title_dedupes);
   g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
   g_test_add_func("/termcore/mouse-report-off", test_mouse_report_needs_tracking);
   g_test_add_func("/termcore/focus-report", test_focus_report);
@@ -2074,6 +2185,9 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/color-scheme-needs-mode",
                   test_color_scheme_needs_mode);
   g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
+  g_test_add_func("/termcore/last-nonempty-row", test_last_nonempty_row);
+  g_test_add_func("/termcore/last-nonempty-row-empty",
+                  test_last_nonempty_row_empty_grid);
   g_test_add_func("/termcore/scrollbar", test_scrollbar_tracks_the_viewport);
   g_test_add_func("/termcore/scrollbar-empty",
                   test_scrollbar_without_scrollback);

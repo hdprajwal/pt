@@ -249,9 +249,18 @@ GhosttyRenderState pt_term_core_render_state(PtTermCore *c);
 GhosttyRenderStateRowIterator pt_term_core_row_iter(PtTermCore *c);
 GhosttyRenderStateRowCells pt_term_core_row_cells(PtTermCore *c);
 char *pt_term_core_grid_text(PtTermCore *c);        /* visible grid, caller frees */
+/* The UTF-8 text of the last visible row holding a non-blank cell, trailing
+ * blanks stripped, copied into buf (cap bytes, NUL included — text past the
+ * cap is dropped on a codepoint boundary). FALSE, with buf set to "", when
+ * every row is blank. Allocates nothing, so it may be asked per frame; like
+ * pt_term_core_grid_text it answers as of the last pt_term_core_sync(). */
+gboolean pt_term_core_last_nonempty_row(PtTermCore *c, char *buf, gsize cap);
 gboolean pt_term_core_exited(PtTermCore *c, int *status);
 pid_t pt_term_core_shell_pid(PtTermCore *c);
-/* TRUE when a foreground process other than the shell owns the tty. */
+/* TRUE when a foreground process other than the shell owns the tty. Answered
+ * from a cached field the 700ms foreground poll maintains (seeded TRUE at
+ * spawn, cleared on child exit), so it is free to ask every frame; the answer
+ * can be up to one poll interval old. */
 gboolean pt_term_core_running(PtTermCore *c);
 /* Last exit code reported via the "pt-exit:<n>;" title marker; -1 before
  * the prompt snippet ever reports. */

@@ -30,12 +30,14 @@ struct PtTermCore {
   guint child_source;
   guint cmd_timer;
   char last_comm[64];
+  char *last_title;         /* last title handed to cbs.title, for the dedupe */
   char **env_pairs;         /* extra "KEY=VALUE" set in the child, or NULL */
   guint16 cols, rows;
   int cell_w, cell_h;
 
   gboolean eof;
   gboolean child_exited;
+  gboolean fg_running;      /* cached fg-pgrp-vs-child; see pt_term_core_running */
   int exit_status;
   int last_exit;            /* from the "pt-exit:<n>;" title marker; -1 = none */
 
@@ -151,6 +153,12 @@ static void effect_title_changed(GhosttyTerminal t, void *ud) {
     c->last_exit = code;
     memmove(buf, rest, strlen(rest) + 1);
   }
+  /* Shells re-emit the same title every prompt; only a change is worth a
+   * callback. Compared after the marker strip, so a prompt whose exit code
+   * moved but whose title did not still updates last_exit above in silence. */
+  if (g_strcmp0(buf, c->last_title) == 0) return;
+  g_free(c->last_title);
+  c->last_title = g_strdup(buf);
   if (c->cbs.title != NULL) c->cbs.title(c, buf, c->cbs_user);
 }
 
@@ -162,6 +170,10 @@ static gboolean poll_foreground_command(gpointer ud) {
   PtTermCore *c = ud;
   if (c->child_exited) return G_SOURCE_CONTINUE;
   pid_t fg = tcgetpgrp(c->pty_fd);
+  /* Recorded here, before the fixup below, so pt_term_core_running() is a
+   * field read instead of a tcgetpgrp per call — this poll already pays for
+   * the syscall every 700ms. */
+  c->fg_running = fg > 0 && fg != c->child;
   if (fg <= 0) fg = c->child;
   char path[64];
   g_snprintf(path, sizeof(path), "/proc/%d/comm", (int)fg);
@@ -590,6 +602,7 @@ static void on_child_exited(GPid pid, gint wait_status, gpointer ud) {
   PtTermCore *c = ud;
   (void)pid;
   c->child_exited = TRUE;
+  c->fg_running = FALSE;    /* nothing runs on a tty whose child is gone */
   c->child_source = 0;
   if (WIFEXITED(wait_status)) c->exit_status = WEXITSTATUS(wait_status);
   else if (WIFSIGNALED(wait_status)) c->exit_status = 128 + WTERMSIG(wait_status);
@@ -660,11 +673,19 @@ static void poll_mode_edges(PtTermCore *c) {
   c->was_in_band_resize = in_band_resize;
 }
 
+/* How much one dispatch may drain before handing the main loop back. A child
+ * flooding the pty (`cat bigfile`) can otherwise hold this callback for as
+ * long as the kernel keeps refilling the buffer; past the cap the dispatch
+ * ends normally and the still-readable fd re-fires the source immediately, so
+ * input and redraws stay interleaved with the flood. */
+#define PT_READ_MAX_PER_DISPATCH (256u * 1024u)
+
 static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
   PtTermCore *c = ud;
   gboolean got_data = FALSE;
   if (cond & (G_IO_IN | G_IO_HUP)) {
     uint8_t buf[4096];
+    gsize drained = 0;
     for (;;) {
       ssize_t n = read(fd, buf, sizeof(buf));
       if (n > 0) {
@@ -676,6 +697,8 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
             c->cbs.notification != NULL)
           pt_osc_scan_feed(&c->osc, buf, (size_t)n, core_osc_dispatch, c);
         got_data = TRUE;
+        drained += (gsize)n;
+        if (drained >= PT_READ_MAX_PER_DISPATCH) break;
       } else if (n == 0) { c->eof = TRUE; break; }
       else {
         if (errno == EAGAIN) break;
@@ -778,6 +801,9 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
     pt_term_core_free(c);
     return NULL;
   }
+  /* Conservative until the first poll (at the end of this function) reads the
+   * tty: a spawn with a command is running it right now. */
+  c->fg_running = TRUE;
 
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, c);
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
@@ -929,6 +955,12 @@ void pt_term_core_scroll_delta(PtTermCore *c, int rows) {
 }
 
 void pt_term_core_scroll_bottom(PtTermCore *c) {
+  /* Every keypress snaps to the bottom, where the viewport nearly always
+   * already is: nothing would move, so skip the redraw. Only a clean cache
+   * can say so without paying the library's expensive scrollbar walk; a
+   * dirty one lets the scroll go through, which is what it did before. */
+  if (c->sb_valid && !c->sb_dirty && c->sb.offset + c->sb.len == c->sb.total)
+    return;
   GhosttyTerminalScrollViewport sv = { .tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM };
   ghostty_terminal_scroll_viewport(c->terminal, sv);
   c->sb_dirty = TRUE;
@@ -1283,7 +1315,14 @@ void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count) {
   ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_DECCKM, &app_cursor);
   const char *seq = app_cursor ? (up ? "\x1bOA" : "\x1bOB")
                                : (up ? "\x1b[A" : "\x1b[B");
-  for (int i = 0; i < count; i++) pty_write_raw(c->pty_fd, seq, 3);
+  /* One write for the whole burst instead of one syscall per row; a fast
+   * wheel spills past the stack buffer, nothing else does. */
+  gsize total = (gsize)count * 3;
+  char stack[512];
+  char *buf = total <= sizeof(stack) ? stack : g_malloc(total);
+  for (gsize i = 0; i < total; i += 3) memcpy(buf + i, seq, 3);
+  pty_write_raw(c->pty_fd, buf, total);
+  if (buf != stack) g_free(buf);
 }
 
 gboolean pt_term_core_bracketed_paste(PtTermCore *c) {
@@ -1520,12 +1559,23 @@ static char *grid_text(GhosttyRenderState rs, GhosttyRenderStateRowIterator it,
     if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
                                      &cells) != GHOSTTY_SUCCESS)
       continue;
+    /* Blank cells are counted, not appended: a run between non-blank cells is
+       flushed in one grow+memset, and the run a row ends on — most of most
+       rows — is simply dropped, which is the old byte-at-a-time trailing
+       trim with no bytes to trim. */
     gsize row_start = out->len;
+    gsize blanks = 0;
     while (ghostty_render_state_row_cells_next(cells)) {
       uint32_t glen = 0;
       ghostty_render_state_row_cells_get(cells,
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
-      if (glen == 0) { g_string_append_c(out, ' '); continue; }
+      if (glen == 0) { blanks++; continue; }
+      if (blanks > 0) {
+        gsize at = out->len;
+        g_string_set_size(out, at + blanks);
+        memset(out->str + at, ' ', blanks);
+        blanks = 0;
+      }
       /* GRAPHEMES_BUF writes ALL glen codepoints; the buffer must hold glen.
          Use a stack buffer for the common case, heap for long clusters. */
       uint32_t cps_stack[16];
@@ -1538,7 +1588,8 @@ static char *grid_text(GhosttyRenderState rs, GhosttyRenderStateRowIterator it,
       }
       if (cps != cps_stack) g_free(cps);
     }
-    /* trim trailing spaces on the row */
+    /* A row can still end in spaces a program wrote (glen 1, ' '); trim those
+       as before — rare enough that byte-at-a-time costs nothing here. */
     while (out->len > row_start && out->str[out->len - 1] == ' ')
       g_string_truncate(out, out->len - 1);
     g_string_append_c(out, '\n');
@@ -1548,6 +1599,85 @@ static char *grid_text(GhosttyRenderState rs, GhosttyRenderStateRowIterator it,
 
 char *pt_term_core_grid_text(PtTermCore *c) {
   return grid_text(c->render_state, c->row_iter, c->row_cells);
+}
+
+gboolean pt_term_core_last_nonempty_row(PtTermCore *c, char *buf, gsize cap) {
+  if (cap == 0) return FALSE;
+  buf[0] = '\0';
+
+  /* The row iterator only walks forward, so two passes: find the last row
+   * holding a non-blank cell, then re-walk to it and render it. Rendering as
+   * we scan would need a per-row buffer to survive the blank rows after it,
+   * and this path allocates nothing. */
+  GhosttyRenderStateRowIterator iter = c->row_iter;
+  if (ghostty_render_state_get(c->render_state,
+                               GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                               &iter) != GHOSTTY_SUCCESS)
+    return FALSE;
+  gssize last = -1;
+  for (gssize row = 0; ghostty_render_state_row_iterator_next(iter); row++) {
+    GhosttyRenderStateRowCells cells = c->row_cells;
+    if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                     &cells) != GHOSTTY_SUCCESS)
+      continue;
+    while (ghostty_render_state_row_cells_next(cells)) {
+      uint32_t glen = 0;
+      ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
+      if (glen > 0) { last = row; break; }
+    }
+  }
+  if (last < 0) return FALSE;
+
+  if (ghostty_render_state_get(c->render_state,
+                               GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                               &iter) != GHOSTTY_SUCCESS)
+    return FALSE;
+  for (gssize row = 0; row <= last; row++)
+    if (!ghostty_render_state_row_iterator_next(iter)) return FALSE;
+  GhosttyRenderStateRowCells cells = c->row_cells;
+  if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                   &cells) != GHOSTTY_SUCCESS)
+    return FALSE;
+
+  gsize len = 0;    /* bytes written */
+  gsize keep = 0;   /* len as of the last non-blank cell: the trailing-blank cut */
+  while (ghostty_render_state_row_cells_next(cells)) {
+    uint32_t glen = 0;
+    ghostty_render_state_row_cells_get(cells,
+        GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
+    if (glen == 0) {
+      if (len + 1 >= cap) break;    /* full; whatever remains is dropped */
+      buf[len++] = ' ';
+      continue;
+    }
+    /* GRAPHEMES_BUF writes all glen codepoints and there is no heap to spill
+     * to here, so a cluster too long for the stack buffer renders as U+FFFD —
+     * far past anything a real grapheme carries (grid_text's common case is
+     * 16), and the row still counts as non-blank. */
+    uint32_t cps[64];
+    if (glen <= G_N_ELEMENTS(cps)) {
+      ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
+    } else {
+      cps[0] = 0xFFFD;
+      glen = 1;
+    }
+    gboolean full = FALSE;
+    for (uint32_t i = 0; i < glen; i++) {
+      char u8[4];
+      int n = utf8_encode_cp(cps[i], u8);
+      if (len + (gsize)n >= cap) { full = TRUE; break; }
+      memcpy(buf + len, u8, (gsize)n);
+      len += (gsize)n;
+    }
+    keep = len;
+    if (full) break;
+  }
+  /* Spaces a program wrote (glen 1, ' ') are trailing blanks too. */
+  while (keep > 0 && buf[keep - 1] == ' ') keep--;
+  buf[keep] = '\0';
+  return TRUE;
 }
 
 char *pt_term_grid_text_raw(GhosttyTerminal t) {
@@ -1574,10 +1704,10 @@ gboolean pt_term_core_exited(PtTermCore *c, int *status) {
 
 pid_t pt_term_core_shell_pid(PtTermCore *c) { return c->child; }
 
+/* A field read: the 700ms foreground poll keeps it current, spawn seeds it
+ * TRUE and child exit clears it, so per-frame callers cost no syscall. */
 gboolean pt_term_core_running(PtTermCore *c) {
-  if (c->pty_fd < 0 || c->child_exited) return FALSE;
-  pid_t fg = tcgetpgrp(c->pty_fd);
-  return fg > 0 && fg != c->child;
+  return c->fg_running;
 }
 
 int pt_term_core_last_exit(PtTermCore *c) { return c->last_exit; }
@@ -1602,5 +1732,6 @@ void pt_term_core_free(PtTermCore *c) {
   if (c->render_state != NULL) ghostty_render_state_free(c->render_state);
   if (c->terminal != NULL) ghostty_terminal_free(c->terminal);
   g_strfreev(c->env_pairs);
+  g_free(c->last_title);
   g_free(c);
 }
