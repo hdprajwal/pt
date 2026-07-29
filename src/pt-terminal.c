@@ -23,7 +23,7 @@
 #define PT_BAR_W       5
 #define PT_BAR_MARGIN  2
 #define PT_BAR_MIN_H   24
-#define PT_BAR_HOLD_MS 700.0
+#define PT_BAR_HOLD_MS 700
 #define PT_BAR_FADE_MS 400.0
 
 /* One font size shared by every terminal: zoom is global, not per-pane. Live
@@ -104,8 +104,10 @@ struct _PtTerminal {
   gboolean link_cursor;      /* the hand cursor is up: a link is under the pointer */
 
   /* overlay scrollbar: when the viewport last moved (monotonic µs, 0 = never
-   * or already faded out) and the tick callback driving the fade, if any. */
+   * or already faded out), the timer waiting the hold out, and the tick
+   * callback driving the fade after it. Only one of the last two is ever set. */
   gint64 bar_at;
+  guint bar_hold;
   guint bar_tick;
 };
 
@@ -543,12 +545,30 @@ static gboolean bar_fade_tick(GtkWidget *widget, GdkFrameClock *clock,
   return G_SOURCE_REMOVE;
 }
 
-/* The viewport moved: show the bar and restart the fade. */
-static void bar_reveal(PtTerminal *t) {
-  t->bar_at = g_get_monotonic_time();
+/* The hold is over; the fade is the part that needs a frame each. */
+static gboolean bar_hold_done(gpointer user) {
+  PtTerminal *t = user;
+  t->bar_hold = 0;
   if (t->bar_tick == 0)
     t->bar_tick = gtk_widget_add_tick_callback(GTK_WIDGET(t), bar_fade_tick,
                                                NULL, NULL);
+  return G_SOURCE_REMOVE;
+}
+
+/* The viewport moved: show the bar and restart the fade.
+ *
+ * A frame callback is only asked for once the hold expires. Nothing changes
+ * on screen while the thumb sits at full strength, and a snapshot here rebuilds
+ * every glyph run in the pane — a tick callback through the hold would repaint
+ * the whole grid tens of times to draw the same pixels. */
+static void bar_reveal(PtTerminal *t) {
+  t->bar_at = g_get_monotonic_time();
+  if (t->bar_tick != 0) {
+    gtk_widget_remove_tick_callback(GTK_WIDGET(t), t->bar_tick);
+    t->bar_tick = 0;         /* a fade in progress starts over */
+  }
+  if (t->bar_hold != 0) g_source_remove(t->bar_hold);
+  t->bar_hold = g_timeout_add(PT_BAR_HOLD_MS, bar_hold_done, t);
   gtk_widget_queue_draw(GTK_WIDGET(t));
 }
 
@@ -1475,6 +1495,7 @@ static void pt_terminal_dispose(GObject *obj) {
     gtk_widget_remove_tick_callback(GTK_WIDGET(t), t->bar_tick);
     t->bar_tick = 0;
   }
+  g_clear_handle_id(&t->bar_hold, g_source_remove);
   g_clear_pointer(&t->core, pt_term_core_free);
   g_clear_object(&t->layout);
   g_clear_pointer(&t->font_desc, pango_font_description_free);
