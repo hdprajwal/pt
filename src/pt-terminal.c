@@ -914,12 +914,14 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     uint16_t cx = 0, cy = 0;
     ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &cx);
     ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cy);
-    /* On the tail of a wide character the cell under the cursor holds nothing:
-     * the glyph belongs to the cell on its left. Back up onto it and cover
-     * both, as ghostty does (renderer/generic.zig:3232), or the cursor lands
-     * over the right half of a character and looks like a rendering fault. */
+    /* A wide character owns two cells and the cursor has to cover both, or it
+     * lands over half a glyph and looks like a rendering fault. Two ways in,
+     * and ghostty tests them in this order (renderer/generic.zig:3232): on the
+     * tail the cell holds nothing of its own — the glyph belongs to the cell on
+     * its left — so back up onto it; on the head just widen where we are. */
     int cells = 1;
     if (pt_term_core_cursor_wide_tail(t->core) && cx > 0) { cx--; cells = 2; }
+    else if (pt_term_core_cursor_wide(t->core)) cells = 2;
     float x = PT_PAD_X + cx * t->cell_w;
     float y = PT_PAD_Y + cy * t->cell_h;
     float w_cur = (float)(cells * t->cell_w);

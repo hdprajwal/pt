@@ -217,6 +217,15 @@ gboolean pt_term_core_cursor_password_input(PtTermCore *c);
  * to its left — so a renderer should back up one column and draw two cells
  * wide, as ghostty does (src/renderer/generic.zig:3232). */
 gboolean pt_term_core_cursor_wide_tail(PtTermCore *c);
+/* TRUE when the cursor is standing on the *head* of a wide character — the
+ * other half of the same problem, and the one the render state does not
+ * answer, so this walks to the cursor's cell and asks it. A renderer covers
+ * two cells for this one without backing up. Ghostty tests the same two things
+ * in the same order (renderer/generic.zig:3232): tail first, head second.
+ *
+ * Walks with the core's shared row iterator, exactly as pt_term_core_grid_text
+ * does, so do not call it from inside a walk of your own. */
+gboolean pt_term_core_cursor_wide(PtTermCore *c);
 
 void pt_term_core_sync(PtTermCore *c);              /* render_state_update */
 GhosttyTerminal pt_term_core_terminal(PtTermCore *c);
