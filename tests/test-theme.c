@@ -1,4 +1,5 @@
 #include "pt-theme.h"
+#include <glib/gstdio.h>   /* g_remove / g_rmdir in the discovery tests */
 #include <string.h>
 
 static void test_color_parse(void) {
@@ -215,6 +216,69 @@ static void test_discovery(void) {
   g_free(dir);
 }
 
+/* The light/dark classification programs are told about (CSI ? 996 n and mode
+ * 2031 both report it). Driven off theme text rather than off whatever themes
+ * happen to be installed. */
+static void test_dark_classification(void) {
+  struct { const char *bg; gboolean dark; } cases[] = {
+    { "#0b0d10", TRUE },        /* pt-dark's background */
+    { "#ffffff", FALSE },       /* a plain light theme */
+    { "#f5f2ef", FALSE },       /* an off-white one */
+    { "#1c1c1c", TRUE },
+    /* Luminance, not the raw channels: saturated green is bright enough to
+     * count as light (0.587 * 1.0), pure blue is not (0.114). */
+    { "#00ff00", FALSE },
+    { "#0000ff", TRUE },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(cases); i++) {
+    char *text = g_strdup_printf("background = %s\n", cases[i].bg);
+    PtTheme *t = pt_theme_parse(text);
+    PtResolvedTheme rt;
+    pt_theme_resolve(t, NULL, &rt);
+    if (rt.dark != cases[i].dark)
+      g_error("theme bg %s: dark=%d, expected %d", cases[i].bg, rt.dark,
+              cases[i].dark);
+    pt_theme_free(t);
+    g_free(text);
+  }
+  /* An empty theme inherits pt-dark's background, so it is dark. */
+  PtTheme *empty = pt_theme_parse("");
+  PtResolvedTheme rt;
+  pt_theme_resolve(empty, NULL, &rt);
+  g_assert_true(rt.dark);
+  pt_theme_free(empty);
+}
+
+static void test_is_dark_by_name(void) {
+  /* What a caller classifying every installed theme uses: name in, answer out,
+   * nothing applied. Same lookup order as pt_theme_load_text. */
+  char *dir = g_dir_make_tmp("pt-themes-XXXXXX", NULL);
+  char *lightf = g_build_filename(dir, "sunny", NULL);
+  char *darkf = g_build_filename(dir, "midnight", NULL);
+  g_file_set_contents(lightf, "background = #fafafa\nforeground = #202020\n",
+                      -1, NULL);
+  g_file_set_contents(darkf, "background = #101418\n", -1, NULL);
+
+  g_assert_false(pt_theme_is_dark(dir, "sunny"));
+  g_assert_true(pt_theme_is_dark(dir, "midnight"));
+  g_assert_true(pt_theme_is_dark(dir, "pt-dark"));      /* the builtin */
+  g_assert_true(pt_theme_is_dark(dir, "no-such-theme")); /* unknown -> dark */
+
+  /* A file shadowing the builtin wins here too, exactly as it does on apply. */
+  char *shadow = g_build_filename(dir, "pt-dark", NULL);
+  g_file_set_contents(shadow, "background = #ffffff\n", -1, NULL);
+  g_assert_false(pt_theme_is_dark(dir, "pt-dark"));
+
+  g_remove(shadow);
+  g_remove(lightf);
+  g_remove(darkf);
+  g_rmdir(dir);
+  g_free(shadow);
+  g_free(lightf);
+  g_free(darkf);
+  g_free(dir);
+}
+
 int main(void) {
   test_color_parse();
   test_pt_dark_identity();
@@ -224,6 +288,8 @@ int main(void) {
   test_precedence();
   test_missing_keys_fall_back();
   test_discovery();
+  test_dark_classification();
+  test_is_dark_by_name();
   g_print("test-theme: OK\n");
   return 0;
 }

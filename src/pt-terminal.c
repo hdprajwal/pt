@@ -35,6 +35,9 @@ static gboolean th_pal_set[16] = {
   [1] = TRUE, [2] = TRUE, [3] = TRUE,
   [9] = TRUE, [10] = TRUE, [11] = TRUE,
 };
+/* Whether that background is dark, which is what programs asking about the
+ * color scheme are told. Same default rule: pt-dark until told otherwise. */
+static gboolean th_dark = TRUE;
 static char *font_family;   /* NULL -> PT_FONT_FAMILY_DEFAULT */
 
 /* The `mouse-reporting` config key, mirrored into every terminal made after
@@ -459,6 +462,11 @@ static void ensure_core(PtTerminal *t) {
                               .clipboard_write = core_clipboard_write };
   pt_term_core_set_callbacks(t->core, &cbs, t);
   pt_term_core_set_osc52(t->core, t->osc52);
+  /* Cores are built lazily, long after the theme was applied globally, so the
+   * scheme has to be seeded here or a pane opened later answers 996 with the
+   * default instead of the active theme. Nothing is written: the child has not
+   * run a byte yet, so mode 2031 cannot be on. */
+  pt_term_core_set_color_scheme(t->core, th_dark);
   /* The core is built lazily from size-allocate, which is later than the focus
    * grab in show_active_grid: on a new tab the first focus-in has already come
    * and gone by now. Push the widget's real state in so the core does not start
@@ -1266,13 +1274,20 @@ void pt_terminal_set_theme(const PtResolvedTheme *rt) {
   th_cursor = rt->term.cursor;
   th_sel = rt->term.selection_bg;
   th_ring = rt->tokens[PT_TOK_FOCUS_RING];
+  th_dark = rt->dark;
   for (int i = 0; i < 16; i++) {
     th_pal[i] = rt->term.palette[i];
     th_pal_set[i] = rt->term.palette_set[i];
   }
   for (GSList *l = live_terminals; l != NULL; l = l->next) {
     PtTerminal *t = l->data;
-    if (t->core != NULL) apply_palette(t->core);
+    if (t->core != NULL) {
+      apply_palette(t->core);
+      /* An app on mode 2031 hears about a light/dark flip here. This runs on
+       * every settings-dialog preview step too, which is why the core drops
+       * the ones that change nothing rather than this call site guarding. */
+      pt_term_core_set_color_scheme(t->core, th_dark);
+    }
     gtk_widget_queue_draw(GTK_WIDGET(t));
   }
 }

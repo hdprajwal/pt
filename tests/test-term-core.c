@@ -717,6 +717,103 @@ static void test_in_band_resize_on_mode_enable(void) {
   pt_term_core_free(core);
 }
 
+/* ---- color scheme (CSI ? 996 n, mode 2031) ----
+ *
+ * Same `cat -v` recipe once more, with one twist: the query has to come from
+ * the *child*, because only what the child writes reaches the VT parser. Bytes
+ * the test writes go the other way, into the child's input, where `cat -v`
+ * prints them as text and no parser ever sees them. So the child sends the
+ * query and prints pt's reply, which lands in the grid as "^[[?997;1n" (dark)
+ * or "^[[?997;2n" (light). `read` holds it until the test has set the scheme,
+ * since a core starts out dark and would otherwise answer before the flip. */
+#define REPLY_DARK "^[[?997;1n"
+#define REPLY_LIGHT "^[[?997;2n"
+
+static void test_color_scheme_query_dark(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; read x; printf '\\033[?996n'; cat -v",
+    NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  /* Light first so the dark set below is a real change, not the default. */
+  pt_term_core_set_color_scheme(core, FALSE);
+  pt_term_core_set_color_scheme(core, TRUE);
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_for_text(core, REPLY_DARK));
+  /* Mode 2031 is off throughout: a direct question is answered anyway. */
+  g_assert_cmpint(count_text(core, REPLY_LIGHT), ==, 0);
+
+  pt_term_core_free(core);
+}
+
+static void test_color_scheme_query_light(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; read x; printf '\\033[?996n'; cat -v",
+    NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  pt_term_core_set_color_scheme(core, FALSE);
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_for_text(core, REPLY_LIGHT));
+
+  pt_term_core_free(core);
+}
+
+static void test_color_scheme_notifies_on_change(void) {
+  /* With mode 2031 on, a theme flip is announced unasked — and only when it is
+     really a flip: setting the same value again must put nothing on the pty. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?2031hready'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  /* One write, so the parser has consumed 2031h by the time "ready" prints. */
+  g_assert_true(wait_for_text(core, "ready"));
+
+  pt_term_core_set_color_scheme(core, FALSE);      /* dark -> light: reported */
+  g_assert_true(wait_for_text(core, REPLY_LIGHT));
+  pt_term_core_set_color_scheme(core, FALSE);      /* no change: silent */
+  pt_term_core_set_color_scheme(core, TRUE);       /* light -> dark: reported */
+  /* The dark reply arriving proves the repeat had its turn and wrote nothing:
+     the pty is FIFO, so a second light reply would already be in the grid. */
+  g_assert_true(wait_for_text(core, REPLY_DARK));
+  g_assert_cmpint(count_text(core, REPLY_LIGHT), ==, 1);
+
+  pt_term_core_free(core);
+}
+
+static void test_color_scheme_needs_mode(void) {
+  /* Mode 2031 off: a scheme change writes nothing at all. Unsolicited bytes
+     would be typed input to whatever is running in the pane. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  pt_term_core_set_color_scheme(core, FALSE);
+  pt_term_core_set_color_scheme(core, TRUE);
+
+  /* The probe is the proof the notifications had their chance. */
+  pt_term_core_write(core, "PROBE\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE"));
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "997"));
+  g_assert_null(strstr(text, "^["));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
 static void test_alt_screen_arrows(void) {
   /* On the alt screen with no mouse tracking, the wheel becomes cursor keys.
      Mode 1007 is on by default, and DECCKM is off here, so the normal form
@@ -1393,6 +1490,14 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/alt-screen-arrows", test_alt_screen_arrows);
   g_test_add_func("/termcore/alt-screen-tracking-wheel",
                   test_alt_screen_tracking_wheel);
+  g_test_add_func("/termcore/color-scheme-query-dark",
+                  test_color_scheme_query_dark);
+  g_test_add_func("/termcore/color-scheme-query-light",
+                  test_color_scheme_query_light);
+  g_test_add_func("/termcore/color-scheme-notify",
+                  test_color_scheme_notifies_on_change);
+  g_test_add_func("/termcore/color-scheme-needs-mode",
+                  test_color_scheme_needs_mode);
   g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
   g_test_add_func("/termcore/reset-mouse-tracking",
                   test_reset_clears_mouse_tracking);

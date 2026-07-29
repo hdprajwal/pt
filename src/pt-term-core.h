@@ -123,6 +123,22 @@ void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count);
  * A query is dropped in silence — no callback, and not one byte to the pty. */
 void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode);
 
+/* ---- color scheme (CSI ? 996 n, mode 2031) ----
+ *
+ * What pt tells programs about the light/dark question, so a TUI can pick a
+ * palette that matches the pane it is drawing into. A query is always answered;
+ * a change is announced only while mode 2031 is on, and only when the value
+ * really changed — a caller may fire this on every theme apply. New cores start
+ * dark, which is the theme pt ships.
+ *
+ * ghostty reports the *desktop* preference (AdwStyleManager:dark) and only
+ * seeds that from its background's luminance at startup. pt reports its own
+ * active theme's luminance directly: with no window-theme setting and no Adw
+ * plumbing, routing through the desktop would have a light desktop tell apps
+ * "light" while pt paints its dark theme — the opposite of useful for an app
+ * trying to match. Same answer as ghostty's default, one step shorter. */
+void pt_term_core_set_color_scheme(PtTermCore *c, gboolean dark);
+
 gboolean pt_term_core_bracketed_paste(PtTermCore *c);
 /* ---- paste ----
  *

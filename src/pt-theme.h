@@ -29,6 +29,11 @@ typedef struct {
 typedef struct {
   PtTheme term;                 /* resolved terminal colors */
   PtColor tokens[PT_TOK_COUNT]; /* resolved chrome tokens */
+  /* TRUE when the terminal background is dark. Drives the chrome derivation
+   * below, and is also what pt reports to programs that ask for the color
+   * scheme (CSI ? 996 n / mode 2031), so a TUI picking a light or dark palette
+   * matches what pt is actually painting. */
+  gboolean dark;
 } PtResolvedTheme;
 
 gboolean    pt_color_parse(const char *s, PtColor *out); /* #rrggbb | rgba(r,g,b,a) */
@@ -46,3 +51,9 @@ char       *pt_theme_dir(void);                  /* ~/.config/pt/themes */
 char      **pt_theme_list_names(const char *dir);
 /* A file in dir wins over the builtin of the same name. NULL when unknown. */
 char       *pt_theme_load_text(const char *dir, const char *name);
+/* Is the named theme dark? Same rule and same lookup order as
+ * pt_theme_load_text + pt_theme_resolve, without applying anything: for
+ * classifying a whole list of installed themes (dir and name as above). A theme
+ * that does not load, or one that pins no background, counts as dark — that is
+ * the fallback pt_theme_parse fills in and the only theme pt ships. */
+gboolean    pt_theme_is_dark(const char *dir, const char *name);
