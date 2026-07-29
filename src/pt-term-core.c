@@ -24,6 +24,7 @@ struct PtTermCore {
 
   int pty_fd;
   pid_t child;
+  char *shell_name;         /* basename of what spawn exec'd; set once at spawn */
   guint fd_source;
   guint child_source;
   guint cmd_timer;
@@ -724,6 +725,19 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
 }
 
 /* ---- spawn ---- */
+/* The shell a NULL-argv spawn execs: $SHELL, then the passwd entry, then
+ * /bin/sh. Called on both sides of the fork — the answer is pure fork-inherited
+ * state (env, uid), so parent and child always agree, which is what lets the
+ * parent cache the shell's name without reading /proc/<child>/comm (a read
+ * that races the child's exec and can see the parent's own comm). */
+static const char *default_shell(void) {
+  const char *shell = getenv("SHELL");
+  if (shell != NULL && shell[0] != '\0') return shell;
+  struct passwd *pw = getpwuid(getuid());
+  return (pw != NULL && pw->pw_shell != NULL && pw->pw_shell[0] != '\0')
+             ? pw->pw_shell : "/bin/sh";
+}
+
 static int spawn_pty(const char *cwd, const char *const *argv,
                      char *const *env_pairs,
                      guint16 cols, guint16 rows, int cell_w, int cell_h,
@@ -747,12 +761,7 @@ static int spawn_pty(const char *cwd, const char *const *argv,
     if (argv != NULL) {
       execvp(argv[0], (char *const *)argv);
     } else {
-      const char *shell = getenv("SHELL");
-      if (shell == NULL || shell[0] == '\0') {
-        struct passwd *pw = getpwuid(getuid());
-        shell = (pw != NULL && pw->pw_shell != NULL && pw->pw_shell[0] != '\0')
-                    ? pw->pw_shell : "/bin/sh";
-      }
+      const char *shell = default_shell();
       const char *name = strrchr(shell, '/');
       name = name != NULL ? name + 1 : shell;
       execl(shell, name, NULL);
@@ -807,6 +816,11 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   /* Conservative until the first poll (at the end of this function) reads the
    * tty: a spawn with a command is running it right now. */
   c->fg_running = TRUE;
+  /* Named from what was spawned, never read back from the child: comm only
+   * settles after the exec, so a /proc read here can race it and cache the
+   * parent's own name instead. default_shell() is what the child's exec branch
+   * resolves, from state the fork copied, so the two cannot disagree. */
+  c->shell_name = g_path_get_basename(argv != NULL ? argv[0] : default_shell());
 
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, c);
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
@@ -2027,6 +2041,8 @@ gboolean pt_term_core_exited(PtTermCore *c, int *status) {
 
 pid_t pt_term_core_shell_pid(PtTermCore *c) { return c->child; }
 
+const char *pt_term_core_shell_name(PtTermCore *c) { return c->shell_name; }
+
 /* A field read: the 700ms foreground poll keeps it current, spawn seeds it
  * TRUE and child exit clears it, so per-frame callers cost no syscall. */
 gboolean pt_term_core_running(PtTermCore *c) {
@@ -2054,5 +2070,6 @@ void pt_term_core_free(PtTermCore *c) {
   if (c->terminal != NULL) ghostty_terminal_free(c->terminal);
   g_strfreev(c->env_pairs);
   g_free(c->last_title);
+  g_free(c->shell_name);
   g_free(c);
 }

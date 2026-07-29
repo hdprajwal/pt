@@ -75,6 +75,30 @@ static void test_exit_status_reported(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+/* The shell name is derived from what the spawn execs, never read back from
+ * /proc/<child>/comm — a comm read can race the child's exec and see the
+ * parent's own name. Being spawn-derived it is exact and available
+ * immediately, even before the exec has happened. */
+static void test_shell_name(void) {
+  const char *argv[] = {"/bin/sh", "-c", "exit 0", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
+  pt_term_core_free(core);
+
+  /* NULL argv spawns the default shell; the name is $SHELL's basename. */
+  char *old = g_strdup(g_getenv("SHELL"));
+  g_setenv("SHELL", "/bin/sh", TRUE);
+  core = pt_term_core_new("/tmp", NULL, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
+  pt_term_core_free(core);   /* kills+reaps the interactive shell */
+  if (old != NULL) g_setenv("SHELL", old, TRUE);
+  else g_unsetenv("SHELL");
+  g_free(old);
+}
+
 static void test_key_send_echoes(void) {
   /* `cat` echoes stdin; typing 'h' 'i' Enter must appear in the grid. */
   Ctx ctx = {0};
@@ -2520,6 +2544,7 @@ int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
   g_test_add_func("/termcore/exit", test_exit_status_reported);
+  g_test_add_func("/termcore/shell-name", test_shell_name);
   g_test_add_func("/termcore/keys", test_key_send_echoes);
   g_test_add_func("/termcore/long-grapheme", test_long_grapheme_cluster);
   g_test_add_func("/termcore/selection", test_selection);

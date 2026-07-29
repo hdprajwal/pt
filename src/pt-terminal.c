@@ -101,7 +101,6 @@ struct _PtTerminal {
   char *start_cwd;
   char **env;                /* extra child env, or NULL */
   char *last_command;
-  char *shell_name;          /* the shell's comm, cached once at spawn */
   PangoLayout *layout;
   PangoFontDescription *font_desc;
   int cell_w, cell_h;
@@ -579,26 +578,6 @@ static void ensure_core(PtTerminal *t) {
     return;
   }
   apply_palette(t->core);
-  /* The shell's name never changes for the life of the pane (comm follows the
-   * process, and the shell pid is fixed at spawn), so one read here replaces a
-   * /proc read on every info-panel refresh. $SHELL then "sh" cover the corner
-   * where /proc is unreadable, keeping the promise that this is never NULL
-   * once the core exists. */
-  {
-    char proc[64];
-    g_snprintf(proc, sizeof(proc), "/proc/%d/comm",
-               (int)pt_term_core_shell_pid(t->core));
-    char *comm = NULL;
-    if (g_file_get_contents(proc, &comm, NULL, NULL)) g_strstrip(comm);
-    if (comm != NULL && comm[0] != '\0') {
-      t->shell_name = comm;
-    } else {
-      g_free(comm);
-      const char *sh = g_getenv("SHELL");
-      t->shell_name =
-          g_path_get_basename(sh != NULL && sh[0] != '\0' ? sh : "sh");
-    }
-  }
   /* Registering clipboard_write or notification is what starts the OSC
    * scanner: with no consumer at all the core does not even look at the
    * bytes. */
@@ -1628,7 +1607,12 @@ guint64 pt_terminal_id(PtTerminal *t) { return t->id; }
 
 const char *pt_terminal_last_command(PtTerminal *t) { return t->last_command; }
 
-const char *pt_terminal_shell_name(PtTerminal *t) { return t->shell_name; }
+/* Delegates rather than copies: the core derives the name from its own spawn
+ * (see pt_term_core_shell_name), so a restart's fresh core brings a fresh name
+ * with it and a failed respawn answers NULL instead of a stale one. */
+const char *pt_terminal_shell_name(PtTerminal *t) {
+  return t->core != NULL ? pt_term_core_shell_name(t->core) : NULL;
+}
 
 gboolean pt_terminal_running(PtTerminal *t) {
   return t->core != NULL && pt_term_core_running(t->core);
@@ -1760,7 +1744,6 @@ static void pt_terminal_dispose(GObject *obj) {
   g_clear_pointer(&t->start_cwd, g_free);
   g_clear_pointer(&t->env, g_strfreev);
   g_clear_pointer(&t->last_command, g_free);
-  g_clear_pointer(&t->shell_name, g_free);
   G_OBJECT_CLASS(pt_terminal_parent_class)->dispose(obj);
 }
 

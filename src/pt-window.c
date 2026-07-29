@@ -394,9 +394,10 @@ static char *panel_dir(PtWindow *w) {
 }
 
 /* The shell's own name, not the foreground command: the pane's shell pid is a
- * direct child, so its comm stays "zsh" while a build runs under it. The pane
- * caches it at spawn, so this costs nothing; $SHELL/"sh" cover a pane that has
- * not spawned yet (a tab restored into the background). Borrowed, not freed. */
+ * direct child, so its comm stays "zsh" while a build runs under it. The core
+ * derives it at spawn, so this costs nothing; $SHELL/"sh" cover a pane with no
+ * live core (a tab restored into the background, a failed respawn). Borrowed,
+ * not freed. */
 static const char *shell_name_for(PtTerminal *term) {
   const char *name = term != NULL ? pt_terminal_shell_name(term) : NULL;
   if (name != NULL) return name;

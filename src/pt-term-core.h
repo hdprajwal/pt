@@ -336,6 +336,11 @@ char *pt_term_core_grid_text(PtTermCore *c);        /* visible grid, caller free
 gboolean pt_term_core_last_nonempty_row(PtTermCore *c, char *buf, gsize cap);
 gboolean pt_term_core_exited(PtTermCore *c, int *status);
 pid_t pt_term_core_shell_pid(PtTermCore *c);
+/* Basename of the program this core spawned (argv[0], or the resolved default
+ * shell) — derived from the spawn itself, not read back from /proc, so it
+ * cannot race the child's exec. Set once at spawn, never NULL, owned by the
+ * core; valid until pt_term_core_free. */
+const char *pt_term_core_shell_name(PtTermCore *c);
 /* TRUE when a foreground process other than the shell owns the tty. Answered
  * from a cached field the 700ms foreground poll maintains (seeded TRUE at
  * spawn, cleared on child exit), so it is free to ask every frame; the answer
