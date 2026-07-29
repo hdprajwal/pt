@@ -23,9 +23,11 @@ typedef enum {
 /* Move focus to the nearest pane in the given direction (spatial, based on
  * on-screen geometry). No-op when no pane lies that way. */
 void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir);
-/* Focus the pane with this pt_terminal_id(), if the grid holds it. FALSE means
- * it does not — the caller is expected to ask every grid in turn, and a pane
- * that was closed since is found by nobody. */
+/* The pane with this pt_terminal_id(), or NULL when the grid does not hold it.
+ * Callers are expected to ask every grid in turn; a pane closed since is found
+ * by nobody. */
+PtTerminal *pt_pane_grid_pane_by_id(PtPaneGrid *g, guint64 id);
+/* Same lookup, but focus what it finds. */
 gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id);
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
 int pt_pane_grid_pane_count(PtPaneGrid *g);

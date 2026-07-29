@@ -351,22 +351,32 @@ void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir) {
  * notification whose pane was closed while it sat on screen finds no taker at
  * all. Emits the same signals a keyboard focus move does, so the status line
  * and the tab strip follow. */
-gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id) {
-  if (g->tree == NULL) return FALSE;
+static PtSplitNode *leaf_by_id(PtPaneGrid *g, guint64 id) {
+  if (g->tree == NULL) return NULL;
   PtSplitNode *first = pt_split_first_leaf(g->tree);
   PtSplitNode *leaf = first;
   do {
     if (leaf != NULL && leaf->user != NULL &&
-        pt_terminal_id(PT_TERMINAL(leaf->user)) == id) {
-      g->focused = leaf;
-      pt_pane_grid_focus_terminal(g);
-      g_signal_emit(g, signals[SIG_FOCUS], 0);
-      emit_focused_command(g);
-      return TRUE;
-    }
+        pt_terminal_id(PT_TERMINAL(leaf->user)) == id)
+      return leaf;
     leaf = pt_split_next_leaf(g->tree, leaf);
   } while (leaf != NULL && leaf != first);
-  return FALSE;
+  return NULL;
+}
+
+PtTerminal *pt_pane_grid_pane_by_id(PtPaneGrid *g, guint64 id) {
+  PtSplitNode *leaf = leaf_by_id(g, id);
+  return leaf != NULL ? PT_TERMINAL(leaf->user) : NULL;
+}
+
+gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id) {
+  PtSplitNode *leaf = leaf_by_id(g, id);
+  if (leaf == NULL) return FALSE;
+  g->focused = leaf;
+  pt_pane_grid_focus_terminal(g);
+  g_signal_emit(g, signals[SIG_FOCUS], 0);
+  emit_focused_command(g);
+  return TRUE;
 }
 
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g) {
