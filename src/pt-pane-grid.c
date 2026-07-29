@@ -1,6 +1,6 @@
 #include "pt-pane-grid.h"
 
-enum { SIG_STRUCTURE, SIG_ACTIVITY, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
+enum { SIG_STRUCTURE, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
        SIG_EMPTIED, SIG_NOTIFICATION, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
@@ -12,11 +12,6 @@ struct _PtPaneGrid {
 };
 
 G_DEFINE_FINAL_TYPE(PtPaneGrid, pt_pane_grid, GTK_TYPE_WIDGET)
-
-static void on_term_activity(PtTerminal *t, gpointer user) {
-  (void)t;
-  g_signal_emit(PT_PANE_GRID(user), signals[SIG_ACTIVITY], 0);
-}
 
 /* Re-emit "command-changed" for the currently focused pane, when known, so the
  * tab relabels on focus moves (not just when the fg program itself changes). */
@@ -112,7 +107,6 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   g_object_ref_sink(term);
   leaf->user = term;
   g_object_set_data(G_OBJECT(term), "pt-leaf", leaf);
-  g_signal_connect(term, "activity", G_CALLBACK(on_term_activity), g);
   g_signal_connect(term, "exited", G_CALLBACK(on_term_exited), g);
   g_signal_connect(term, "command-changed", G_CALLBACK(on_term_command), g);
   g_signal_connect(term, "title-changed", G_CALLBACK(on_term_title), g);
@@ -469,8 +463,6 @@ static void pt_pane_grid_class_init(PtPaneGridClass *klass) {
   gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(klass),
                                            GTK_TYPE_BIN_LAYOUT);
   signals[SIG_STRUCTURE] = g_signal_new("structure-changed", PT_TYPE_PANE_GRID,
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
-  signals[SIG_ACTIVITY] = g_signal_new("activity", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_FOCUS] = g_signal_new("focus-changed", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);

@@ -37,7 +37,6 @@ int pt_pane_grid_focused_index(PtPaneGrid *g);
 void pt_pane_grid_sync_cwds(PtPaneGrid *g); /* leaf->cwd ← live terminal cwd */
 void pt_pane_grid_focus_terminal(PtPaneGrid *g); /* grab focus on focused pane */
 /* Signals: "structure-changed" (void) — split/close happened (persist!);
- *          "activity" (void) — any child terminal produced output;
  *          "focus-changed" (void) — focused pane changed;
  *          "command-changed" (const char*) — focused pane's foreground program
  *              changed (or a focus move landed on a pane with a known command);

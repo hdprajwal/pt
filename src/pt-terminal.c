@@ -66,9 +66,24 @@ static PtOsc52Mode osc52_default = PT_CONFIG_OSC52_DEFAULT;
  * (pane grids build terminals straight from split-tree leaves). */
 static char **default_env;
 
-enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_ACTIVITY, SIG_COMMAND_CHANGED,
+enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_COMMAND_CHANGED,
        SIG_NOTIFICATION, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+/* Whether the per-frame/per-event g_debug lines run at all. g_debug formats
+ * its arguments before the log level is consulted, and the frame line asks
+ * the clock and does arithmetic per frame — checked once here so a build
+ * nobody is debugging pays one branch instead. */
+static gboolean pt_debug_enabled(void) {
+  static gsize once;
+  static gboolean on;
+  if (g_once_init_enter(&once)) {
+    const char *dbg = g_getenv("G_MESSAGES_DEBUG");
+    on = dbg != NULL && dbg[0] != '\0';
+    g_once_init_leave(&once, 1);
+  }
+  return on;
+}
 
 /* Handed out by pt_terminal_id(). A desktop notification outlives the read
  * that produced it — it sits on the user's screen until they click it — so
@@ -112,6 +127,14 @@ struct _PtTerminal {
   PtOsc52Mode osc52;         /* this pane's copy of `osc52` */
   gboolean osc52_asking;     /* a clipboard-write confirmation is up */
   gboolean link_cursor;      /* the hand cursor is up: a link is under the pointer */
+  /* What update_link_cursor last answered for: the pointer's cell and the
+   * core's content serial as of that answer. While neither moves the answer
+   * cannot have changed, so the seat walk and the grid lookup are skipped.
+   * link_row == -2 means no cache (anything that changes the answer without
+   * moving either — modifiers, mouse-reporting flips, a button settling —
+   * resets it there). */
+  int link_col, link_row;
+  guint link_serial;
 
   /* overlay scrollbar: when the viewport last moved (monotonic µs, 0 = never
    * or already faded out), the timer waiting the hold out, and the tick
@@ -133,10 +156,11 @@ struct _PtTerminal {
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
 
-/* Declared up here only because the two places that have to re-ask what is
- * under the pointer — new output and a resize — both run well before the
- * mouse code it belongs with. */
+/* Declared up here only because the places that have to re-ask what is under
+ * the pointer — new output, a resize, a restarted shell — run well before the
+ * mouse code they belong with. */
 static void update_link_cursor(PtTerminal *t);
+static void link_cache_reset(PtTerminal *t);
 
 /* ---- cursor blink ----
  *
@@ -214,7 +238,6 @@ static void core_draw(PtTermCore *core, gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
   gtk_widget_queue_draw(GTK_WIDGET(t));
   update_link_cursor(t);       /* the grid just moved under the pointer */
-  g_signal_emit(t, signals[SIG_ACTIVITY], 0);
 }
 
 static void core_exited(PtTermCore *core, int status, gpointer user) {
@@ -367,7 +390,17 @@ typedef struct {
   PangoGlyphString *glyphs;   /* owned; advances already snapped to the grid */
 } GlyphEntry;
 
-static GHashTable *glyph_cache;   /* char key -> GlyphEntry */
+/* Two tiers. The hot one is a direct-mapped array over (bold|italic,
+ * codepoint) for single-codepoint cells below U+0300 — ASCII, Latin-1 and
+ * Latin Extended, which is nearly every cell a terminal ever draws — so the
+ * per-cell lookup is an index, not a hash of a stack-built key. Everything
+ * else (clusters, and codepoints past the table) goes to the hash, keyed by
+ * the FULL cluster: PT_CELL_TEXT_MAX bounds the cluster at 63 bytes, and the
+ * key buffer holds style byte + 63 + NUL, so two clusters sharing a long
+ * prefix can no longer collide into one entry. */
+#define PT_GLYPH_DIRECT_MAX 0x300
+static GlyphEntry *glyph_direct[4][PT_GLYPH_DIRECT_MAX];
+static GHashTable *glyph_cache;   /* char key -> GlyphEntry (rare clusters) */
 
 static void glyph_entry_free(gpointer p) {
   GlyphEntry *e = p;
@@ -378,10 +411,13 @@ static void glyph_entry_free(gpointer p) {
 
 static void glyph_cache_clear(void) {
   if (glyph_cache != NULL) g_hash_table_remove_all(glyph_cache);
+  for (guint s = 0; s < 4; s++)
+    for (guint cp = 0; cp < PT_GLYPH_DIRECT_MAX; cp++)
+      g_clear_pointer(&glyph_direct[s][cp], glyph_entry_free);
 }
 
 /* key: one style byte (kept printable so the whole thing is a C string) then
- * the cluster's UTF-8 bytes. */
+ * the cluster's UTF-8 bytes, whole. */
 static void glyph_key(char *out, gsize out_len, const char *utf8, gsize len,
                       gboolean bold, gboolean italic) {
   out[0] = (char)('a' + (bold ? 1 : 0) + (italic ? 2 : 0));
@@ -390,20 +426,12 @@ static void glyph_key(char *out, gsize out_len, const char *utf8, gsize len,
   out[1 + n] = '\0';
 }
 
-static const GlyphEntry *glyph_lookup(PtTerminal *t, const char *utf8,
-                                      gsize len, gboolean bold,
-                                      gboolean italic) {
-  char key[64];
-  glyph_key(key, sizeof(key), utf8, len, bold, italic);
-  if (glyph_cache == NULL)
-    glyph_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-                                        glyph_entry_free);
-  GlyphEntry *e = g_hash_table_lookup(glyph_cache, key);
-  if (e != NULL) return e->font != NULL ? e : NULL;
-
-  /* Miss: shape it once. The font description rides in on the attribute list
-   * so itemization picks the terminal font (and its fallbacks) rather than the
-   * widget context's default. */
+/* Shape one cluster. The font description rides in on the attribute list so
+ * itemization picks the terminal font (and its fallbacks) rather than the
+ * widget context's default. Always returns an entry; font == NULL marks a
+ * cluster nothing can draw, cached so the failure is paid once too. */
+static GlyphEntry *glyph_shape(PtTerminal *t, const char *utf8, gsize len,
+                               gboolean bold, gboolean italic) {
   PangoContext *pc = gtk_widget_get_pango_context(GTK_WIDGET(t));
   PangoAttrList *attrs = pango_attr_list_new();
   pango_attr_list_insert(attrs, pango_attr_font_desc_new(t->font_desc));
@@ -412,7 +440,7 @@ static const GlyphEntry *glyph_lookup(PtTerminal *t, const char *utf8,
   if (italic)
     pango_attr_list_insert(attrs, pango_attr_style_new(PANGO_STYLE_ITALIC));
 
-  e = g_new0(GlyphEntry, 1);
+  GlyphEntry *e = g_new0(GlyphEntry, 1);
   GList *items = pango_itemize(pc, utf8, 0, (int)len, attrs, NULL);
   if (items != NULL) {
     PangoItem *item = items->data;          /* one cell is one item in practice */
@@ -426,7 +454,34 @@ static const GlyphEntry *glyph_lookup(PtTerminal *t, const char *utf8,
     g_list_free_full(items, (GDestroyNotify)pango_item_free);
   }
   pango_attr_list_unref(attrs);
-  g_hash_table_insert(glyph_cache, g_strdup(key), e);
+  return e;
+}
+
+/* `cp` and `single` say whether text is one codepoint and which — the caller
+ * has already decoded it for the block-glyph test, so it is not re-derived. */
+static const GlyphEntry *glyph_lookup(PtTerminal *t, const char *utf8,
+                                      gsize len, gunichar cp, gboolean single,
+                                      gboolean bold, gboolean italic) {
+  if (single && cp < PT_GLYPH_DIRECT_MAX) {
+    guint s = (bold ? 1u : 0u) | (italic ? 2u : 0u);
+    GlyphEntry *e = glyph_direct[s][cp];
+    if (e == NULL) {
+      e = glyph_shape(t, utf8, len, bold, italic);
+      glyph_direct[s][cp] = e;
+    }
+    return e->font != NULL ? e : NULL;
+  }
+
+  char key[2 + PT_CELL_TEXT_MAX];   /* style + whole cluster + NUL, always */
+  glyph_key(key, sizeof(key), utf8, len, bold, italic);
+  if (glyph_cache == NULL)
+    glyph_cache = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                        glyph_entry_free);
+  GlyphEntry *e = g_hash_table_lookup(glyph_cache, key);
+  if (e == NULL) {
+    e = glyph_shape(t, utf8, len, bold, italic);
+    g_hash_table_insert(glyph_cache, g_strdup(key), e);
+  }
   return e->font != NULL ? e : NULL;
 }
 
@@ -449,64 +504,28 @@ static void flush_run(GtkSnapshot *snapshot, PangoFont *font,
 /* ---- OSC 8 hyperlinks ----
  *
  * Linked cells get an underline, which is the only thing that tells a user a
- * run of text is clickable at all. Rows carry a "something in here has a link"
- * flag (with false positives, never false negatives), so the per-cell question
- * is only asked on the few rows that answer yes — a screen of ordinary output
- * costs one query per row. */
-static gboolean row_has_hyperlink(GhosttyRenderStateRowIterator iter) {
-  GhosttyRow row = 0;
-  if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
-                                   &row) != GHOSTTY_SUCCESS)
-    return FALSE;
-  bool linked = false;
-  ghostty_row_get(row, GHOSTTY_ROW_DATA_HYPERLINK, &linked);
-  return linked;
-}
-
-/* Drawn in a second pass over the row rather than inline with the text: the
- * first pass paints each cell's background as it reaches it, which would cover
- * a line already put down under it. The colour is resolved the same way that
- * pass resolves the glyph's, inverse included — under inverse video the cell's
- * foreground is what got painted *behind* the text, so an underline in it is
- * a line the same colour as the block it sits on. */
+ * run of text is clickable at all. Drawn as a pass over the row's flat cells
+ * after its backgrounds went down (a background painted later would cover the
+ * line), and only for rows where the cell fill saw a link at all. The colour
+ * is resolved the same way the glyph's is, inverse included — under inverse
+ * video the cell's foreground is what got painted *behind* the text, so an
+ * underline in it is a line the same colour as the block it sits on.
+ * Selection only replaces the background, so it leaves this alone, exactly as
+ * it leaves the glyph colour alone. */
 static void draw_row_underlines(PtTerminal *t, GtkSnapshot *snapshot,
-                                GhosttyRenderStateRowIterator iter, int y,
-                                GhosttyColorRgb fg_default,
-                                GhosttyColorRgb bg_default) {
-  GhosttyRenderStateRowCells cells = pt_term_core_row_cells_raw(t->core);
-  if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                                   &cells) != GHOSTTY_SUCCESS)
-    return;
+                                const PtCell *cells, int n, int y,
+                                PtColor bg_default) {
   int uy = MIN(y + t->baseline + 2, y + t->cell_h - 1);
   int x = PT_PAD_X;
-  while (ghostty_render_state_row_cells_next(cells)) {
-    GhosttyCell cell = 0;
-    bool linked = false;
-    if (ghostty_render_state_row_cells_get(cells,
-            GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &cell) == GHOSTTY_SUCCESS)
-      ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &linked);
-    if (linked) {
-      GhosttyColorRgb fg = fg_default;
-      GhosttyColorRgb bg = bg_default;
-      if (ghostty_render_state_row_cells_get(cells,
-              GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR,
-              &fg) != GHOSTTY_SUCCESS)
-        fg = fg_default;
-      if (ghostty_render_state_row_cells_get(cells,
-              GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR,
-              &bg) != GHOSTTY_SUCCESS)
-        bg = bg_default;
-      GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
-      ghostty_render_state_row_cells_get(cells,
-          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
-      /* Selection only replaces the background, so it leaves this alone —
-       * exactly as it leaves the glyph colour alone in the first pass. */
-      if (style.inverse) fg = bg;
-      gtk_snapshot_append_color(snapshot,
-          &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1},
-          &GRAPHENE_RECT_INIT(x, uy, t->cell_w, 1));
-    }
-    x += t->cell_w;
+  for (int i = 0; i < n; i++, x += t->cell_w) {
+    const PtCell *cl = &cells[i];
+    if (!cl->has_link) continue;
+    PtColor fg = cl->fg;
+    if (cl->style & PT_CELL_STYLE_INVERSE)
+      fg = cl->has_bg ? cl->bg : bg_default;
+    gtk_snapshot_append_color(snapshot,
+        &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1},
+        &GRAPHENE_RECT_INIT(x, uy, t->cell_w, 1));
   }
 }
 
@@ -530,38 +549,17 @@ static void measure_font(PtTerminal *t) {
   glyph_cache_clear();
 }
 
-/* Theme colors pushed into libghostty: the ANSI slots the theme pins (so
- * status output matches the app chrome) plus the default bg/fg. Slots the
- * theme leaves alone keep libghostty's built-in defaults. */
+/* Theme colors pushed into the core: the ANSI slots the theme pins (so status
+ * output matches the app chrome) plus the default bg/fg/cursor. The core's
+ * pinned-slot encoding is alpha > 0, so the alpha is set from th_pal_set here
+ * rather than trusted from the theme struct. */
 static void apply_palette(PtTermCore *core) {
-  GhosttyTerminal term = pt_term_core_terminal(core);
-
-  /* Without these the render state reports libghostty's unset defaults
-   * (black on white) and the theme's bg/fg would never reach the screen.
-   * Set first: they must land even if the palette read below fails. */
-  GhosttyColorRgb bg = { th_bg.r, th_bg.g, th_bg.b };
-  GhosttyColorRgb fg = { th_fg.r, th_fg.g, th_fg.b };
-  GhosttyColorRgb cursor = { th_cursor.r, th_cursor.g, th_cursor.b };
-  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg);
-  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg);
-  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, &cursor);
-
-  /* Reset to libghostty's stock palette before reading it: on a theme
-   * switch DATA_COLOR_PALETTE_DEFAULT would otherwise still report the
-   * *previous* theme's pins (our own last OPT_COLOR_PALETTE write became
-   * the new default), so slots the incoming theme leaves alone would keep
-   * the old theme's colors and diverge from a freshly created pane.
-   * set(COLOR_PALETTE, NULL) restores the stock defaults while preserving
-   * any OSC 4 overrides the program set, which the dirty mask tracks. */
-  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, NULL);
-  GhosttyColorRgb palette[256];
-  if (ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
-                           palette) != GHOSTTY_SUCCESS)
-    return;
-  for (int i = 0; i < 16; i++)
-    if (th_pal_set[i])
-      palette[i] = (GhosttyColorRgb){ th_pal[i].r, th_pal[i].g, th_pal[i].b };
-  ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, palette);
+  PtTermColors colors = { .bg = th_bg, .fg = th_fg, .cursor = th_cursor };
+  for (int i = 0; i < 16; i++) {
+    colors.palette[i] = th_pal[i];
+    colors.palette[i].a = th_pal_set[i] ? 1.0 : 0.0;
+  }
+  pt_term_core_set_colors(core, &colors);
 }
 
 static void ensure_core(PtTerminal *t) {
@@ -718,25 +716,20 @@ typedef enum {
  * glyph at a password prompt, pt draws a plain block: pt does not ship a font
  * and cannot promise U+F023 exists, and a missing-glyph box at the moment
  * someone is typing a password is the worst place to find out. */
-static PtCursorShape cursor_shape(PtTerminal *t, GhosttyRenderState rs) {
+static PtCursorShape cursor_shape(PtTerminal *t, gboolean in_vp,
+                                  const PtCursorInfo *ci) {
   /* No shell: the exited banner is up and there is nothing to point at. */
   if (t->exited) return PT_CURSOR_NONE;
 
   /* Scrolled out of the viewport, or otherwise nowhere to draw. */
-  bool in_vp = false;
-  ghostty_render_state_get(rs,
-      GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE, &in_vp);
   if (!in_vp) return PT_CURSOR_NONE;
 
   /* A password prompt outranks everything below, hiding and blinking
    * included: whatever else is true, the cursor stays put and stays obvious. */
-  if (pt_term_core_cursor_password_input(t->core)) return PT_CURSOR_BLOCK;
+  if (ci->password) return PT_CURSOR_BLOCK;
 
   /* The app hid the cursor (DECTCEM). */
-  bool visible = false;
-  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE,
-                           &visible);
-  if (!visible) return PT_CURSOR_NONE;
+  if (!ci->visible) return PT_CURSOR_NONE;
 
   /* An unfocused pane is hollow whatever it asked for, and never blinks —
    * which is also what makes the focused pane findable in a split. */
@@ -745,7 +738,7 @@ static PtCursorShape cursor_shape(PtTerminal *t, GhosttyRenderState rs) {
   /* Blinking, and this is the off half of the cycle. */
   if (t->blink_wanted && !t->blink_visible) return PT_CURSOR_NONE;
 
-  switch (pt_term_core_cursor_style(t->core)) {
+  switch (ci->style) {
     case GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR:
       return PT_CURSOR_BAR;
     case GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE:
@@ -761,7 +754,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   PtTerminal *t = PT_TERMINAL(widget);
   int w = gtk_widget_get_width(widget);
   int h = gtk_widget_get_height(widget);
-  gint64 frame_t0 = g_get_monotonic_time();
+  gint64 frame_t0 = pt_debug_enabled() ? g_get_monotonic_time() : 0;
 
   ensure_core(t);
   if (t->core == NULL) {
@@ -770,36 +763,30 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
         &GRAPHENE_RECT_INIT(0, 0, w, h));
     return;
   }
-  pt_term_core_sync(t->core);
-  GhosttyRenderState rs = pt_term_core_render_state(t->core);
+  /* Sync only when the core says a frame would differ. Focus, scrim, blink
+   * and bar-fade repaints redraw from what the last sync left in place, which
+   * is byte-identical — the state only moves when the serial does. */
+  if (pt_term_core_take_render_dirty(t->core))
+    pt_term_core_sync(t->core);
 
-  /* Default/effective colors: libghostty-vt exposes these as individual
-   * render-state queries (no aggregate colors struct in this ABI). */
-  GhosttyColorRgb bg_default = { th_bg.r, th_bg.g, th_bg.b };
-  GhosttyColorRgb fg_default = { th_fg.r, th_fg.g, th_fg.b };
-  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_BACKGROUND,
-                           &bg_default);
-  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
-                           &fg_default);
-  bool cursor_has_value = false;
-  ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_CURSOR_HAS_VALUE,
-                           &cursor_has_value);
-  GhosttyColorRgb cursor_color = fg_default;
-  if (cursor_has_value)
-    ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_COLOR_CURSOR,
-                             &cursor_color);
+  /* The effective default background: the theme's, unless a program moved it
+   * with OSC 11. Seeded so a refused read still paints something sane. */
+  PtColor bg_default = th_bg;
+  pt_term_core_default_colors(t->core, &bg_default, NULL);
 
   gtk_snapshot_append_color(snapshot,
       &(GdkRGBA){ bg_default.r / 255.0f, bg_default.g / 255.0f,
                   bg_default.b / 255.0f, 1.0f },
       &GRAPHENE_RECT_INIT(0, 0, w, h));
 
-  GhosttyRenderStateRowIterator iter = pt_term_core_row_iter(t->core);
-  if (ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
-                               &iter) != GHOSTTY_SUCCESS)
-    return;
+  /* the theme's selection background takes over the cell background */
+  GdkRGBA sel_rgba = { th_sel.r / 255.0f, th_sel.g / 255.0f,
+                       th_sel.b / 255.0f, (float)th_sel.a };
 
-  char text[64];
+  /* One row of flat cells at a time, all rows in a single sequential walk —
+   * plain memory from here down, no per-cell FFI. The stack array bounds the
+   * row at 512 cells; a pane wider than that clips its tail. */
+  PtCell cells[512];
   /* The run being accumulated: glyphs for consecutive cells that share a font
    * and a colour. Flushed on any change, on a blank, and at end of row. */
   PangoGlyphString *run = pango_glyph_string_new();
@@ -807,104 +794,96 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   GdkRGBA run_color = { 0, 0, 0, 1 };
   int run_x = 0;
   int y = PT_PAD_Y;
-  while (ghostty_render_state_row_iterator_next(iter)) {
-    GhosttyRenderStateRowCells cells = pt_term_core_row_cells_raw(t->core);
-    if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                                     &cells) != GHOSTTY_SUCCESS)
-      continue;
+  PtRowReader *rows = pt_term_core_rows_begin(t->core);
+  int ncells;
+  while (rows != NULL &&
+         (ncells = pt_term_core_rows_next(rows, cells,
+                                          G_N_ELEMENTS(cells))) >= 0) {
+    /* Backgrounds first, merged: adjacent cells with the same effective
+     * background (selection included) become one rect, the way adjacent
+     * glyphs already share one text node. Laying the whole row's backgrounds
+     * down before any of its glyphs is what makes the merge safe — no rect
+     * appended here can cover a glyph. */
+    gboolean row_linked = FALSE;
+    int bg_x = 0, bg_w = 0;
+    GdkRGBA bg_color = { 0, 0, 0, 0 };
     int x = PT_PAD_X;
-    while (ghostty_render_state_row_cells_next(cells)) {
-      uint32_t glen = 0;
-      ghostty_render_state_row_cells_get(cells,
-          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
-
-      bool selected = false;
-      ghostty_render_state_row_cells_get(cells,
-          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED, &selected);
-      /* the theme's selection background takes over the cell background */
-      GdkRGBA sel_rgba = { th_sel.r / 255.0f, th_sel.g / 255.0f,
-                           th_sel.b / 255.0f, (float)th_sel.a };
-
-      GhosttyColorRgb fg = fg_default;
-      GhosttyColorRgb bg = bg_default;
-      gboolean has_bg = ghostty_render_state_row_cells_get(cells,
-          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &bg) == GHOSTTY_SUCCESS;
-
-      if (glen == 0) {
-        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
-        if (selected)
-          gtk_snapshot_append_color(snapshot, &sel_rgba,
-              &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
-        else if (has_bg)
-          gtk_snapshot_append_color(snapshot,
-              &(GdkRGBA){bg.r / 255.0f, bg.g / 255.0f, bg.b / 255.0f, 1},
-              &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
-        x += t->cell_w;
+    for (int i = 0; i < ncells; i++, x += t->cell_w) {
+      const PtCell *cl = &cells[i];
+      row_linked |= cl->has_link;
+      gboolean paint = TRUE;
+      GdkRGBA color = { 0, 0, 0, 0 };
+      if (cl->selected)
+        color = sel_rgba;
+      else if (cl->text[0] != '\0' && (cl->style & PT_CELL_STYLE_INVERSE))
+        /* inverse paints the cell's own foreground behind the text */
+        color = (GdkRGBA){ cl->fg.r / 255.0f, cl->fg.g / 255.0f,
+                           cl->fg.b / 255.0f, 1 };
+      else if (cl->has_bg)
+        color = (GdkRGBA){ cl->bg.r / 255.0f, cl->bg.g / 255.0f,
+                           cl->bg.b / 255.0f, 1 };
+      else
+        paint = FALSE;
+      if (paint && bg_w > 0 && gdk_rgba_equal(&color, &bg_color)) {
+        bg_w += t->cell_w;
         continue;
       }
+      if (bg_w > 0)
+        gtk_snapshot_append_color(snapshot, &bg_color,
+            &GRAPHENE_RECT_INIT(bg_x, y, bg_w, t->cell_h));
+      bg_w = 0;
+      if (paint) { bg_x = x; bg_w = t->cell_w; bg_color = color; }
+    }
+    if (bg_w > 0)
+      gtk_snapshot_append_color(snapshot, &bg_color,
+          &GRAPHENE_RECT_INIT(bg_x, y, bg_w, t->cell_h));
 
-      if (ghostty_render_state_row_cells_get(cells,
-          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR, &fg) != GHOSTTY_SUCCESS)
-        fg = fg_default;
-      GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
-      ghostty_render_state_row_cells_get(cells,
-          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
-      if (style.inverse) {
-        GhosttyColorRgb tmp = fg; fg = bg; bg = tmp; has_bg = TRUE;
+    /* Glyphs second, over the row's backgrounds. */
+    x = PT_PAD_X;
+    for (int i = 0; i < ncells; i++, x += t->cell_w) {
+      const PtCell *cl = &cells[i];
+      /* Nothing to draw: an empty cell, or the spacer half of a wide one. */
+      if (cl->text[0] == '\0') {
+        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
+        continue;
       }
-      if (selected)
-        gtk_snapshot_append_color(snapshot, &sel_rgba,
-            &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
-      else if (has_bg)
-        gtk_snapshot_append_color(snapshot,
-            &(GdkRGBA){bg.r / 255.0f, bg.g / 255.0f, bg.b / 255.0f, 1},
-            &GRAPHENE_RECT_INIT(x, y, t->cell_w, t->cell_h));
-
-      /* GRAPHEMES_BUF writes glen codepoints — buffer must hold ALL of them
-       * (see Task 5 review: stack overflow otherwise). */
-      uint32_t cps_stack[16];
-      uint32_t *cps = glen <= 16 ? cps_stack : g_new(uint32_t, glen);
-      ghostty_render_state_row_cells_get(cells,
-          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
+      gunichar cp = g_utf8_get_char(cl->text);
+      gboolean single = *g_utf8_next_char(cl->text) == '\0';
+      /* A space paints nothing, and most of a terminal screen is spaces —
+       * shaping them was the single largest slice of the old frame cost. */
+      if (single && cp == ' ') {
+        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
+        continue;
+      }
+      /* Under inverse video the glyph takes the cell's background colour;
+       * the cell's own fg went down behind it in the first pass. */
+      PtColor fg = (cl->style & PT_CELL_STYLE_INVERSE)
+                       ? (cl->has_bg ? cl->bg : bg_default)
+                       : cl->fg;
 
       /* Block elements are drawn from the cell metrics, never shaped: the
        * font's ink is narrower than the rounded cell width, which seams every
        * boundary between adjacent block cells. */
       PtBlockRect rects[4];
-      int nrects = glen == 1 ? pt_block_glyph_rects(cps[0], rects) : 0;
+      int nrects = single ? pt_block_glyph_rects(cp, rects) : 0;
       if (nrects > 0) {
         flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
-        for (int i = 0; i < nrects; i++)
+        for (int r = 0; r < nrects; r++)
           gtk_snapshot_append_color(snapshot,
               &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f,
-                         rects[i].alpha},
-              &GRAPHENE_RECT_INIT(x + rects[i].x * t->cell_w,
-                                  y + rects[i].y * t->cell_h,
-                                  rects[i].w * t->cell_w,
-                                  rects[i].h * t->cell_h));
-        if (cps != cps_stack) g_free(cps);  /* this path skips the free below */
-        x += t->cell_w;
-        continue;
-      }
-
-      int pos = 0;
-      for (uint32_t i = 0; i < glen && pos < 60; i++)
-        pos += g_unichar_to_utf8((gunichar)cps[i], text + pos);
-      text[pos] = '\0';
-      gboolean blank = glen == 1 && cps[0] == ' ';
-      if (cps != cps_stack) g_free(cps);
-
-      /* A space paints nothing, and most of a terminal screen is spaces —
-       * shaping them was the single largest slice of the old frame cost. */
-      if (blank) {
-        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
-        x += t->cell_w;
+                         rects[r].alpha},
+              &GRAPHENE_RECT_INIT(x + rects[r].x * t->cell_w,
+                                  y + rects[r].y * t->cell_h,
+                                  rects[r].w * t->cell_w,
+                                  rects[r].h * t->cell_h));
         continue;
       }
 
       const GlyphEntry *ge =
-          glyph_lookup(t, text, (gsize)pos, style.bold, style.italic);
-      if (ge == NULL) { x += t->cell_w; continue; }
+          glyph_lookup(t, cl->text, strlen(cl->text), cp, single,
+                       (cl->style & PT_CELL_STYLE_BOLD) != 0,
+                       (cl->style & PT_CELL_STYLE_ITALIC) != 0);
+      if (ge == NULL) continue;
 
       GdkRGBA fg_rgba = { fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1 };
       if (run->num_glyphs > 0 &&
@@ -919,66 +898,64 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
       pango_glyph_string_set_size(run, at + ge->glyphs->num_glyphs);
       memcpy(run->glyphs + at, ge->glyphs->glyphs,
              sizeof(PangoGlyphInfo) * ge->glyphs->num_glyphs);
-      for (int i = 0; i < ge->glyphs->num_glyphs; i++)
-        run->log_clusters[at + i] = at + i;
-      x += t->cell_w;
+      for (int g = 0; g < ge->glyphs->num_glyphs; g++)
+        run->log_clusters[at + g] = at + g;
     }
     flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
-    if (row_has_hyperlink(iter))
-      draw_row_underlines(t, snapshot, iter, y, fg_default, bg_default);
+    if (row_linked)
+      draw_row_underlines(t, snapshot, cells, ncells, y, bg_default);
     y += t->cell_h;
   }
+  pt_term_core_rows_end(rows);
   pango_glyph_string_free(run);
 
-  /* cursor */
-  t->blink_wanted = pt_term_core_cursor_blinking(t->core);
+  /* cursor: one core call carries position, style, blink, color and width. */
+  PtCursorInfo ci;
+  gboolean cursor_in_vp = pt_term_core_cursor_info(t->core, &ci);
+  t->blink_wanted = ci.blinking;
   sync_blink_timer(t);         /* the app may have just started or stopped it */
-  PtCursorShape shape = cursor_shape(t, rs);
+  PtCursorShape shape = cursor_shape(t, cursor_in_vp, &ci);
   if (shape != PT_CURSOR_NONE) {
-    uint16_t cx = 0, cy = 0;
-    ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &cx);
-    ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cy);
     /* A wide character owns two cells and the cursor has to cover both, or it
-     * lands over half a glyph and looks like a rendering fault. Two ways in,
-     * and ghostty tests them in this order (renderer/generic.zig:3232): on the
-     * tail the cell holds nothing of its own — the glyph belongs to the cell on
-     * its left — so back up onto it; on the head just widen where we are. */
-    int cells = 1;
-    if (pt_term_core_cursor_wide_tail(t->core) && cx > 0) { cx--; cells = 2; }
-    else if (pt_term_core_cursor_wide(t->core)) cells = 2;
-    float x = PT_PAD_X + cx * t->cell_w;
-    float y = PT_PAD_Y + cy * t->cell_h;
-    float w_cur = (float)(cells * t->cell_w);
-    GhosttyColorRgb cc = cursor_has_value ? cursor_color : fg_default;
+     * lands over half a glyph and looks like a rendering fault. The core has
+     * already resolved both ways in (ghostty's order, renderer/generic.zig:
+     * 3232): x is backed up off a spacer tail, and width says 2 on either
+     * half — so this draws exactly what it is told. */
+    float x = PT_PAD_X + ci.x * t->cell_w;
+    float y_cur = PT_PAD_Y + ci.y * t->cell_h;
+    float w_cur = (float)(ci.width * t->cell_w);
     /* A filled block sits on top of its glyph, so it stays translucent enough
      * to read through. The thin shapes have nothing under them to preserve and
      * would read as a smudge at the same alpha, so they are drawn solid — the
      * same reason the hollow outline has always been drawn brighter. */
-    GdkRGBA solid = { cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 1.0f };
+    GdkRGBA solid = { ci.color.r / 255.0f, ci.color.g / 255.0f,
+                      ci.color.b / 255.0f, 1.0f };
     switch (shape) {
       case PT_CURSOR_BLOCK:
         gtk_snapshot_append_color(snapshot,
-            &(GdkRGBA){cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.55f},
-            &GRAPHENE_RECT_INIT(x, y, w_cur, t->cell_h));
+            &(GdkRGBA){ ci.color.r / 255.0f, ci.color.g / 255.0f,
+                        ci.color.b / 255.0f, 0.55f },
+            &GRAPHENE_RECT_INIT(x, y_cur, w_cur, t->cell_h));
         break;
       case PT_CURSOR_BAR:
         /* Half the rule's thickness hangs over the left cell edge, so the bar
          * sits between two characters rather than biased onto the one it is
          * in front of (font/sprite/draw/special.zig:325). */
         gtk_snapshot_append_color(snapshot, &solid,
-            &GRAPHENE_RECT_INIT(x - 1, y, 2, t->cell_h));
+            &GRAPHENE_RECT_INIT(x - 1, y_cur, 2, t->cell_h));
         break;
       case PT_CURSOR_UNDERLINE:
         gtk_snapshot_append_color(snapshot, &solid,
-            &GRAPHENE_RECT_INIT(x, y + t->cell_h - 2, w_cur, 2));
+            &GRAPHENE_RECT_INIT(x, y_cur + t->cell_h - 2, w_cur, 2));
         break;
       case PT_CURSOR_BLOCK_HOLLOW: {
         /* The alpha is higher than the filled block's because a 1px outline
          * reads much fainter at 0.55f. */
-        GdkRGBA out = { cc.r / 255.0f, cc.g / 255.0f, cc.b / 255.0f, 0.8f };
+        GdkRGBA out = { ci.color.r / 255.0f, ci.color.g / 255.0f,
+                        ci.color.b / 255.0f, 0.8f };
         GskRoundedRect cr;
         gsk_rounded_rect_init_from_rect(&cr,
-            &GRAPHENE_RECT_INIT(x, y, w_cur, t->cell_h), 0);
+            &GRAPHENE_RECT_INIT(x, y_cur, w_cur, t->cell_h), 0);
         gtk_snapshot_append_border(snapshot, &cr,
             (float[4]){ 1, 1, 1, 1 },
             (GdkRGBA[4]){ out, out, out, out });
@@ -1046,10 +1023,11 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     gtk_snapshot_restore(snapshot);
   }
 
-  g_debug("pt frame: %.2f ms (%dx%d cells)",
-          (double)(g_get_monotonic_time() - frame_t0) / 1000.0,
-          t->cell_w > 0 ? (w - 2 * PT_PAD_X) / t->cell_w : 0,
-          t->cell_h > 0 ? (h - 2 * PT_PAD_Y) / t->cell_h : 0);
+  if (pt_debug_enabled())
+    g_debug("pt frame: %.2f ms (%dx%d cells)",
+            (double)(g_get_monotonic_time() - frame_t0) / 1000.0,
+            t->cell_w > 0 ? (w - 2 * PT_PAD_X) / t->cell_w : 0,
+            t->cell_h > 0 ? (h - 2 * PT_PAD_Y) / t->cell_h : 0);
 }
 
 /* ---- input ---- */
@@ -1061,6 +1039,7 @@ static void restart_shell(PtTerminal *t) {
   sync_blink_timer(t);
   g_free(t->start_cwd);
   t->start_cwd = cwd != NULL ? cwd : g_strdup(g_get_home_dir());
+  link_cache_reset(t);       /* the new core's serial starts over */
   ensure_core(t);
   gtk_widget_queue_allocate(GTK_WIDGET(t)); /* re-sizes the new core */
   gtk_widget_queue_draw(GTK_WIDGET(t));
@@ -1128,10 +1107,11 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
   if (consumed) {
     /* any keypress that writes to the pty drops the selection, and snaps the
      * viewport back to the prompt: typing into scrollback you can't see is how
-     * you run a command without noticing it ran. */
+     * you run a command without noticing it ran. Both calls fire the core's
+     * draw callback when they change anything, so nothing is queued here — a
+     * keypress that moves nothing repaints nothing. */
     pt_term_core_selection_clear(t->core);
     pt_term_core_scroll_bottom(t->core);
-    gtk_widget_queue_draw(GTK_WIDGET(t));
   }
   return consumed;
 }
@@ -1222,18 +1202,38 @@ static GdkModifierType live_mods(void) {
   return kbd != NULL ? gdk_device_get_modifier_state(kbd) : 0;
 }
 
+/* The cached answer no longer holds: something other than the pointer's cell
+ * or the grid's content changed it (modifiers, a mouse-reporting flip, a
+ * button gesture settling ownership), so the next ask has to do the work. */
+static void link_cache_reset(PtTerminal *t) {
+  t->link_row = -2;
+}
+
 /* Asks again what is under the pointer where it already is. The pointer is not
  * the only thing that moves: output scrolls the grid out from under it and a
  * resize reflows it, either of which can take the link away or bring one in
  * without a single motion event. So the answer is re-derived on redraw too,
- * from the last position seen — one grid lookup per redraw, and only while the
- * pointer is actually in the pane. */
+ * from the last position seen — and, because most motion stays inside one cell
+ * and most redraws change nothing, cached by (cell, content serial): while
+ * both hold, the seat walk and the grid lookup are skipped entirely. */
 static void update_link_cursor(PtTerminal *t) {
   if (!t->pointer_in || t->core == NULL) return;
+  /* Pixel -> cell, mirroring the core's own mapping. Everywhere outside the
+   * grid shares one bucket (-1): every outside answer is "no link". */
+  int col = -1, row = -1;
+  double cx = (t->mouse_x - PT_PAD_X) / (double)t->cell_w;
+  double cy = (t->mouse_y - PT_PAD_Y) / (double)t->cell_h;
+  if (cx >= 0 && cy >= 0) { col = (int)cx; row = (int)cy; }
+  guint serial = pt_term_core_content_serial(t->core);
+  if (row == t->link_row && col == t->link_col && serial == t->link_serial)
+    return;
+  t->link_row = row;
+  t->link_col = col;
+  t->link_serial = serial;
   /* The app owns the pointer, links included: ⌃click goes to it, so the
    * cursor must not promise otherwise. */
   if (pointer_reports(t, live_mods())) { set_link_cursor(t, FALSE); return; }
-  char *uri = pt_term_core_hyperlink_at(t->core, t->mouse_x, t->mouse_y);
+  char *uri = row >= 0 ? pt_term_core_link_at_cell(t->core, row, col) : NULL;
   set_link_cursor(t, uri != NULL);
   g_free(uri);
 }
@@ -1273,6 +1273,9 @@ static void on_motion_leave(GtkEventControllerMotion *ctl, gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
   t->pointer_in = FALSE;
   set_link_cursor(t, FALSE);
+  /* The cursor was just forced off; re-entering the same cell has to be able
+   * to bring it back even if nothing else moved. */
+  link_cache_reset(t);
 }
 
 /* Shift is the override that takes the pointer back from an app tracking it,
@@ -1284,6 +1287,9 @@ static void on_motion_leave(GtkEventControllerMotion *ctl, gpointer user) {
 static gboolean on_key_modifiers(GtkEventControllerKey *ctl,
                                  GdkModifierType state, gpointer user) {
   (void)ctl; (void)state;
+  /* Modifiers change the answer without moving the pointer or the grid, so
+   * the cache would swallow the update. */
+  link_cache_reset(PT_TERMINAL(user));
   update_link_cursor(PT_TERMINAL(user));
   return GDK_EVENT_PROPAGATE;
 }
@@ -1346,8 +1352,9 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
   int notches = (int)trunc(pend_notches);
   t->report_pending = pend_notches - notches;
 
-  g_debug("pt scroll: dy=%.3f unit=%s cell_h=%d -> rows=%d notches=%d",
-          dy, pixels ? "pixels" : "notches", t->cell_h, rows, notches);
+  if (pt_debug_enabled())
+    g_debug("pt scroll: dy=%.3f unit=%s cell_h=%d -> rows=%d notches=%d",
+            dy, pixels ? "pixels" : "notches", t->cell_h, rows, notches);
 
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(ctl));
 
@@ -1357,7 +1364,9 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
   if (wheel_reports(t, state)) {
     if (notches == 0) return TRUE;
     /* One button-4/5 press per notch, reported at the pointer: GTK scroll
-     * events carry no coordinates of their own. */
+     * events carry no coordinates of their own. Nothing local changed —
+     * selection_clear fires the draw callback itself, and whatever the app
+     * does with the reports comes back through the pty read path. */
     pt_term_core_selection_clear(t->core);
     GhosttyMods mods = pt_keymap_mods(state);
     GhosttyMouseButton btn = notches < 0 ? GHOSTTY_MOUSE_BUTTON_FOUR
@@ -1365,7 +1374,6 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
     for (int i = 0; i < ABS(notches); i++)
       pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_PRESS, btn, mods,
                                 t->mouse_x, t->mouse_y);
-    gtk_widget_queue_draw(GTK_WIDGET(t));
     return TRUE;
   }
 
@@ -1376,9 +1384,10 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
    * and git log scroll under a plain pager. */
   if (pt_term_core_alt_screen(t->core) && !pt_term_core_mouse_tracking(t->core) &&
       pt_term_core_alt_scroll(t->core)) {
+    /* The arrows only matter once the app answers them, which comes back
+     * through the read path; the selection clear queues its own repaint. */
     pt_term_core_selection_clear(t->core);
     pt_term_core_send_arrows(t->core, rows < 0, ABS(rows));
-    gtk_widget_queue_draw(GTK_WIDGET(t));
     return TRUE;
   }
 
@@ -1400,15 +1409,18 @@ static void on_click_pressed(GtkGestureClick *g, int n, double x, double y,
   GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(g));
   t->reporting_drag = mouse_reporting(t, state);
   t->button_down = TRUE;
-  g_debug("pt press: btn=%u n=%d mods=0x%x tracking=%d report=%d -> %s",
-          button, n, (unsigned)state, pt_term_core_mouse_tracking(t->core),
-          t->report_mouse, t->reporting_drag ? "app" : "selection");
+  link_cache_reset(t);   /* pointer ownership was just settled for the drag */
+  if (pt_debug_enabled())
+    g_debug("pt press: btn=%u n=%d mods=0x%x tracking=%d report=%d -> %s",
+            button, n, (unsigned)state, pt_term_core_mouse_tracking(t->core),
+            t->report_mouse, t->reporting_drag ? "app" : "selection");
   if (t->reporting_drag) {
+    /* The clear repaints by itself; the press only matters once the app
+     * reacts, which arrives through the read path. */
     pt_term_core_selection_clear(t->core);
     pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_PRESS,
                               ghostty_button(button), pt_keymap_mods(state),
                               x, y);
-    gtk_widget_queue_draw(GTK_WIDGET(t));
     return;
   }
   /* Locally only the primary button means anything: middle and right exist
@@ -1421,11 +1433,12 @@ static void on_click_pressed(GtkGestureClick *g, int n, double x, double y,
    * reporting branch above so an app that took the mouse still gets it. */
   if ((state & GDK_CONTROL_MASK) != 0 && open_link_at(t, x, y)) return;
 
-  /* controller event time is in milliseconds; the core wants nanoseconds */
+  /* controller event time is in milliseconds; the core wants nanoseconds.
+   * Selection changes (a dropped one, a double-click's word) repaint through
+   * the core's draw callback; a plain first press changes nothing visible. */
   guint32 ms =
       gtk_event_controller_get_current_event_time(GTK_EVENT_CONTROLLER(g));
   pt_term_core_selection_press(t->core, x, y, (guint64)ms * 1000000ULL);
-  gtk_widget_queue_draw(GTK_WIDGET(t));
 }
 
 static void on_click_released(GtkGestureClick *g, int n, double x, double y,
@@ -1438,20 +1451,21 @@ static void on_click_released(GtkGestureClick *g, int n, double x, double y,
 
   guint button = gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(g));
   t->button_down = FALSE;   /* the gesture is over; ownership is open again */
+  link_cache_reset(t);      /* and the link answer may change with it */
   /* Release follows whichever owner took the press, so an app that stops
-   * tracking mid-drag still sees the button go up. */
+   * tracking mid-drag still sees the button go up. Nothing local changed:
+   * the app's reaction comes back through the read path. */
   if (t->reporting_drag) {
     GdkModifierType state = controller_mods(GTK_EVENT_CONTROLLER(g));
     pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_RELEASE,
                               ghostty_button(button), pt_keymap_mods(state),
                               x, y);
     t->reporting_drag = FALSE;
-    gtk_widget_queue_draw(GTK_WIDGET(t));
     return;
   }
   if (button != GDK_BUTTON_PRIMARY) return;
+  /* The final selection install repaints through the core's draw callback. */
   pt_term_core_selection_release(t->core, x, y);
-  gtk_widget_queue_draw(GTK_WIDGET(t));
 }
 
 static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
@@ -1464,8 +1478,8 @@ static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
   if (t->reporting_drag) return;
   double sx = 0, sy = 0;
   gtk_gesture_drag_get_start_point(g, &sx, &sy);
+  /* Each install along the drag repaints through the core's draw callback. */
   pt_term_core_selection_drag(t->core, sx + ox, sy + oy);
-  gtk_widget_queue_draw(GTK_WIDGET(t));
 }
 
 /* Clipboard text held across the confirmation dialog. */
@@ -1668,7 +1682,8 @@ void pt_terminal_set_mouse_reporting(gboolean on) {
   for (GSList *l = live_terminals; l != NULL; l = l->next) {
     PtTerminal *t = l->data;
     t->report_mouse = on;
-    update_link_cursor(t);   /* who owns the pointer just changed under it */
+    link_cache_reset(t);     /* who owns the pointer just changed under it */
+    update_link_cursor(t);
   }
 }
 
@@ -1700,7 +1715,8 @@ gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t) {
   /* Handing the pointer to the app mid-selection would leave a highlight
    * nothing can clear. */
   if (t->report_mouse && t->core != NULL) pt_term_core_selection_clear(t->core);
-  update_link_cursor(t);     /* who owns the pointer just changed under it */
+  link_cache_reset(t);       /* who owns the pointer just changed under it */
+  update_link_cursor(t);
   gtk_widget_queue_draw(GTK_WIDGET(t));
   return t->report_mouse;
 }
@@ -1735,8 +1751,6 @@ static void pt_terminal_class_init(PtTerminalClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
   signals[SIG_TITLE_CHANGED] = g_signal_new("title-changed", PT_TYPE_TERMINAL,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
-  signals[SIG_ACTIVITY] = g_signal_new("activity", PT_TYPE_TERMINAL,
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_COMMAND_CHANGED] = g_signal_new("command-changed", PT_TYPE_TERMINAL,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
   signals[SIG_NOTIFICATION] = g_signal_new("notification", PT_TYPE_TERMINAL,
@@ -1759,6 +1773,7 @@ static void pt_terminal_init(PtTerminal *t) {
   t->report_mouse = mouse_reporting_default;
   t->osc52 = osc52_default;
   t->blink_visible = TRUE;
+  t->link_row = -2;          /* no cached link answer yet */
   live_terminals = g_slist_prepend(live_terminals, t);
 
   GtkEventController *key = gtk_event_controller_key_new();

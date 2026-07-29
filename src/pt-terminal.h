@@ -46,7 +46,7 @@ void pt_terminal_reset(PtTerminal *t);
 /* Module-level `osc52` mode: what a program in a pane may do to the clipboard
  * with OSC 52. Re-armed on every live terminal, like the one above. */
 void pt_terminal_set_osc52(PtOsc52Mode mode);
-/* GObject signals: "exited" (int), "title-changed" (const char*), "activity" (void),
+/* GObject signals: "exited" (int), "title-changed" (const char*),
  *                  "command-changed" (const char*) — fg program of the pane changed,
  *                  "notification" (const char* title, const char* body) — a
  *                      program asked for a desktop notification with OSC 9 or
