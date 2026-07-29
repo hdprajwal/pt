@@ -533,6 +533,21 @@ static double bar_alpha(PtTerminal *t) {
   return gone >= 1.0 ? 0.0 : 1.0 - gone;
 }
 
+/* The thumb there is to draw, and FALSE when there is none: nothing above the
+ * screen to move through, or the alternate screen, where a full-screen app owns
+ * the pane and keeps no history behind it (the library gives that screen no
+ * scrollback at all, Terminal.zig:2994, so the numbers agree — this is belt and
+ * braces rather than a second rule). All three out params are written on TRUE.
+ *
+ * Asked before the animation starts as well as during it, so a wheel in a pane
+ * with no history costs nothing at all. */
+static gboolean bar_thumb(PtTerminal *t, guint64 *total, guint64 *offset,
+                          guint64 *len) {
+  return t->core != NULL && !pt_term_core_alt_screen(t->core) &&
+         pt_term_core_scrollbar(t->core, total, offset, len) &&
+         *total > *len;
+}
+
 static gboolean bar_fade_tick(GtkWidget *widget, GdkFrameClock *clock,
                               gpointer user) {
   (void)clock; (void)user;
@@ -562,6 +577,8 @@ static gboolean bar_hold_done(gpointer user) {
  * every glyph run in the pane — a tick callback through the hold would repaint
  * the whole grid tens of times to draw the same pixels. */
 static void bar_reveal(PtTerminal *t) {
+  guint64 total = 0, offset = 0, len = 0;
+  if (!bar_thumb(t, &total, &offset, &len)) return;
   t->bar_at = g_get_monotonic_time();
   if (t->bar_tick != 0) {
     gtk_widget_remove_tick_callback(GTK_WIDGET(t), t->bar_tick);
@@ -791,15 +808,10 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   /* scrollback scrollbar. Drawn after the scrim rather than before it: the
    * pointer can scroll a pane that does not have focus, and washing the one
    * affordance that says where you are toward the background is the wrong way
-   * round. Never on the alternate screen — a full-screen app owns the pane and
-   * keeps no history behind it, which is also what the numbers say (the
-   * library gives the alt screen no scrollback at all, Terminal.zig:2994), so
-   * this is belt and braces rather than a second rule. */
+   * round. */
   double alpha = bar_alpha(t);
   guint64 sb_total = 0, sb_offset = 0, sb_len = 0;
-  if (alpha > 0.0 && !pt_term_core_alt_screen(t->core) &&
-      pt_term_core_scrollbar(t->core, &sb_total, &sb_offset, &sb_len) &&
-      sb_total > sb_len) {
+  if (alpha > 0.0 && bar_thumb(t, &sb_total, &sb_offset, &sb_len)) {
     float track_y = PT_BAR_MARGIN;
     float track_h = (float)h - 2 * PT_BAR_MARGIN;
     float thumb_h = track_h * (float)sb_len / (float)sb_total;
