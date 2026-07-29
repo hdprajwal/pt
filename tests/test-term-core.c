@@ -1042,6 +1042,35 @@ static void test_reset_rearms_mode_edges(void) {
   pt_term_core_free(core);
 }
 
+static void test_reset_rearms_in_band_resize(void) {
+  /* The same re-arming for mode 2048, and it needs its own test: the 1004 one
+     above cannot cover it, since either shadow left set is a separate silence.
+     The child proves the first enable really fired by only continuing when the
+     enable-time report reached it — `read` is holding that report, so a stale
+     shadow that was never set cannot be what the assertions below pass on.
+
+     Both the marker and the re-enable are one printf, so pt reads them in one
+     go and polls the modes once. Split across two reads, the poll in between
+     would see 2048 off after the reset and clear the shadow by itself, which
+     is exactly the self-correction this test must not be rescued by. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?2048hready'; read x; "
+    "[ -n \"$x\" ] && printf 'FIRST-REPORT-SEEN\\033[?2048h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  pt_term_core_reset(core);
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_for_text(core, "FIRST-REPORT-SEEN"));
+  /* On a grid the reset wiped, so this is the report the re-enable earned. */
+  g_assert_true(wait_for_text(core, REPORT_80x24));
+  g_assert_cmpint(count_text(core, REPORT_80x24), ==, 1);
+
+  pt_term_core_free(core);
+}
+
 static void test_reset_keeps_color_scheme(void) {
   /* The colors pt paints survive a reset — fullReset does not touch them — so
      the scheme it answers CSI ? 996 n with must survive too. Cleared back to
@@ -1555,6 +1584,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/reset-osc-scanner", test_reset_clears_osc_scanner);
   g_test_add_func("/termcore/reset-rearms-mode-edges",
                   test_reset_rearms_mode_edges);
+  g_test_add_func("/termcore/reset-rearms-in-band-resize",
+                  test_reset_rearms_in_band_resize);
   g_test_add_func("/termcore/reset-keeps-color-scheme",
                   test_reset_keeps_color_scheme);
   g_test_add_func("/termcore/osc-callback", test_osc_reaches_callback);
