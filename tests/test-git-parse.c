@@ -291,6 +291,42 @@ static void test_chip_truncates(void) {
   g_assert_cmpstr(buf, ==, "long");
 }
 
+/* ---------- .git/HEAD ----------
+ *
+ * The window reads HEAD directly to seed a project's branch before the git
+ * monitor's first poll; this is that file's whole grammar. */
+
+static void test_head_branch(void) {
+  char *b = pt_git_parse_head("ref: refs/heads/main\n");
+  g_assert_cmpstr(b, ==, "main");
+  g_free(b);
+  /* Slashes in branch names survive, and so does a file with no newline. */
+  b = pt_git_parse_head("ref: refs/heads/feature/x");
+  g_assert_cmpstr(b, ==, "feature/x");
+  g_free(b);
+  /* Trailing whitespace is not part of the name. */
+  b = pt_git_parse_head("ref: refs/heads/main\r\n");
+  g_assert_cmpstr(b, ==, "main");
+  g_free(b);
+  b = pt_git_parse_head("  ref: refs/heads/main  \n");
+  g_assert_cmpstr(b, ==, "main");
+  g_free(b);
+}
+
+/* A detached HEAD is a bare sha: no branch to name. So is anything else that
+ * does not spell out a refs/heads/ ref. */
+static void test_head_no_branch(void) {
+  g_assert_null(pt_git_parse_head(
+      "9f0c1c2e4a5b6c7d8e9f0a1b2c3d4e5f60718293"));
+  g_assert_null(pt_git_parse_head("ref: refs/tags/v1\n"));
+  g_assert_null(pt_git_parse_head("ref: refs/heads/\n"));   /* named nothing */
+  g_assert_null(pt_git_parse_head("garbage\n"));
+  g_assert_null(pt_git_parse_head("gitdir: ../.git/worktrees/wt\n"));
+  g_assert_null(pt_git_parse_head(""));
+  g_assert_null(pt_git_parse_head("\n \t\n"));
+  g_assert_null(pt_git_parse_head(NULL));
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/gitparse/clean", test_clean_repo);
@@ -312,5 +348,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/gitparse/chip/no-branch", test_chip_no_branch);
   g_test_add_func("/gitparse/chip/from-parse", test_chip_from_parse);
   g_test_add_func("/gitparse/chip/truncates", test_chip_truncates);
+  g_test_add_func("/gitparse/head/branch", test_head_branch);
+  g_test_add_func("/gitparse/head/no-branch", test_head_no_branch);
   return g_test_run();
 }

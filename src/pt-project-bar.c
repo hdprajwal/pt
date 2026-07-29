@@ -1,6 +1,6 @@
 #include "pt-project-bar.h"
 #include "pt-accent.h"
-#include <string.h>
+#include "pt-path.h"
 
 struct _PtProjectBar {
   GtkWidget parent_instance;
@@ -12,29 +12,17 @@ struct _PtProjectBar {
 
 G_DEFINE_FINAL_TYPE(PtProjectBar, pt_project_bar, GTK_TYPE_WIDGET)
 
-/* Only a whole leading path component matches, so "/home/metoo" is left
- * alone. See the header for the contract. */
-char *pt_path_home_abbrev(const char *path) {
-  const char *home = g_get_home_dir();
-  if (path == NULL) return g_strdup("");
-  if (home == NULL || home[0] == '\0') return g_strdup(path);
-  gsize n = strlen(home);
-  while (n > 1 && home[n - 1] == '/') n--;      /* tolerate a trailing slash */
-  if (strncmp(path, home, n) != 0) return g_strdup(path);
-  if (path[n] == '\0') return g_strdup("~");
-  if (path[n] != '/') return g_strdup(path);
-  return g_strconcat("~", path + n, NULL);
-}
-
 void pt_project_bar_update(PtProjectBar *b, const char *name, const char *path,
                            const PtGitStatus *git, int accent) {
   g_return_if_fail(PT_IS_PROJECT_BAR(b));
 
   gtk_label_set_text(GTK_LABEL(b->name), name != NULL ? name : "pt");
 
-  char *shown = pt_path_home_abbrev(path);
+  /* Long enough for any path a label would still be readable at; the rule
+   * itself lives in ptcore, with the home directory passed in. */
+  char shown[512];
+  pt_path_home_abbrev(path, g_get_home_dir(), shown, sizeof shown);
   gtk_label_set_text(GTK_LABEL(b->path), shown);
-  g_free(shown);
 
   /* Same formatter as the sidebar row's branch label — one spelling, one
    * place. Empty text is exactly the "nothing to show" case. */

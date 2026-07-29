@@ -15,6 +15,7 @@
 #include "pt-session.h"
 #include "pt-git-parse.h"
 #include "pt-git-monitor.h"
+#include "pt-path.h"
 #include "pt-config.h"
 #include "pt-theme.h"
 #include "pt-style.h"
@@ -681,16 +682,17 @@ static void on_grid_title(PtPaneGrid *g, const char *title, gpointer user) {
  * Leaves the branch untouched when there is no .git/HEAD (non-repo, or a
  * worktree/submodule whose .git is a gitdir: pointer — the monitor covers it). */
 static void seed_git_branch(PtProjectUI *p) {
-  static const char ref_prefix[] = "ref: refs/heads/";
   char *head = g_build_filename(p->path, ".git", "HEAD", NULL);
   char *txt = NULL;
   if (g_file_get_contents(head, &txt, NULL, NULL)) {
-    g_strstrip(txt);
-    if (g_str_has_prefix(txt, ref_prefix))
-      g_strlcpy(p->git.branch, txt + sizeof(ref_prefix) - 1,
-                sizeof p->git.branch);
-    else if (txt[0] != '\0')
+    char *branch = pt_git_parse_head(txt);
+    if (branch != NULL)
+      g_strlcpy(p->git.branch, branch, sizeof p->git.branch);
+    else if (*g_strstrip(txt) != '\0')
+      /* HEAD said something, just not a branch: a detached sha. An empty file
+       * says nothing, and leaves the branch for the monitor's first poll. */
       g_strlcpy(p->git.branch, "(detached)", sizeof p->git.branch);
+    g_free(branch);
   }
   g_free(txt);
   g_free(head);
@@ -1397,7 +1399,9 @@ static void action_open_palette(PtWindow *w) {
     PtProjectUI *p = g_ptr_array_index(w->projects, i);
     /* Same spelling as the project bar: home-abbreviated path, plain branch
      * text. The ⑂ glyph is reserved for the terminal's own identity line. */
-    char *shown_path = pt_path_home_abbrev(p->path);
+    char shown_path[512];
+    pt_path_home_abbrev(p->path, g_get_home_dir(),
+                        shown_path, sizeof shown_path);
     PtPaletteItem it = {
       .name = g_strdup(p->name),
       .detail = p->is_repo
@@ -1407,7 +1411,6 @@ static void action_open_palette(PtWindow *w) {
       .accent = p->accent, .is_shell = FALSE,
       .project_idx = (int)i, .tab_idx = -1,
     };
-    g_free(shown_path);
     g_array_append_val(arr, it);
     for (guint j = 0; j < p->tabs->len; j++) {
       PtTabUI *t = g_ptr_array_index(p->tabs, j);

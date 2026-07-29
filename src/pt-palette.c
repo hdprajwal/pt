@@ -19,6 +19,7 @@ struct _PtPalette {
   PtRowList *rows;      /* rebuilt per query */
   PtPaletteItem *items; /* owned; NULL when closed */
   int n_items;
+  int *scores;          /* one per item, refilled per query; sized with items */
   int shown[PT_PALETTE_ROWS];  /* row -> index into items */
   int n_shown;
   int selected;         /* index into shown[]; -1 when nothing matches */
@@ -38,6 +39,7 @@ static void free_items(PtPalette *p) {
     g_free(p->items[i].shortcut);
   }
   g_clear_pointer(&p->items, g_free);
+  g_clear_pointer(&p->scores, g_free);
   p->n_items = 0;
   p->n_shown = 0;
   p->selected = -1;
@@ -47,30 +49,15 @@ static void free_items(PtPalette *p) {
 /* Pick the six best matches for `q`, score descending, ties in natural order.
  * An empty query scores everything 1, so it degenerates to "the first six". */
 static void filter_items(PtPalette *p, const char *q) {
-  gboolean filtering = q != NULL && q[0] != '\0';
-  struct { int idx; int score; } top[PT_PALETTE_ROWS];
-  int n = 0;
-
-  for (int i = 0; i < p->n_items; i++) {
-    int sn = pt_fuzzy_score(q, p->items[i].name);
-    int sd = pt_fuzzy_score(q, p->items[i].detail);
-    int s = MAX(sn, sd);
-    if (filtering && s == 0) continue;
-    /* Full and no better than the worst kept: a tie loses to the earlier item,
-     * which is what keeps the sort stable. */
-    if (n == PT_PALETTE_ROWS && s <= top[PT_PALETTE_ROWS - 1].score) continue;
-    int pos = n < PT_PALETTE_ROWS ? n : PT_PALETTE_ROWS - 1;
-    while (pos > 0 && top[pos - 1].score < s) {
-      top[pos] = top[pos - 1];
-      pos--;
-    }
-    top[pos].idx = i;
-    top[pos].score = s;
-    if (n < PT_PALETTE_ROWS) n++;
-  }
-
-  for (int i = 0; i < n; i++) p->shown[i] = top[i].idx;
-  p->n_shown = n;
+  /* An item is worth what its better half matches: typing a path fragment has
+   * to find a project by its detail line, not only by its name. The stable
+   * top-N selection over those scores is pt_fuzzy_rank_scored's job. */
+  const char *needle = q != NULL ? q : "";
+  for (int i = 0; i < p->n_items; i++)
+    p->scores[i] = MAX(pt_fuzzy_score(needle, p->items[i].name),
+                       pt_fuzzy_score(needle, p->items[i].detail));
+  p->n_shown = pt_fuzzy_rank_scored(p->scores, p->n_items, p->shown,
+                                    PT_PALETTE_ROWS);
 }
 
 /* ---------- row rendering ---------- */
@@ -239,6 +226,9 @@ void pt_palette_open(PtPalette *p, PtPaletteItem *items, int n_items) {
   p->items = items;
   /* A projectless window hands over a NULL array; the palette opens empty. */
   p->n_items = (items != NULL && n_items > 0) ? n_items : 0;
+  /* Scored once per keystroke, so the room for the scores is taken here and
+   * not on the typing path. */
+  p->scores = p->n_items > 0 ? g_new0(int, (gsize)p->n_items) : NULL;
   p->selected = 0;
   pt_overlay_open(p->overlay);
 

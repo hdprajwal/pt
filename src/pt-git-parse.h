@@ -31,6 +31,15 @@ void pt_git_result_parse(const char *status_text,
                          const char *numstat_text_or_null,
                          PtGitStatus *out_status, GPtrArray **out_files);
 
+/* The branch a `.git/HEAD` file names: "main" for "ref: refs/heads/main", with
+ * surrounding whitespace and the trailing newline dropped. NULL when HEAD names
+ * no branch — a detached HEAD (a bare sha), a ref outside refs/heads/, a
+ * gitdir pointer, an empty or garbled file, or NULL text. Caller frees.
+ * Read directly by the window to seed a project's branch before the git
+ * monitor's first poll; a NULL from non-empty text is the detached case, which
+ * PtGitStatus spells "(detached)". */
+char *pt_git_parse_head(const char *head_text);
+
 /* The short git line every surface shows for a project — "main", or
  * "main ✚3" when files changed. `buf` always ends up NUL-terminated, and is
  * empty when there is nothing to show: a NULL status, or one with no branch

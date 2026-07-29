@@ -59,7 +59,9 @@ add_library(ptcore STATIC
   src/pt-config.c
   src/pt-fuzzy.c
   src/pt-git-parse.c
+  src/pt-path.c
   src/pt-status-parse.c
+  src/pt-style-css.c
   src/pt-split-tree.c
   src/pt-theme.c
   src/pt-session.c
@@ -91,6 +93,10 @@ add_executable(test-fuzzy tests/test-fuzzy.c)
 target_link_libraries(test-fuzzy PRIVATE ptcore)
 add_test(NAME fuzzy COMMAND test-fuzzy)
 
+add_executable(test-path tests/test-path.c)
+target_link_libraries(test-path PRIVATE ptcore)
+add_test(NAME path COMMAND test-path)
+
 add_executable(test-split-tree tests/test-split-tree.c)
 target_link_libraries(test-split-tree PRIVATE ptcore)
 add_test(NAME split-tree COMMAND test-split-tree)
@@ -110,6 +116,10 @@ add_test(NAME config COMMAND test-config)
 add_executable(test-theme tests/test-theme.c)
 target_link_libraries(test-theme PRIVATE ptcore)
 add_test(NAME theme COMMAND test-theme)
+
+add_executable(test-style tests/test-style.c)
+target_link_libraries(test-style PRIVATE ptcore)
+add_test(NAME style COMMAND test-style)
 
 add_executable(test-block tests/test-block.c)
 target_link_libraries(test-block PRIVATE ptcore)

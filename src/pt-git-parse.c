@@ -151,6 +151,18 @@ void pt_git_result_parse(const char *status_text,
   *out_files = files;
 }
 
+char *pt_git_parse_head(const char *head_text) {
+  static const char ref_prefix[] = "ref: refs/heads/";
+  if (head_text == NULL) return NULL;
+  char *txt = g_strdup(head_text);
+  g_strstrip(txt);   /* the file ends in a newline; the name does not */
+  char *branch = NULL;
+  if (g_str_has_prefix(txt, ref_prefix) && txt[sizeof ref_prefix - 1] != '\0')
+    branch = g_strdup(txt + sizeof ref_prefix - 1);
+  g_free(txt);
+  return branch;
+}
+
 void pt_git_format_chip(const PtGitStatus *st, char *buf, gsize cap) {
   if (buf == NULL || cap == 0) return;
   buf[0] = '\0';
