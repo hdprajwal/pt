@@ -909,6 +909,17 @@ static void action_toggle_mouse_reporting(PtWindow *w) {
   if (term != NULL) pt_terminal_toggle_mouse_reporting(term);
 }
 
+/* ghostty's `reset`, which is surface-scoped there and pane-scoped here. No
+ * accelerator, matching ghostty, which ships the action with no default
+ * binding — and no confirmation either, though it does throw the scrollback
+ * away. */
+static void action_reset_terminal(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  PtTerminal *term =
+      t != NULL ? pt_pane_grid_focused_terminal(PT_PANE_GRID(t->grid)) : NULL;
+  if (term != NULL) pt_terminal_reset(term);
+}
+
 static gboolean active_mouse_reporting(PtWindow *w) {
   PtTabUI *t = active_tab(active_project(w));
   PtTerminal *term =
@@ -1092,7 +1103,7 @@ static void on_info_refresh(PtInfoPanel *ip, gpointer user) {
 /* ---------- command palette ---------- */
 /* Commands ride the same list as projects and shells, marked by a project_idx
  * of -1; tab_idx then carries which command it is. */
-enum { PT_CMD_TOGGLE_MOUSE_REPORTING };
+enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL };
 
 /* Every project, each followed by its shells, then the commands. The palette
  * ranks this flat list and hands back the (project, tab) pair the user
@@ -1138,6 +1149,17 @@ static void action_open_palette(PtWindow *w) {
   };
   g_array_append_val(arr, mr);
 
+  /* The detail spells out what is lost and what is not: the row is one Enter
+   * away from discarding the scrollback, and nothing asks again afterwards. */
+  PtPaletteItem rst = {
+    .name = g_strdup("Reset terminal"),
+    .detail = g_strdup("clears the screen, scrollback and modes · "
+                       "the shell keeps running"),
+    .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
+    .project_idx = -1, .tab_idx = PT_CMD_RESET_TERMINAL,
+  };
+  g_array_append_val(arr, rst);
+
   int n = (int)arr->len;
   pt_palette_open(PT_PALETTE(w->palette),
                   (PtPaletteItem *)g_array_free(arr, FALSE), n);
@@ -1150,6 +1172,7 @@ static void on_palette_activated(PtPalette *pal, int project_idx, int tab_idx,
   if (project_idx < 0) {
     switch (tab_idx) {
     case PT_CMD_TOGGLE_MOUSE_REPORTING: action_toggle_mouse_reporting(w); break;
+    case PT_CMD_RESET_TERMINAL: action_reset_terminal(w); break;
     default: break;
     }
     return;

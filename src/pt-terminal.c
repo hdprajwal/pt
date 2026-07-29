@@ -1333,6 +1333,16 @@ void pt_terminal_set_osc52(PtOsc52Mode mode) {
   }
 }
 
+void pt_terminal_reset(PtTerminal *t) {
+  if (t->core == NULL) return;      /* nothing has been spawned in this pane */
+  /* The core drops its half of the gesture; these are the widget's half, and
+   * they decide who owns the pointer for the rest of a drag. Cleared before the
+   * reset so the redraw it fires already sees the settled state. */
+  t->reporting_drag = FALSE;
+  t->button_down = FALSE;
+  pt_term_core_reset(t->core);
+}
+
 gboolean pt_terminal_mouse_reporting(PtTerminal *t) { return t->report_mouse; }
 
 gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t) {
