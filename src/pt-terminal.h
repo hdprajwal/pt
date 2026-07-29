@@ -36,6 +36,9 @@ gboolean pt_terminal_mouse_reporting(PtTerminal *t);
 /* Flips this pane only — ghostty's toggle_mouse_reporting. Returns the new
  * state. */
 gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t);
+/* ghostty's `reset` action, this pane only: see pt_term_core_reset. The shell
+ * keeps running; only the terminal's state is thrown away. */
+void pt_terminal_reset(PtTerminal *t);
 /* Module-level `osc52` mode: what a program in a pane may do to the clipboard
  * with OSC 52. Re-armed on every live terminal, like the one above. */
 void pt_terminal_set_osc52(PtOsc52Mode mode);

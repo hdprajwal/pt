@@ -137,6 +137,17 @@ void pt_term_core_paste(PtTermCore *c, const char *text, gssize len);
  * passes through and the tty maps back to LF — or an end-of-paste sequence,
  * i.e. when pasting it into a shell can run a command. Worth a confirmation. */
 gboolean pt_term_core_paste_is_safe(const char *text, gssize len);
+/* ---- full reset (RIS) ----
+ *
+ * ghostty's `reset` action: modes, screens, scrollback, screen contents,
+ * tabstops, scrolling region, title and selection all back to defaults, with
+ * the viewport snapped to the bottom. Dimensions and colors are kept, and the
+ * child is not touched — this resets pt's view of the terminal, not the shell,
+ * so a wedged program can be unwedged without losing the session. pt's own
+ * mirrors of that state (selection, held buttons, the OSC scanner) go with it.
+ * Fires the draw callback. */
+void pt_term_core_reset(PtTermCore *c);
+
 void pt_term_core_sync(PtTermCore *c);              /* render_state_update */
 GhosttyTerminal pt_term_core_terminal(PtTermCore *c);
 GhosttyRenderState pt_term_core_render_state(PtTermCore *c);

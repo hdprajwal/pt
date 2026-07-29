@@ -800,6 +800,173 @@ static void test_scroll_bottom(void) {
   pt_term_core_free(core);
 }
 
+/* ---- full reset ----
+ *
+ * ghostty's `reset` action: everything the terminal knows goes back to
+ * defaults, the child is left alone. */
+
+static void test_reset_clears_mouse_tracking(void) {
+  /* The wedge the command exists for: an app turned tracking on and died
+     without turning it off, so the mouse no longer selects. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(tracking_on, core));
+
+  pt_term_core_reset(core);
+  g_assert_false(pt_term_core_mouse_tracking(core));
+
+  pt_term_core_free(core);
+}
+
+static void test_reset_clears_grid_and_scrollback(void) {
+  /* Fill past one screen, scroll up, reset: the grid is empty, the scrollback
+     is gone, and the viewport is back on the active area — which is proved by
+     new output showing up without a scroll_bottom of its own. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; "
+    "i=1; while [ $i -le 60 ]; do echo line$i; i=$((i+1)); done; "
+    "echo bottom-marker; cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "bottom-marker"));
+
+  pt_term_core_scroll_delta(core, -40);
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "bottom-marker"));   /* scrolled out of view */
+  g_free(text);
+
+  pt_term_core_reset(core);
+  pt_term_core_sync(core);
+  text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "bottom-marker"));
+  g_assert_null(strstr(text, "line1"));           /* scrollback discarded */
+  g_assert_cmpstr(g_strstrip(text), ==, "");      /* nothing left at all */
+  g_free(text);
+
+  /* Still scrolled up and the reset would have to have left the viewport in
+     the discarded scrollback for this to fail. */
+  pt_term_core_write(core, "after-reset\n", -1);
+  g_assert_true(wait_for_text(core, "after-reset"));
+
+  pt_term_core_free(core);
+}
+
+static void test_reset_keeps_the_child(void) {
+  /* Nothing is signalled and nothing is respawned: the same shell is still
+     there afterwards and still reading what is typed at it. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+  pid_t before = pt_term_core_shell_pid(core);
+  g_assert_cmpint(before, >, 0);
+
+  pt_term_core_reset(core);
+  g_assert_cmpint(pt_term_core_shell_pid(core), ==, before);
+  g_assert_false(pt_term_core_exited(core, NULL));
+
+  pt_term_core_send_key(core, GHOSTTY_KEY_H, GHOSTTY_KEY_ACTION_PRESS, 0,
+                        'h', "h", 1);
+  pt_term_core_send_key(core, GHOSTTY_KEY_I, GHOSTTY_KEY_ACTION_PRESS, 0,
+                        'i', "i", 1);
+  g_assert_true(wait_for_text(core, "hi"));       /* cat echoed it back */
+  g_assert_cmpint(pt_term_core_shell_pid(core), ==, before);
+
+  pt_term_core_free(core);
+}
+
+static void test_reset_clears_selection(void) {
+  /* The library drops its own selection in Screen.reset(), so pt's mirror of
+     it has to go too or selection_text would name a selection that is gone. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf 'SELECTME done-marker\\n'; cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "SELECTME"));
+
+  pt_term_core_selection_press(core, 21.0, 20.0, 1000000000ULL);
+  pt_term_core_selection_drag(core, 84.0, 20.0);
+  pt_term_core_selection_release(core, 84.0, 20.0);
+  char *sel = pt_term_core_selection_text(core);
+  g_assert_nonnull(sel);
+  g_free(sel);
+
+  pt_term_core_reset(core);
+  g_assert_null(pt_term_core_selection_text(core));
+
+  /* A reset mid-drag also ends the drag. Fresh output goes where the old
+     anchor pointed, so a stray motion afterwards would select it if the drag
+     had survived. */
+  pt_term_core_selection_press(core, 21.0, 20.0, 3000000000ULL);
+  pt_term_core_selection_drag(core, 84.0, 20.0);
+  pt_term_core_reset(core);
+  pt_term_core_write(core, "AFTER-RESET\n", -1);
+  g_assert_true(wait_for_text(core, "AFTER-RESET"));
+  pt_term_core_selection_drag(core, 100.0, 20.0);
+  g_assert_null(pt_term_core_selection_text(core));
+
+  pt_term_core_free(core);
+}
+
+static void on_osc_count_cb(PtTermCore *core, int code, const char *payload,
+                            gsize len, gpointer user) {
+  (void)core; (void)len;
+  Ctx *ctx = user;
+  if (code != 9) return;
+  ctx->osc_count++;
+  ctx->osc_code = code;
+  g_strlcpy(ctx->osc_payload, payload, sizeof(ctx->osc_payload));
+}
+
+static void test_reset_clears_osc_scanner(void) {
+  /* A program that died mid-OSC leaves pt's scanner parked in its payload
+     state with everything since buffered. Plain `cat` (not `cat -v`) so the
+     escape bytes come back raw and the scanner really sees them. */
+  Ctx ctx = {0};
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .osc = on_osc_count_cb };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  /* ARMED rides in the same write, so seeing it in the grid means the
+     unterminated OSC behind it has been through the scanner too. */
+  pt_term_core_write(core, "ARMED\033]9;stale-payload", -1);
+  g_assert_true(wait_for_text(core, "ARMED"));
+  g_assert_cmpint(ctx.osc_count, ==, 0);          /* never terminated */
+
+  pt_term_core_reset(core);
+
+  /* The terminator the dead program never sent. With the buffer still there
+     this would dispatch "stale-payloadand-more"; with it cleared the scanner
+     is in ground and these are ordinary bytes. */
+  pt_term_core_write(core, "and-more\007PROBE1\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE1"));
+  g_assert_cmpint(ctx.osc_count, ==, 0);
+
+  /* And the scanner still works: a whole unrelated OSC after the reset
+     dispatches on its own terms. */
+  pt_term_core_write(core, "\033]9;fresh-payload\007PROBE2\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE2"));
+  g_assert_cmpint(ctx.osc_count, ==, 1);
+  g_assert_cmpstr(ctx.osc_payload, ==, "fresh-payload");
+
+  pt_term_core_free(core);
+}
+
 static void on_osc_cb(PtTermCore *core, int code, const char *payload,
                       gsize len, gpointer user) {
   (void)core; (void)len;
@@ -1227,6 +1394,12 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/alt-screen-tracking-wheel",
                   test_alt_screen_tracking_wheel);
   g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
+  g_test_add_func("/termcore/reset-mouse-tracking",
+                  test_reset_clears_mouse_tracking);
+  g_test_add_func("/termcore/reset-grid", test_reset_clears_grid_and_scrollback);
+  g_test_add_func("/termcore/reset-keeps-child", test_reset_keeps_the_child);
+  g_test_add_func("/termcore/reset-selection", test_reset_clears_selection);
+  g_test_add_func("/termcore/reset-osc-scanner", test_reset_clears_osc_scanner);
   g_test_add_func("/termcore/osc-callback", test_osc_reaches_callback);
   g_test_add_func("/termcore/osc-unregister", test_osc_consumer_can_unregister);
   g_test_add_func("/termcore/osc52-decode", test_osc52_decode);

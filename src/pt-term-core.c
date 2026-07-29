@@ -1043,6 +1043,58 @@ gboolean pt_term_core_paste_is_safe(const char *text, gssize len) {
   return ghostty_paste_is_safe(text, n);
 }
 
+/* ---- full reset ---- */
+
+/* ghostty's `reset` binding action, which is one call to fullReset() and
+ * nothing else (Surface.zig:5129-5133): no pty write, no signal, no
+ * confirmation, and nothing at all to the child. ghostty_terminal_reset() is
+ * that same call (terminal/c/terminal.zig:524-527) — the three extras on
+ * ghostty's RIS-from-stream path (stream_handler.zig:947-958) belong to the
+ * escape sequence, not to the action, so they are not here either.
+ *
+ * The library puts the modes, both screens, the scrollback, the tabstops, the
+ * scrolling region, the title and its own selection back to defaults, and snaps
+ * the viewport to the active area on the way (PageList.zig:760), so there is no
+ * scroll-to-bottom to do afterwards. Dimensions and colors survive.
+ *
+ * The rest of this is pt state that mirrors what the library just threw away.
+ * Ghostty leaves its equivalents (Surface.mouse.*) stale across a reset; pt
+ * does not, because the reason to reach for this command is a program that died
+ * mid-sequence and left something held down. */
+void pt_term_core_reset(PtTermCore *c) {
+  /* Before the library reset, not after: the terminal-side clear has to happen
+   * while the selection it names still exists, and selection_clear early-outs
+   * on the flag, so doing it the other way round would leave the mirror lying. */
+  pt_term_core_selection_clear(c);
+  c->sel_dragging = FALSE;      /* a reset mid-drag ends the drag */
+  c->sel_moved = FALSE;
+  c->click_count = 0;
+  c->last_press_ns = 0;         /* the next press starts a fresh click run */
+
+  ghostty_terminal_reset(c->terminal);
+
+  /* No ghostty precedent — it does not reset its VT parser either — but it has
+   * no scanner of its own to reset. pt's runs beside the library parser and can
+   * be parked mid-payload with up to a megabyte buffered, which is exactly the
+   * wedge this command exists to clear. */
+  pt_osc_scan_clear(&c->osc);
+
+  /* The encoder's protocol options are re-synced per event (mouse_encoder_sync)
+   * but its motion dedupe — the last cell it reported — is not; this is the
+   * only call that clears it. */
+  ghostty_mouse_encoder_reset(c->mouse_encoder);
+  c->buttons_down = 0;          /* nothing is held after a reset */
+
+  /* fullReset() puts the modes back to their defaults, so the edges polled off
+   * the pty read are stale. They would self-correct on the next read; clearing
+   * them means the state is never briefly wrong, and re-arms the enable-time
+   * report for an app that turns either mode on again. */
+  c->was_focus_event = FALSE;
+  c->was_in_band_resize = FALSE;
+
+  if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
+}
+
 void pt_term_core_sync(PtTermCore *c) {
   ghostty_render_state_update(c->render_state, c->terminal);
 }
