@@ -102,6 +102,17 @@ Dragging is off while the search box has text in it: the filtered list is not
 the list you would be reordering, so a drop there would move a project
 somewhere you never pointed at.
 
+## Scrolling back
+
+The wheel moves the view through a pane's history. While it moves, a thin bar
+on the right edge says where you are and how much there is — the shorter the
+thumb, the more history behind it. It fades out a moment after you stop, so an
+idle pane is just the pane. Typing snaps the view back to the prompt.
+
+There is no bar when there is nothing above the screen, and none inside a
+full-screen app such as `less` or `nvim`: that app owns the pane and keeps no
+history of its own. Quitting it brings both back.
+
 ## Selecting and copying text
 
 Left-click and drag selects. Double-click selects a word, triple-click selects
