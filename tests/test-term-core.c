@@ -1643,7 +1643,154 @@ static void test_scrollbar_read_is_cached(void) {
   g_assert_true(pt_term_core_scrollbar(core, NULL, NULL, NULL));
   g_assert_true(pt_term_core_scrollbar(core, NULL, NULL, NULL));
   g_assert_cmpuint(pt_term_core_scrollbar_reads(core), ==, reads + 2);
+  pt_term_core_free(core);
+}
 
+/* ---- cursor shape and blink (DECSCUSR, mode 12) ----
+ *
+ * An escape sequence only means anything on its way *out* of the child, so
+ * these drive a bare `cat` with the line discipline out of the way: what the
+ * test writes to the pty, cat reads and writes straight back, and it arrives
+ * at pt's parser exactly as if the program had printed it. `-echo` stops the
+ * tty echoing it a second time and `-icanon` stops it being held until a
+ * newline, which an escape sequence never sends.
+ *
+ * The getters answer as of the last sync, so every predicate syncs first. */
+static GhosttyRenderStateCursorVisualStyle want_style;
+static gboolean want_blinking;
+
+static gboolean style_is_wanted(PtTermCore *c) {
+  pt_term_core_sync(c);
+  return pt_term_core_cursor_style(c) == want_style;
+}
+
+static gboolean blinking_is_wanted(PtTermCore *c) {
+  pt_term_core_sync(c);
+  return pt_term_core_cursor_blinking(c) == want_blinking;
+}
+
+static gboolean wide_tail_on(PtTermCore *c) {
+  pt_term_core_sync(c);
+  return pt_term_core_cursor_wide_tail(c);
+}
+
+static gboolean wide_tail_off(PtTermCore *c) {
+  pt_term_core_sync(c);
+  return !pt_term_core_cursor_wide_tail(c);
+}
+
+static PtTermCore *cursor_core_new(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  /* One write, so the tty is settled by the time the marker prints. */
+  g_assert_true(wait_for_text(core, "ready-marker"));
+  return core;
+}
+
+/* Send a sequence through the child and wait for the style to become `style`.
+   Each assertion below is a real transition away from what the last one left,
+   so none of them can pass on a getter that never changes. */
+static void expect_style(PtTermCore *core, const char *seq,
+                         GhosttyRenderStateCursorVisualStyle style) {
+  want_style = style;
+  pt_term_core_write(core, seq, -1);
+  g_assert_true(wait_until(style_is_wanted, core));
+}
+
+static void expect_blinking(PtTermCore *core, const char *seq,
+                            gboolean blinking) {
+  want_blinking = blinking;
+  pt_term_core_write(core, seq, -1);
+  g_assert_true(wait_until(blinking_is_wanted, core));
+}
+
+static void test_cursor_style_defaults(void) {
+  /* What a terminal nobody has configured looks like, which is also what
+     `CSI 0 SP q` has to come back to below. libghostty-vt has no user config
+     to restore, so its DECSCUSR default is a steady block
+     (ghostty src/terminal/stream_terminal.zig:154). */
+  const char *argv[] = {"/bin/cat", NULL};
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  g_assert_nonnull(core);
+  pt_term_core_sync(core);
+  g_assert_cmpint(pt_term_core_cursor_style(core), ==,
+                  GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK);
+  g_assert_false(pt_term_core_cursor_blinking(core));
+  /* Nothing in pt sets password input yet; the renderer handles it anyway. */
+  g_assert_false(pt_term_core_cursor_password_input(core));
+  pt_term_core_free(core);
+}
+
+static void test_cursor_style_decscusr(void) {
+  /* 5 is a bar, 3 an underline, 2 a block — ghostty's numbering, pinned by its
+     own parser tests (src/terminal/stream.zig:2833). */
+  PtTermCore *core = cursor_core_new();
+  expect_style(core, "\033[5 q", GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR);
+  expect_style(core, "\033[3 q",
+               GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE);
+  expect_style(core, "\033[2 q",
+               GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK);
+  pt_term_core_free(core);
+}
+
+static void test_cursor_blink_decscusr(void) {
+  /* The odd numbers blink and the even ones are steady, same shape either
+     way: 5 and 6 are both bars. */
+  PtTermCore *core = cursor_core_new();
+  expect_blinking(core, "\033[5 q", TRUE);
+  expect_blinking(core, "\033[6 q", FALSE);
+  want_style = GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR;
+  g_assert_true(style_is_wanted(core));
+  pt_term_core_free(core);
+}
+
+static void test_cursor_style_reset_to_default(void) {
+  /* `CSI 0 SP q` puts back the default, so an app that asked for a bar and
+     exited cannot leave the next program's cursor looking like an insert
+     caret. Blink goes back with it. */
+  PtTermCore *core = cursor_core_new();
+  expect_style(core, "\033[5 q", GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR);
+  g_assert_true(pt_term_core_cursor_blinking(core));
+  expect_style(core, "\033[0 q",
+               GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK);
+  want_blinking = FALSE;
+  g_assert_true(wait_until(blinking_is_wanted, core));
+  pt_term_core_free(core);
+}
+
+static void test_cursor_blink_mode_12(void) {
+  /* Mode 12 carries the blink on its own, without touching the shape: a shell
+     that only ever sets 12 still gets a blinking cursor. */
+  PtTermCore *core = cursor_core_new();
+  expect_style(core, "\033[3 q",
+               GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE);
+  expect_blinking(core, "\033[?12h", TRUE);
+  want_style = GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE;
+  g_assert_true(style_is_wanted(core));
+  expect_blinking(core, "\033[?12l", FALSE);
+  g_assert_true(style_is_wanted(core));
+  pt_term_core_free(core);
+}
+
+static void test_cursor_wide_tail(void) {
+  /* A wide character owns two cells and the second holds nothing of its own.
+     Parking the cursor there is the case the renderer has to back up one
+     column for, or half a glyph gets a cursor drawn over it. Row 2 keeps this
+     clear of the ready marker on row 1. */
+  PtTermCore *core = cursor_core_new();
+  /* U+6F22 at row 2, columns 1-2; the cursor lands past it, on column 3. */
+  pt_term_core_write(core, "\033[2;1H\xE6\xBC\xA2", -1);
+  g_assert_true(wait_for_text(core, "\xE6\xBC\xA2"));
+  g_assert_true(wait_until(wide_tail_off, core));
+
+  pt_term_core_write(core, "\033[2;2H", -1);   /* onto the tail */
+  g_assert_true(wait_until(wide_tail_on, core));
+
+  pt_term_core_write(core, "\033[2;1H", -1);   /* back onto the head */
+  g_assert_true(wait_until(wide_tail_off, core));
   pt_term_core_free(core);
 }
 
@@ -1722,5 +1869,12 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/paste-unbracketed",
                   test_paste_unbracketed_newline_becomes_cr);
   g_test_add_func("/termcore/paste-is-safe", test_paste_is_safe);
+  g_test_add_func("/termcore/cursor-defaults", test_cursor_style_defaults);
+  g_test_add_func("/termcore/cursor-style-decscusr", test_cursor_style_decscusr);
+  g_test_add_func("/termcore/cursor-blink-decscusr", test_cursor_blink_decscusr);
+  g_test_add_func("/termcore/cursor-style-default-restore",
+                  test_cursor_style_reset_to_default);
+  g_test_add_func("/termcore/cursor-blink-mode-12", test_cursor_blink_mode_12);
+  g_test_add_func("/termcore/cursor-wide-tail", test_cursor_wide_tail);
   return g_test_run();
 }
