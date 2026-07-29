@@ -102,7 +102,16 @@ PtOscNotifyKind pt_osc_notification(int code, const char *payload, gsize len,
  * truncated rather than dropped — a build log line that runs long should still
  * notify. pt truncates on a character boundary where ghostty cuts mid-byte:
  * the text leaves here for a GNotification, i.e. for the session bus, and half
- * a codepoint is not something a D-Bus string may carry. */
+ * a codepoint is not something a D-Bus string may carry.
+ *
+ * That is the cap that cuts. There is a second one further up that does not:
+ * a sequence over PT_OSC_MAX never leaves the scanner at all (see the drop
+ * state above), so a 9K notification body is dropped whole rather than shown
+ * as its first 255 bytes. Ghostty, whose OSC capture grows with an allocator,
+ * would show it. The difference is deliberate and it is the scanner's cap
+ * doing its job: keeping a prefix would mean an unterminated OSC could park
+ * 8K on every pane, and 8K is already thirty times more body than any of it
+ * would survive to display. /oscnotify/scanner-cap pins the boundary. */
 #define PT_NOTIFY_TITLE_MAX  63
 #define PT_NOTIFY_BODY_MAX  255
 

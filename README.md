@@ -195,7 +195,9 @@ raising anything.
 Beyond that, one notification a second, and five seconds before the same text
 can repeat. A program in a loop cannot queue thousands of them at your desktop,
 and it cannot crowd out the one real notification another pane is trying to
-send. Long bodies are cut to fit rather than dropped.
+send. Long bodies are cut to fit rather than dropped, up to a point: past 8K
+the whole sequence is thrown away, because at that size it is not a message
+for a human and pt will not hold on to it to find out.
 
 `\033]9;4;...` is a progress report, not a notification, and does not raise
 one.
