@@ -32,11 +32,14 @@ PtRowList *pt_rowlist_new(GtkBox *host);
  * one; TRUE keeps the rows exactly as they are. NULL means "always rebuild".
  * Either side may be NULL when its count is 0.
  *
- * `items` is handed over: `items_free` runs on it when it is replaced, when the
- * list is disposed, and immediately when `items_equal` said the rows need no
- * rebuild. A refcounted block therefore wants a reference taken before the
- * call. `items_free` NULL borrows instead — then the caller must clear the rows
- * (a set with 0 items) before it frees the block itself. */
+ * `items` is handed over on every call, the block already held included: a
+ * refcounted one therefore wants a fresh reference taken before each call, and
+ * the list gives its own back. `items_free` runs on the outgoing block when it
+ * is replaced (after the rows built from it are gone, so a row may read its item
+ * as it is destroyed), when the list is disposed, and immediately when
+ * `items_equal` said the rows need no rebuild. `items_free` NULL borrows
+ * instead — then the caller must clear the rows (a set with 0 items) before it
+ * frees the block itself. */
 void pt_rowlist_set(PtRowList *rl, gpointer items, guint n_items,
                     GtkWidget *(*build_row)(gpointer item, guint idx,
                                             gpointer u),

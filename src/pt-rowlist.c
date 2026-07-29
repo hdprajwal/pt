@@ -8,7 +8,7 @@ static guint signals[N_SIGNALS];
 
 struct _PtRowList {
   GObject parent_instance;
-  GtkBox *host;            /* not a reference: the host widget owns us */
+  GtkBox *host;            /* weak: the host widget owns us, and clears this */
   gpointer items;          /* the block the rows on screen were built from */
   guint n_items;
   GDestroyNotify items_free;
@@ -57,6 +57,8 @@ void pt_rowlist_set(PtRowList *rl, gpointer items, guint n_items,
                     gpointer u, GDestroyNotify items_free) {
   g_return_if_fail(PT_IS_ROWLIST(rl));
   g_return_if_fail(build_row != NULL);
+  /* No block to index into: build_row would be handed NULL n_items times. */
+  g_return_if_fail(items != NULL || n_items == 0);
   /* The host widget already took its rows down (its dispose ran), so there is
    * nothing to render — but the block was handed over, so drop it. */
   if (rl->host == NULL) {
@@ -74,7 +76,18 @@ void pt_rowlist_set(PtRowList *rl, gpointer items, guint n_items,
     return;
   }
 
-  if (rl->items != items) free_items(rl);
+  /* Adopt the new block, take the old rows down, and only then release the old
+   * block — in that order. A row is free to have kept a pointer into the items
+   * it was built from (an in-flight gesture, a weak-ref teardown), and it reads
+   * that as it goes down, so the block it came from has to outlive it.
+   *
+   * The release is unconditional, the same block handed back included: every
+   * call transfers ownership, so a refcounted array arrives with a fresh
+   * reference and the one held here has to go back or it leaks. Stashing the old
+   * pair first is what makes that case safe — the new reference is already held
+   * by the time the old one is dropped. */
+  gpointer old_items = rl->items;
+  GDestroyNotify old_free = rl->items_free;
   rl->items = items;
   rl->n_items = n_items;
   rl->items_free = items_free;
@@ -83,6 +96,8 @@ void pt_rowlist_set(PtRowList *rl, gpointer items, guint n_items,
   GtkWidget *child;
   while ((child = gtk_widget_get_first_child(GTK_WIDGET(rl->host))) != NULL)
     gtk_box_remove(rl->host, child);
+
+  if (old_items != NULL && old_free != NULL) old_free(old_items);
 
   /* One gesture per row, but only when someone is listening: an inert list
    * (the info panel's files) must not start claiming presses. */
@@ -106,8 +121,18 @@ void pt_rowlist_set(PtRowList *rl, gpointer items, guint n_items,
 /* ---------- GObject ---------- */
 static void pt_rowlist_dispose(GObject *obj) {
   PtRowList *rl = PT_ROWLIST(obj);
+  /* A live host means the list is being dropped first, so take the rows down
+   * here — same ordering as a rebuild, rows before the block they were built
+   * from. A host that is already gone cleared the weak pointer, and its rows
+   * went with it. */
+  if (rl->host != NULL) {
+    GtkWidget *child;
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(rl->host))) != NULL)
+      gtk_box_remove(rl->host, child);
+    g_object_remove_weak_pointer(G_OBJECT(rl->host), (gpointer *)&rl->host);
+    rl->host = NULL;
+  }
   free_items(rl);
-  rl->host = NULL;   /* the host widget takes its own children down */
   G_OBJECT_CLASS(pt_rowlist_parent_class)->dispose(obj);
 }
 
@@ -123,5 +148,10 @@ PtRowList *pt_rowlist_new(GtkBox *host) {
   g_return_val_if_fail(GTK_IS_BOX(host), NULL);
   PtRowList *rl = g_object_new(PT_TYPE_ROWLIST, NULL);
   rl->host = host;
+  /* Weak, not a reference: the host owns the list, so a reference would be a
+   * cycle. It also makes "the host is gone" something the code can actually
+   * see — a set arriving after the host died then renders nothing instead of
+   * reaching into a freed box. */
+  g_object_add_weak_pointer(G_OBJECT(host), (gpointer *)&rl->host);
   return rl;
 }
