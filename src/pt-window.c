@@ -1226,6 +1226,12 @@ static void on_search_escape(PtSidebar *sb, gpointer user) {
   focus_active_terminal(PT_WINDOW(user));
 }
 
+static void action_toggle_sidebar(PtWindow *w) {
+  gtk_widget_set_visible(w->sidebar, !gtk_widget_get_visible(w->sidebar));
+  /* Hiding while the sidebar search holds focus would strand the keyboard. */
+  focus_active_terminal(w);
+}
+
 /* Shared by ⌃I and the tab strip's panel button. */
 static void action_toggle_infopanel(PtWindow *w) {
   gboolean show = !gtk_widget_get_visible(w->infopanel);
@@ -1460,9 +1466,22 @@ static void action_open_settings(PtWindow *w) {
   g_free(tdir);
 }
 
-/* ---------- shortcuts ---------- */
+/* Zoom owns font-size: it pushes the new value into the terminals, into the
+ * session (mark_dirty) and into the config file. delta steps the size (+1/-1);
+ * delta 0 resets to the default. Clamping lives in pt_terminal_set_font_size,
+ * and w->config is read back from the terminal afterwards so all three stay in
+ * step. NULL config = disposed window, same guard convention as
+ * active_project(). */
+static void action_zoom(PtWindow *w, int delta) {
+  if (w->config == NULL) return;
+  pt_terminal_set_font_size(delta == 0 ? PT_CONFIG_FONT_SIZE_DEFAULT
+                                       : pt_terminal_font_size() + delta);
+  mark_dirty(w);
+  w->config->font_size = pt_terminal_font_size();
+  config_save_soon(w);
+}
 
-typedef struct { PtWindow *w; int arg; } ShortcutCtx;
+/* ---------- shortcuts ---------- */
 
 /* The shortcut controller below runs in the CAPTURE phase on the window, so it
  * sees every accelerator before the palette's own key controller does. Letting
@@ -1483,25 +1502,6 @@ static gboolean palette_blocks(PtWindow *w) {
   return FALSE;
 }
 
-static gboolean sc_project(GtkWidget *widget, GVariant *args, gpointer user) {
-  (void)widget; (void)args;
-  ShortcutCtx *c = user;
-  if (palette_blocks(c->w)) return FALSE;
-  action_switch_project(c->w, c->arg);
-  return TRUE;
-}
-static gboolean sc_tab(GtkWidget *widget, GVariant *args, gpointer user) {
-  (void)widget; (void)args;
-  ShortcutCtx *c = user;
-  if (palette_blocks(c->w)) return FALSE;
-  action_switch_tab(c->w, c->arg);
-  return TRUE;
-}
-static gboolean sc_new_tab(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_new_tab(PT_WINDOW(u)); return TRUE;
-}
 /* Two accelerators stay live, each a toggle for its own overlay. Both test
  * their own widget first — otherwise palette_blocks(), which now covers the
  * other overlay too, would eat the toggle — and only then defer to whatever
@@ -1532,117 +1532,135 @@ static gboolean sc_settings(GtkWidget *wg, GVariant *a, gpointer u) {
   action_open_settings(w);
   return TRUE;
 }
-static gboolean sc_add_project(GtkWidget *wg, GVariant *a, gpointer u) {
+/* Every other accelerator is one row in the table below and goes through one
+ * callback: the blocking rule is the same for all of them, so it is written
+ * once, and the row says which action to run and with what argument. */
+typedef enum {
+  PT_ACTION_SWITCH_PROJECT,
+  PT_ACTION_SWITCH_TAB,
+  PT_ACTION_NEW_TAB,
+  PT_ACTION_ADD_PROJECT,
+  PT_ACTION_TOGGLE_SIDEBAR,
+  PT_ACTION_TOGGLE_INFOPANEL,
+  PT_ACTION_NEXT_TAB,
+  PT_ACTION_PREV_TAB,
+  PT_ACTION_SPLIT,
+  PT_ACTION_CLOSE_PANE,
+  PT_ACTION_FOCUS_NEXT,
+  PT_ACTION_FOCUS_PREV,
+  PT_ACTION_FOCUS_DIRECTION,
+  PT_ACTION_PASTE,
+  PT_ACTION_COPY,
+  PT_ACTION_ZOOM,
+} PtActionId;
+
+/* accel spells the trigger; a row with no accel binds keyval + mods raw
+ * instead, for ISO_Left_Tab, which some setups deliver for Shift+Tab and which
+ * does not always round-trip through parse_string. arg is the action's
+ * argument: project/tab index, PtSplitKind, PtPaneDirection, zoom delta. */
+static const struct {
+  const char *accel;
+  guint keyval;
+  GdkModifierType mods;
+  PtActionId id;
+  int arg;
+} shortcuts[] = {
+  { .accel = "<Control>1", .id = PT_ACTION_SWITCH_PROJECT, .arg = 0 },
+  { .accel = "<Control>2", .id = PT_ACTION_SWITCH_PROJECT, .arg = 1 },
+  { .accel = "<Control>3", .id = PT_ACTION_SWITCH_PROJECT, .arg = 2 },
+  { .accel = "<Control>4", .id = PT_ACTION_SWITCH_PROJECT, .arg = 3 },
+  { .accel = "<Control>5", .id = PT_ACTION_SWITCH_PROJECT, .arg = 4 },
+  { .accel = "<Control>6", .id = PT_ACTION_SWITCH_PROJECT, .arg = 5 },
+  { .accel = "<Control>7", .id = PT_ACTION_SWITCH_PROJECT, .arg = 6 },
+  { .accel = "<Control>8", .id = PT_ACTION_SWITCH_PROJECT, .arg = 7 },
+  { .accel = "<Control>9", .id = PT_ACTION_SWITCH_PROJECT, .arg = 8 },
+  { .accel = "<Alt>1", .id = PT_ACTION_SWITCH_TAB, .arg = 0 },
+  { .accel = "<Alt>2", .id = PT_ACTION_SWITCH_TAB, .arg = 1 },
+  { .accel = "<Alt>3", .id = PT_ACTION_SWITCH_TAB, .arg = 2 },
+  { .accel = "<Alt>4", .id = PT_ACTION_SWITCH_TAB, .arg = 3 },
+  { .accel = "<Alt>5", .id = PT_ACTION_SWITCH_TAB, .arg = 4 },
+  { .accel = "<Alt>6", .id = PT_ACTION_SWITCH_TAB, .arg = 5 },
+  { .accel = "<Alt>7", .id = PT_ACTION_SWITCH_TAB, .arg = 6 },
+  { .accel = "<Alt>8", .id = PT_ACTION_SWITCH_TAB, .arg = 7 },
+  { .accel = "<Alt>9", .id = PT_ACTION_SWITCH_TAB, .arg = 8 },
+  { .accel = "<Control>n", .id = PT_ACTION_ADD_PROJECT },
+  { .accel = "<Control>b", .id = PT_ACTION_TOGGLE_SIDEBAR },
+  /* ⌃I costs the terminal its Ctrl+I (which a shell reads as Tab): this
+   * window-level controller runs in the CAPTURE phase and takes it first. That
+   * is the requested binding. */
+  { .accel = "<Control>i", .id = PT_ACTION_TOGGLE_INFOPANEL },
+  { .accel = "<Control>t", .id = PT_ACTION_NEW_TAB },
+  { .accel = "<Control><Shift>t", .id = PT_ACTION_NEW_TAB },
+  { .accel = "<Control>Tab", .id = PT_ACTION_NEXT_TAB },
+  { .accel = "<Control><Shift>Tab", .id = PT_ACTION_PREV_TAB },
+  { .keyval = GDK_KEY_ISO_Left_Tab, .mods = GDK_CONTROL_MASK,
+    .id = PT_ACTION_PREV_TAB },
+  /* ⌥⇥ / ⌥⇧⇥ cycle tabs when the compositor does not claim them first; ⌃⇥
+   * stays the reliable fallback. No grab is attempted. */
+  { .accel = "<Alt>Tab", .id = PT_ACTION_NEXT_TAB },
+  { .accel = "<Alt><Shift>Tab", .id = PT_ACTION_PREV_TAB },
+  { .keyval = GDK_KEY_ISO_Left_Tab, .mods = GDK_ALT_MASK,
+    .id = PT_ACTION_PREV_TAB },
+  { .accel = "<Control><Shift>d", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_H },
+  { .accel = "<Control><Shift>s", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_V },
+  { .accel = "<Control><Shift>w", .id = PT_ACTION_CLOSE_PANE },
+  { .accel = "<Control><Shift>o", .id = PT_ACTION_FOCUS_NEXT },
+  /* Ghostty parity: Ctrl+Super+] / [ cycle next / previous pane. */
+  { .accel = "<Control><Super>bracketright", .id = PT_ACTION_FOCUS_NEXT },
+  { .accel = "<Control><Super>bracketleft", .id = PT_ACTION_FOCUS_PREV },
+  { .accel = "<Control><Alt>Left", .id = PT_ACTION_FOCUS_DIRECTION,
+    .arg = PT_PANE_DIR_LEFT },
+  { .accel = "<Control><Alt>Right", .id = PT_ACTION_FOCUS_DIRECTION,
+    .arg = PT_PANE_DIR_RIGHT },
+  { .accel = "<Control><Alt>Up", .id = PT_ACTION_FOCUS_DIRECTION,
+    .arg = PT_PANE_DIR_UP },
+  { .accel = "<Control><Alt>Down", .id = PT_ACTION_FOCUS_DIRECTION,
+    .arg = PT_PANE_DIR_DOWN },
+  { .accel = "<Control><Shift>v", .id = PT_ACTION_PASTE },
+  { .accel = "<Control><Shift>c", .id = PT_ACTION_COPY },
+  /* Font zoom: cover =, shifted + (both plain and explicit-shift forms),
+   * and the keypad. */
+  { .accel = "<Control>equal", .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control>plus", .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control><Shift>plus", .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control>KP_Add", .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control>minus", .id = PT_ACTION_ZOOM, .arg = -1 },
+  { .accel = "<Control>underscore", .id = PT_ACTION_ZOOM, .arg = -1 },
+  { .accel = "<Control>KP_Subtract", .id = PT_ACTION_ZOOM, .arg = -1 },
+  { .accel = "<Control>0", .id = PT_ACTION_ZOOM, .arg = 0 },
+};
+
+/* What a table row's callback carries: the window (the only per-instance part)
+ * plus the row's action. One array of these per window, not one heap block per
+ * accelerator. */
+typedef struct { PtWindow *w; PtActionId id; int arg; } ShortcutCtx;
+
+static gboolean shortcut_dispatch(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_add_project(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_toggle_sidebar(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
+  const ShortcutCtx *c = u;
+  PtWindow *w = c->w;
   if (palette_blocks(w)) return FALSE;
-  gtk_widget_set_visible(w->sidebar, !gtk_widget_get_visible(w->sidebar));
-  /* Hiding while the sidebar search holds focus would strand the keyboard. */
-  focus_active_terminal(w);
+  switch (c->id) {
+    case PT_ACTION_SWITCH_PROJECT:   action_switch_project(w, c->arg); break;
+    case PT_ACTION_SWITCH_TAB:       action_switch_tab(w, c->arg); break;
+    case PT_ACTION_NEW_TAB:          action_new_tab(w); break;
+    case PT_ACTION_ADD_PROJECT:      action_add_project(w); break;
+    case PT_ACTION_TOGGLE_SIDEBAR:   action_toggle_sidebar(w); break;
+    case PT_ACTION_TOGGLE_INFOPANEL: action_toggle_infopanel(w); break;
+    case PT_ACTION_NEXT_TAB:         action_next_tab(w); break;
+    case PT_ACTION_PREV_TAB:         action_prev_tab(w); break;
+    case PT_ACTION_SPLIT:            action_split(w, (PtSplitKind)c->arg); break;
+    case PT_ACTION_CLOSE_PANE:       action_close_pane(w); break;
+    case PT_ACTION_FOCUS_NEXT:       action_focus_next(w); break;
+    case PT_ACTION_FOCUS_PREV:       action_focus_prev(w); break;
+    case PT_ACTION_FOCUS_DIRECTION:
+      action_focus_direction(w, (PtPaneDirection)c->arg);
+      break;
+    case PT_ACTION_PASTE:            action_paste(w); break;
+    case PT_ACTION_COPY:             action_copy(w); break;
+    case PT_ACTION_ZOOM:             action_zoom(w, c->arg); break;
+  }
   return TRUE;
-}
-/* ⌃I costs the terminal its Ctrl+I (which a shell reads as Tab): this
- * window-level controller runs in the CAPTURE phase and takes it first. That
- * is the requested binding. */
-static gboolean sc_toggle_infopanel(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) return FALSE;
-  action_toggle_infopanel(w);
-  return TRUE;
-}
-static gboolean sc_next_tab(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_next_tab(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_prev_tab(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_prev_tab(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_split_h(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_split(PT_WINDOW(u), PT_SPLIT_H); return TRUE;
-}
-static gboolean sc_split_v(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_split(PT_WINDOW(u), PT_SPLIT_V); return TRUE;
-}
-static gboolean sc_close_pane(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_close_pane(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_focus_next(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_focus_next(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_paste(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_paste(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_copy(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_copy(PT_WINDOW(u)); return TRUE;
-}
-/* The three zoom handlers own font-size: they push it into the terminals, into
- * the session (mark_dirty) and into the config file. NULL config = disposed
- * window, same guard convention as active_project(). */
-static gboolean sc_zoom_in(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) return FALSE;
-  if (w->config == NULL) return TRUE;
-  pt_terminal_set_font_size(pt_terminal_font_size() + 1);
-  mark_dirty(w);
-  w->config->font_size = pt_terminal_font_size();
-  config_save_soon(w);
-  return TRUE;
-}
-static gboolean sc_zoom_out(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) return FALSE;
-  if (w->config == NULL) return TRUE;
-  pt_terminal_set_font_size(pt_terminal_font_size() - 1);
-  mark_dirty(w);
-  w->config->font_size = pt_terminal_font_size();
-  config_save_soon(w);
-  return TRUE;
-}
-static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) return FALSE;
-  if (w->config == NULL) return TRUE;
-  pt_terminal_set_font_size(PT_CONFIG_FONT_SIZE_DEFAULT);
-  mark_dirty(w);
-  w->config->font_size = pt_terminal_font_size();
-  config_save_soon(w);
-  return TRUE;
-}
-static gboolean sc_focus_dir(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  ShortcutCtx *c = u;
-  if (palette_blocks(c->w)) return FALSE;
-  action_focus_direction(c->w, (PtPaneDirection)c->arg);
-  return TRUE;
-}
-static gboolean sc_focus_prev(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_focus_prev(PT_WINDOW(u)); return TRUE;
 }
 
 static void add_shortcut(GtkShortcutController *ctl, const char *accel,
@@ -1669,66 +1687,22 @@ static void install_shortcuts(PtWindow *w) {
       GTK_SHORTCUT_CONTROLLER(gtk_shortcut_controller_new());
   gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(ctl),
                                              GTK_PHASE_CAPTURE);
-  for (int i = 0; i < 9; i++) {
-    ShortcutCtx *pc = g_new(ShortcutCtx, 1);
-    pc->w = w; pc->arg = i;
-    char accel[32];
-    g_snprintf(accel, sizeof(accel), "<Control>%d", i + 1);
-    add_shortcut(ctl, accel, sc_project, pc, g_free);
-    ShortcutCtx *tc = g_new(ShortcutCtx, 1);
-    tc->w = w; tc->arg = i;
-    g_snprintf(accel, sizeof(accel), "<Alt>%d", i + 1);
-    add_shortcut(ctl, accel, sc_tab, tc, g_free);
-  }
   add_shortcut(ctl, "<Control>k", sc_palette, w, NULL);
   add_shortcut(ctl, "<Control>comma", sc_settings, w, NULL);
-  add_shortcut(ctl, "<Control>n", sc_add_project, w, NULL);
-  add_shortcut(ctl, "<Control>b", sc_toggle_sidebar, w, NULL);
-  add_shortcut(ctl, "<Control>i", sc_toggle_infopanel, w, NULL);
-  add_shortcut(ctl, "<Control>t", sc_new_tab, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>t", sc_new_tab, w, NULL);
-  add_shortcut(ctl, "<Control>Tab", sc_next_tab, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>Tab", sc_prev_tab, w, NULL);
-  add_keyval_shortcut(ctl, GDK_KEY_ISO_Left_Tab, GDK_CONTROL_MASK,
-                      sc_prev_tab, w, NULL);
-  /* ⌥⇥ / ⌥⇧⇥ cycle tabs when the compositor does not claim them first; ⌃⇥
-   * stays the reliable fallback. No grab is attempted. */
-  add_shortcut(ctl, "<Alt>Tab", sc_next_tab, w, NULL);
-  add_shortcut(ctl, "<Alt><Shift>Tab", sc_prev_tab, w, NULL);
-  add_keyval_shortcut(ctl, GDK_KEY_ISO_Left_Tab, GDK_ALT_MASK,
-                      sc_prev_tab, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>d", sc_split_h, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>s", sc_split_v, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>w", sc_close_pane, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>o", sc_focus_next, w, NULL);
-  /* Ghostty parity: Ctrl+Super+] / [ cycle next / previous pane. */
-  add_shortcut(ctl, "<Control><Super>bracketright", sc_focus_next, w, NULL);
-  add_shortcut(ctl, "<Control><Super>bracketleft", sc_focus_prev, w, NULL);
-  {
-    static const struct { const char *accel; PtPaneDirection dir; } dirs[] = {
-      { "<Control><Alt>Left",  PT_PANE_DIR_LEFT  },
-      { "<Control><Alt>Right", PT_PANE_DIR_RIGHT },
-      { "<Control><Alt>Up",    PT_PANE_DIR_UP    },
-      { "<Control><Alt>Down",  PT_PANE_DIR_DOWN  },
-    };
-    for (gsize i = 0; i < G_N_ELEMENTS(dirs); i++) {
-      ShortcutCtx *dc = g_new(ShortcutCtx, 1);
-      dc->w = w; dc->arg = (int)dirs[i].dir;
-      add_shortcut(ctl, dirs[i].accel, sc_focus_dir, dc, g_free);
-    }
+  /* One allocation for the whole table, owned by the window: the rows are
+   * static, so the only thing a callback needs on top of its row is w. */
+  ShortcutCtx *ctxs = g_new(ShortcutCtx, G_N_ELEMENTS(shortcuts));
+  g_object_set_data_full(G_OBJECT(w), "pt-shortcut-ctxs", ctxs, g_free);
+  for (gsize i = 0; i < G_N_ELEMENTS(shortcuts); i++) {
+    ctxs[i].w = w;
+    ctxs[i].id = shortcuts[i].id;
+    ctxs[i].arg = shortcuts[i].arg;
+    if (shortcuts[i].accel != NULL)
+      add_shortcut(ctl, shortcuts[i].accel, shortcut_dispatch, &ctxs[i], NULL);
+    else
+      add_keyval_shortcut(ctl, shortcuts[i].keyval, shortcuts[i].mods,
+                          shortcut_dispatch, &ctxs[i], NULL);
   }
-  add_shortcut(ctl, "<Control><Shift>v", sc_paste, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>c", sc_copy, w, NULL);
-  /* Font zoom: cover =, shifted + (both plain and explicit-shift forms),
-   * and the keypad. */
-  add_shortcut(ctl, "<Control>equal", sc_zoom_in, w, NULL);
-  add_shortcut(ctl, "<Control>plus", sc_zoom_in, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>plus", sc_zoom_in, w, NULL);
-  add_shortcut(ctl, "<Control>KP_Add", sc_zoom_in, w, NULL);
-  add_shortcut(ctl, "<Control>minus", sc_zoom_out, w, NULL);
-  add_shortcut(ctl, "<Control>underscore", sc_zoom_out, w, NULL);
-  add_shortcut(ctl, "<Control>KP_Subtract", sc_zoom_out, w, NULL);
-  add_shortcut(ctl, "<Control>0", sc_zoom_reset, w, NULL);
   gtk_widget_add_controller(GTK_WIDGET(w), GTK_EVENT_CONTROLLER(ctl));
 }
 
