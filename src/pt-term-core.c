@@ -405,14 +405,26 @@ static void on_child_exited(GPid pid, gint wait_status, gpointer ud) {
 
 /* ---- modes a program turning on has to be answered for ----
  *
- * Ghostty reports the current focus state the instant its parser sees
- * CSI ? 1004 h (stream_handler.zig:754-756), so an editor that starts up in an
- * already-focused pane learns it is focused without the user clicking away and
- * back. libghostty-vt's C API has no mode-change callback (terminal.h exposes
- * modes through ghostty_terminal_mode_get only), so pt watches the mode for a
- * 0->1 edge once per read batch instead and reports on it. Same observable
- * behaviour, one read of a bitfield per batch of pty bytes. Mode 2048 wants
- * the same answer for the same reason, so it shares the poll below. */
+ * Ghostty answers the instant its parser sees the enable: CSI ? 1004 h resends
+ * the current focus state (stream_handler.zig:754-756), CSI ? 2048 h sends a
+ * size report (:750). An editor starting up in an already-focused pane, or one
+ * that wants its size before the first redraw, is told straight away instead of
+ * waiting for the user to click away and back or drag the window.
+ *
+ * libghostty-vt hands pt no such hook: terminal.h exposes modes through
+ * ghostty_terminal_mode_get only, and the 2048 change is an explicit no-op
+ * (stream_terminal.zig:507-511). So pt compares each mode against its value at
+ * the end of the previous read and answers a 0->1 edge.
+ *
+ * That is a weaker rule than ghostty's, not the same behaviour, and in two ways
+ * worth naming. An app enabling a mode that is already on gets no answer — the
+ * case being an app killed hard enough that it never sent the disable, so the
+ * next one to start finds the mode still set. And an enable sharing a read with
+ * a matching disable nets out to no edge, so it is missed too. Either way the
+ * app waits for the next real focus change or resize, which is where it would
+ * have been with no reporting at all. Catching both means scanning the pty
+ * bytes for the sequences, i.e. a second parser for pt to own; the poll is one
+ * bitfield read per batch. If this ever bites, that is the trade to revisit. */
 
 /* An unsolicited mode-2048 report for the size the pane has right now.
  *
@@ -429,7 +441,7 @@ static void send_size_report(PtTermCore *c) {
   GhosttySizeReportSize size = { .rows = c->rows, .columns = c->cols,
                                  .cell_width = (uint32_t)c->cell_w,
                                  .cell_height = (uint32_t)c->cell_h };
-  char buf[64];   /* 50 bytes is the widest mode-2048 report there can be */
+  char buf[64];   /* 49 bytes is the widest mode-2048 report there can be */
   size_t written = 0;
   if (ghostty_size_report_encode(GHOSTTY_SIZE_REPORT_MODE_2048, size, buf,
                                  sizeof(buf), &written) != GHOSTTY_SUCCESS ||
@@ -447,11 +459,6 @@ static void poll_mode_edges(PtTermCore *c) {
     pt_term_core_focus_report(c, c->focused, TRUE);
   c->was_focus_event = focus_event;
 
-  /* Mode 2048 is the same story: ghostty answers CSI ? 2048 h with a size
-   * report on the spot (stream_handler.zig:750), so an app that enables it
-   * while starting up can lay itself out without waiting for a window drag.
-   * libghostty-vt makes the mode change an explicit no-op instead
-   * (stream_terminal.zig:507-511), so the edge is pt's to catch. */
   bool in_band_resize = false;
   ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_IN_BAND_RESIZE,
                             &in_band_resize);
