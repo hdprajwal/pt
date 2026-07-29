@@ -94,6 +94,18 @@ static void test_shell_name(void) {
   g_assert_no_error(err);
   g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
   pt_term_core_free(core);   /* kills+reaps the interactive shell */
+
+  /* A SHELL override in env_pairs reaches the child's environment before the
+   * shell is resolved, so it decides what gets exec'd — and the cached name
+   * must follow the override, not the parent's own $SHELL (here a decoy that
+   * would betray a parent-environment resolution as "fakesh"). */
+  g_setenv("SHELL", "/bin/fakesh", TRUE);
+  const char *envp[] = { "SHELL=/bin/sh", NULL };
+  core = pt_term_core_new("/tmp", NULL, envp, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
+  pt_term_core_free(core);
+
   if (old != NULL) g_setenv("SHELL", old, TRUE);
   else g_unsetenv("SHELL");
   g_free(old);

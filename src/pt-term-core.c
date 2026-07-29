@@ -725,21 +725,26 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
 }
 
 /* ---- spawn ---- */
-/* The shell a NULL-argv spawn execs: $SHELL, then the passwd entry, then
- * /bin/sh. Called on both sides of the fork — the answer is pure fork-inherited
- * state (env, uid), so parent and child always agree, which is what lets the
- * parent cache the shell's name without reading /proc/<child>/comm (a read
- * that races the child's exec and can see the parent's own comm). */
-static const char *default_shell(void) {
+/* The shell a NULL-argv spawn execs, as the *child* will see it: the inherited
+ * $SHELL with any env_pairs "SHELL=" override applied on top (last one wins,
+ * exactly like the child's putenv sequence), then the passwd entry, then
+ * /bin/sh. Resolved once, pre-fork, and handed to both consumers — the child's
+ * exec and the parent's shell-name cache — so the two cannot disagree, and
+ * nothing is ever read back from /proc/<child>/comm (a read that races the
+ * child's exec and can see the parent's own comm). */
+static const char *resolve_shell(char *const *env_pairs) {
   const char *shell = getenv("SHELL");
+  for (int i = 0; env_pairs != NULL && env_pairs[i] != NULL; i++)
+    if (strncmp(env_pairs[i], "SHELL=", 6) == 0) shell = env_pairs[i] + 6;
   if (shell != NULL && shell[0] != '\0') return shell;
   struct passwd *pw = getpwuid(getuid());
   return (pw != NULL && pw->pw_shell != NULL && pw->pw_shell[0] != '\0')
              ? pw->pw_shell : "/bin/sh";
 }
 
+/* `shell` is resolve_shell()'s answer and is consumed iff argv == NULL. */
 static int spawn_pty(const char *cwd, const char *const *argv,
-                     char *const *env_pairs,
+                     const char *shell, char *const *env_pairs,
                      guint16 cols, guint16 rows, int cell_w, int cell_h,
                      pid_t *child_out) {
   struct winsize ws = {
@@ -747,6 +752,14 @@ static int spawn_pty(const char *cwd, const char *const *argv,
     .ws_xpixel = (unsigned short)(cols * cell_w),
     .ws_ypixel = (unsigned short)(rows * cell_h),
   };
+  /* Everything the child touches between fork and exec is computed here,
+   * before the fork: getenv/getpwuid/allocation are not async-signal-safe,
+   * so the child branch only follows precomputed pointers. */
+  const char *shell_argv0 = NULL;
+  if (shell != NULL) {
+    shell_argv0 = strrchr(shell, '/');
+    shell_argv0 = shell_argv0 != NULL ? shell_argv0 + 1 : shell;
+  }
   int fd;
   pid_t child = forkpty(&fd, NULL, NULL, &ws);
   if (child < 0) return -1;
@@ -761,10 +774,7 @@ static int spawn_pty(const char *cwd, const char *const *argv,
     if (argv != NULL) {
       execvp(argv[0], (char *const *)argv);
     } else {
-      const char *shell = default_shell();
-      const char *name = strrchr(shell, '/');
-      name = name != NULL ? name + 1 : shell;
-      execl(shell, name, NULL);
+      execl(shell, shell_argv0, (char *)NULL);
     }
     _exit(127);
   }
@@ -805,8 +815,13 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   ghostty_terminal_resize(c->terminal, cols, rows,
                           (uint32_t)cell_w, (uint32_t)cell_h);
 
-  c->pty_fd = spawn_pty(cwd, argv, c->env_pairs, cols, rows, cell_w, cell_h,
-                        &c->child);
+  /* One resolution, two consumers (the exec below and the cached name after
+   * it); see resolve_shell. Resolved against env_pairs because the child
+   * putenv's them before the old in-child resolution ran, so an env_pairs
+   * SHELL override changes what gets exec'd. */
+  const char *shell = argv == NULL ? resolve_shell(c->env_pairs) : NULL;
+  c->pty_fd = spawn_pty(cwd, argv, shell, c->env_pairs, cols, rows,
+                        cell_w, cell_h, &c->child);
   if (c->pty_fd < 0) {
     g_set_error(error, g_quark_from_static_string("pt-term-core"), 2,
                 "forkpty failed: %s", g_strerror(errno));
@@ -816,11 +831,10 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   /* Conservative until the first poll (at the end of this function) reads the
    * tty: a spawn with a command is running it right now. */
   c->fg_running = TRUE;
-  /* Named from what was spawned, never read back from the child: comm only
-   * settles after the exec, so a /proc read here can race it and cache the
-   * parent's own name instead. default_shell() is what the child's exec branch
-   * resolves, from state the fork copied, so the two cannot disagree. */
-  c->shell_name = g_path_get_basename(argv != NULL ? argv[0] : default_shell());
+  /* Named from the very resolution the exec consumed, never read back from
+   * the child: comm only settles after the exec, so a /proc read here can
+   * race it and cache the parent's own name instead. */
+  c->shell_name = g_path_get_basename(argv != NULL ? argv[0] : shell);
 
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, c);
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
