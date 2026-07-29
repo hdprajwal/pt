@@ -650,7 +650,7 @@ void pt_term_core_set_color_scheme(PtTermCore *c, gboolean dark) {
    * literals inside ghostty (stream_terminal.zig:328-331, pinned by its own
    * tests at :1885 and :1914) — so pt writes them itself. */
   const char *seq = dark ? "\x1b[?997;1n" : "\x1b[?997;2n";
-  pty_write_raw(c->pty_fd, seq, 9);
+  pty_write_raw(c->pty_fd, seq, strlen(seq));
 }
 
 void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
@@ -663,7 +663,16 @@ void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
    * guards further up and on a different quantity — the window's pixel size
    * (Surface.zig:2475) — and so does send duplicate reports when the pixels
    * move but the grid does not; pt's call site makes the stricter guard the
-   * cheaper one. */
+   * cheaper one.
+   *
+   * The other half of the trade: the library can move its own grid behind pt's
+   * back, DECCOLM pinning it at 80 or 132 columns (Terminal.zig:2854-2879)
+   * while pt's cols/rows still say what the pane allocated. Before this guard
+   * the next layout pass called through with unchanged numbers and snapped the
+   * grid back; now it returns early and the mismatch stands until the pane
+   * really changes shape. Ghostty has the identical hole one level up
+   * (Surface.zig:2465-2476), and matching it is the point — pt tracks the
+   * re-sync separately rather than inventing a divergence here. */
   if (cols == c->cols && rows == c->rows &&
       cell_w == c->cell_w && cell_h == c->cell_h)
     return;

@@ -1015,6 +1015,54 @@ static void test_reset_clears_selection(void) {
   pt_term_core_free(core);
 }
 
+static void test_reset_rearms_mode_edges(void) {
+  /* fullReset turns 1004 back off, so the shadow pt polls the mode edge against
+     has to go off with it. Left set, the re-enable below looks like no edge at
+     all and the app that just asked for focus reports is told nothing until the
+     user happens to click away and back. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1004hready'; read x; "
+    "printf '\\033[?1004h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+  /* Returning TRUE only happens with 1004 on, so this is the proof the first
+     enable was parsed — without it the test would pass on a stale shadow that
+     was never set. `read` is swallowing everything written meanwhile. */
+  g_assert_true(pt_term_core_focus_report(core, TRUE, FALSE));
+
+  pt_term_core_reset(core);
+  /* The re-enable, on a grid the reset just wiped: the report below can only be
+     the new one. */
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_for_text(core, "^[[I"));
+  g_assert_cmpint(count_text(core, "^[[I"), ==, 1);
+
+  pt_term_core_free(core);
+}
+
+static void test_reset_keeps_color_scheme(void) {
+  /* The colors pt paints survive a reset — fullReset does not touch them — so
+     the scheme it answers CSI ? 996 n with must survive too. Cleared back to
+     the dark default, the next query would lie about a light theme. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; read x; printf '\\033[?996n'; cat -v",
+    NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  pt_term_core_set_color_scheme(core, FALSE);
+  pt_term_core_reset(core);
+  pt_term_core_write(core, "\n", 1);            /* now the child queries */
+  g_assert_true(wait_for_text(core, REPLY_LIGHT));
+  g_assert_cmpint(count_text(core, REPLY_DARK), ==, 0);
+
+  pt_term_core_free(core);
+}
+
 static void on_osc_count_cb(PtTermCore *core, int code, const char *payload,
                             gsize len, gpointer user) {
   (void)core; (void)len;
@@ -1505,6 +1553,10 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/reset-keeps-child", test_reset_keeps_the_child);
   g_test_add_func("/termcore/reset-selection", test_reset_clears_selection);
   g_test_add_func("/termcore/reset-osc-scanner", test_reset_clears_osc_scanner);
+  g_test_add_func("/termcore/reset-rearms-mode-edges",
+                  test_reset_rearms_mode_edges);
+  g_test_add_func("/termcore/reset-keeps-color-scheme",
+                  test_reset_keeps_color_scheme);
   g_test_add_func("/termcore/osc-callback", test_osc_reaches_callback);
   g_test_add_func("/termcore/osc-unregister", test_osc_consumer_can_unregister);
   g_test_add_func("/termcore/osc52-decode", test_osc52_decode);
