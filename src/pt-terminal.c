@@ -14,6 +14,18 @@
 #define PT_PAD_X 20
 #define PT_PAD_Y 18
 
+/* Overlay scrollbar for the scrollback: a thumb on the right edge with no
+ * gutter behind it, at full strength while the viewport is moving and faded
+ * out once it stops. The width, the inset and the shortest the thumb may get
+ * are the sidebar slider's, so the two read as the same bar (style.css, the
+ * `.pt-sidebar scrollbar slider` rule) — a terminal draws itself rather than
+ * being styled, so the numbers are repeated here rather than shared. */
+#define PT_BAR_W       5
+#define PT_BAR_MARGIN  2
+#define PT_BAR_MIN_H   24
+#define PT_BAR_HOLD_MS 700.0
+#define PT_BAR_FADE_MS 400.0
+
 /* One font size shared by every terminal: zoom is global, not per-pane. Live
  * widgets register here so a size change can re-measure them all. */
 static int font_size_pts = PT_FONT_SIZE_DEFAULT;
@@ -26,6 +38,9 @@ static PtColor th_fg  = {0xd6, 0xda, 0xe0, 1.0};
 static PtColor th_cursor = {0xd6, 0xda, 0xe0, 1.0};
 static PtColor th_sel = {0x26, 0x4f, 0x38, 1.0};
 static PtColor th_ring = {0x2f, 0x4f, 0x3a, 1.0};
+/* The overlay scrollbar's thumb: the chrome's slider token, so the bar over a
+ * pane is the same colour as the one beside the project list. */
+static PtColor th_slider = {0xff, 0xff, 0xff, 0.12};
 static PtColor th_pal[16] = {
   [1]  = {0xf2, 0x77, 0x7a, 1.0}, [2]  = {0x6e, 0xe7, 0xa0, 1.0},
   [3]  = {0xf2, 0xb2, 0x5c, 1.0}, [9]  = {0xf2, 0x77, 0x7a, 1.0},
@@ -87,6 +102,11 @@ struct _PtTerminal {
   PtOsc52Mode osc52;         /* this pane's copy of `osc52` */
   gboolean osc52_asking;     /* a clipboard-write confirmation is up */
   gboolean link_cursor;      /* the hand cursor is up: a link is under the pointer */
+
+  /* overlay scrollbar: when the viewport last moved (monotonic µs, 0 = never
+   * or already faded out) and the tick callback driving the fade, if any. */
+  gint64 bar_at;
+  guint bar_tick;
 };
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
@@ -492,6 +512,46 @@ static void pt_terminal_size_allocate(GtkWidget *widget, int width, int height,
   update_link_cursor(t);
 }
 
+/* ---- overlay scrollbar ----
+ *
+ * How opaque the thumb is right now: solid for PT_BAR_HOLD_MS after the last
+ * time the viewport moved, then out over PT_BAR_FADE_MS. Zero means there is
+ * nothing to draw, which is the resting state of every pane.
+ *
+ * No ghostty precedent for the drawing: its GTK apprt puts the surface inside
+ * a GtkScrolledWindow and lets GTK render the overlay indicator
+ * (apprt/gtk/class/surface.zig:984). pt's terminal is one custom widget that
+ * paints its own frame, so the bar is painted with it and the timing is what
+ * an overlay indicator does — appear on movement, fade when it stops. */
+static double bar_alpha(PtTerminal *t) {
+  if (t->bar_at == 0) return 0.0;
+  double ms = (double)(g_get_monotonic_time() - t->bar_at) / 1000.0;
+  if (ms <= PT_BAR_HOLD_MS) return 1.0;
+  double gone = (ms - PT_BAR_HOLD_MS) / PT_BAR_FADE_MS;
+  return gone >= 1.0 ? 0.0 : 1.0 - gone;
+}
+
+static gboolean bar_fade_tick(GtkWidget *widget, GdkFrameClock *clock,
+                              gpointer user) {
+  (void)clock; (void)user;
+  PtTerminal *t = PT_TERMINAL(widget);
+  gtk_widget_queue_draw(widget);
+  if (bar_alpha(t) > 0.0) return G_SOURCE_CONTINUE;
+  /* Faded out: stop asking for frames until something moves again. */
+  t->bar_at = 0;
+  t->bar_tick = 0;
+  return G_SOURCE_REMOVE;
+}
+
+/* The viewport moved: show the bar and restart the fade. */
+static void bar_reveal(PtTerminal *t) {
+  t->bar_at = g_get_monotonic_time();
+  if (t->bar_tick == 0)
+    t->bar_tick = gtk_widget_add_tick_callback(GTK_WIDGET(t), bar_fade_tick,
+                                               NULL, NULL);
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
 /* ---- rendering ---- */
 static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   PtTerminal *t = PT_TERMINAL(widget);
@@ -706,6 +766,41 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     gtk_snapshot_append_color(snapshot,
         &(GdkRGBA){th_bg.r / 255.0f, th_bg.g / 255.0f, th_bg.b / 255.0f, 0.35f},
         &GRAPHENE_RECT_INIT(0, 0, w, h));
+  }
+
+  /* scrollback scrollbar. Drawn after the scrim rather than before it: the
+   * pointer can scroll a pane that does not have focus, and washing the one
+   * affordance that says where you are toward the background is the wrong way
+   * round. Never on the alternate screen — a full-screen app owns the pane and
+   * keeps no history behind it, which is also what the numbers say (the
+   * library gives the alt screen no scrollback at all, Terminal.zig:2994), so
+   * this is belt and braces rather than a second rule. */
+  double alpha = bar_alpha(t);
+  guint64 sb_total = 0, sb_offset = 0, sb_len = 0;
+  if (alpha > 0.0 && !pt_term_core_alt_screen(t->core) &&
+      pt_term_core_scrollbar(t->core, &sb_total, &sb_offset, &sb_len) &&
+      sb_total > sb_len) {
+    float track_y = PT_BAR_MARGIN;
+    float track_h = (float)h - 2 * PT_BAR_MARGIN;
+    float thumb_h = track_h * (float)sb_len / (float)sb_total;
+    if (thumb_h < PT_BAR_MIN_H) thumb_h = PT_BAR_MIN_H;
+    if (thumb_h > track_h) thumb_h = track_h;
+    /* offset runs 0..total-len, so the thumb runs the length of the track it
+     * does not itself occupy. */
+    float travel = (float)sb_offset / (float)(sb_total - sb_len);
+    if (travel > 1.0f) travel = 1.0f;   /* never past the end of the track */
+    GskRoundedRect rr;
+    gsk_rounded_rect_init_from_rect(&rr,
+        &GRAPHENE_RECT_INIT((float)w - PT_BAR_MARGIN - PT_BAR_W,
+                            track_y + (track_h - thumb_h) * travel,
+                            PT_BAR_W, thumb_h),
+        PT_BAR_W / 2.0f);
+    gtk_snapshot_push_rounded_clip(snapshot, &rr);
+    gtk_snapshot_append_color(snapshot,
+        &(GdkRGBA){ th_slider.r / 255.0f, th_slider.g / 255.0f,
+                    th_slider.b / 255.0f, (float)(th_slider.a * alpha) },
+        &rr.bounds);
+    gtk_snapshot_pop(snapshot);
   }
 
   /* exited banner */
@@ -1052,6 +1147,7 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
   }
 
   pt_term_core_scroll_delta(t->core, rows);
+  bar_reveal(t);            /* the one place the viewport moves by hand */
   return TRUE;
 }
 
@@ -1274,6 +1370,7 @@ void pt_terminal_set_theme(const PtResolvedTheme *rt) {
   th_cursor = rt->term.cursor;
   th_sel = rt->term.selection_bg;
   th_ring = rt->tokens[PT_TOK_FOCUS_RING];
+  th_slider = rt->tokens[PT_TOK_SLIDER];
   th_dark = rt->dark;
   for (int i = 0; i < 16; i++) {
     th_pal[i] = rt->term.palette[i];
@@ -1374,6 +1471,10 @@ gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t) {
 static void pt_terminal_dispose(GObject *obj) {
   PtTerminal *t = PT_TERMINAL(obj);
   live_terminals = g_slist_remove(live_terminals, t);
+  if (t->bar_tick != 0) {
+    gtk_widget_remove_tick_callback(GTK_WIDGET(t), t->bar_tick);
+    t->bar_tick = 0;
+  }
   g_clear_pointer(&t->core, pt_term_core_free);
   g_clear_object(&t->layout);
   g_clear_pointer(&t->font_desc, pango_font_description_free);
