@@ -14,13 +14,15 @@
 #define PT_CONFIG_UI_FONT_FAMILY_DEFAULT "IBM Plex Sans"
 #define PT_CONFIG_THEME_DEFAULT "pt-dark"
 /* Whether apps that ask for the mouse get the pointer: clicks, drags and
- * motion. ghostty ships this ON; pt ships it OFF on purpose, so a plain click
- * and drag selects text out of a full-screen TUI without anyone having to
- * learn a modifier first. Turn it on to get the usual terminal behaviour (and
- * shift to override it per gesture). The wheel is not covered either way: an
- * app that tracks the mouse always gets it, since scrolling selects nothing.
- * See wheel_reports() in pt-terminal.c. */
-#define PT_CONFIG_MOUSE_REPORTING_DEFAULT FALSE
+ * motion. On, as in ghostty and every other terminal. pt shipped it off for a
+ * while so a plain drag selected text out of a full-screen TUI without anyone
+ * having to learn a modifier first, but withholding the pointer also withholds
+ * what the app does with it: Claude Code selects and copies on its own, and
+ * that never started. Shift takes the pointer back for one gesture, which is
+ * the override every other terminal offers. The wheel is not covered either
+ * way: an app that tracks the mouse always gets it, since scrolling selects
+ * nothing. See wheel_reports() in pt-terminal.c. */
+#define PT_CONFIG_MOUSE_REPORTING_DEFAULT TRUE
 
 /* What a program in a pane may do to the system clipboard with OSC 52. The
  * write half is how anything on the far end of an ssh session copies — tmux,
