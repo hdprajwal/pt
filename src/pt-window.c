@@ -31,6 +31,7 @@ typedef struct {
   PtWsId id;            /* this tab in the workspace */
   char *title;
   GtkWidget *grid;      /* PtPaneGrid, owned ref */
+  PtWindow *window;     /* back-pointer; the data the grid handlers carry */
 } PtTabUI;
 
 typedef struct {
@@ -107,7 +108,7 @@ static int proj_accent(const PtProjectUI *p) {
  * its tab (pt-pane-grid's idle holds its own ref), and an unset back-pointer is
  * exactly the "no tab owns this grid any more" answer the close paths want,
  * where a stale one would be a read after free. */
-#define PT_GRID_TAB_KEY "pt-tab"
+#define PT_GRID_TAB_KEY "pt-grid-tab"
 
 static PtTabUI *grid_tab(PtPaneGrid *g) {
   return g != NULL ? g_object_get_data(G_OBJECT(g), PT_GRID_TAB_KEY) : NULL;
@@ -753,6 +754,7 @@ static PtOsc52Mode pane_osc52(PtWindow *w) {
 static PtTabUI *tab_ui_new(PtWindow *w, PtProjectUI *p, const char *title,
                            PtSplitNode *tree) {
   PtTabUI *t = g_new0(PtTabUI, 1);
+  t->window = w;
   t->title = g_strdup(title);
   t->grid = pt_pane_grid_new(tree, pane_mouse_reporting(w), pane_osc52(w));
   g_object_ref_sink(t->grid);
@@ -776,6 +778,11 @@ static void tab_ui_free(gpointer data) {
   PtTabUI *t = data;
   g_free(t->title);
   if (t->grid != NULL) {
+    /* The six handlers above all carry the window, and the grid can outlive
+     * this tab (pt-pane-grid's close idle holds its own ref). Drop them here
+     * or a background shell exiting in the same frame as window close would
+     * emit "emptied" into a finalized window. */
+    g_signal_handlers_disconnect_by_data(t->grid, t->window);
     g_object_set_data(G_OBJECT(t->grid), PT_GRID_TAB_KEY, NULL);
     if (gtk_widget_get_parent(t->grid) != NULL)
       gtk_widget_unparent(t->grid);
@@ -885,8 +892,12 @@ static void sync_git_monitors(PtWindow *w) {
     PtProjectUI *p = pt_workspace_get_data(w->ws, id);
     if (p->monitor == NULL) continue;
     gboolean is_active = id == active;
-    pt_git_monitor_set_want_line_counts(p->monitor, panel && is_active);
-    pt_git_monitor_set_active(p->monitor, is_active);
+    /* One refresh even when both settings move together — the setters only
+     * say a poll is due, they never spawn one themselves. */
+    gboolean due =
+        pt_git_monitor_set_want_line_counts(p->monitor, panel && is_active);
+    if (pt_git_monitor_set_active(p->monitor, is_active)) due = TRUE;
+    if (due) pt_git_monitor_refresh(p->monitor);
   }
 }
 
@@ -1953,7 +1964,11 @@ static gboolean on_close_request(GtkWindow *win, gpointer user) {
 /* ---------- construction ---------- */
 static void pt_window_dispose(GObject *obj) {
   PtWindow *w = PT_WINDOW(obj);
-  if (w->save_source != 0) { g_source_remove(w->save_source); w->save_source = 0; }
+  if (w->save_source != 0) {
+    g_source_remove(w->save_source);
+    w->save_source = 0;
+    do_save(w);   /* a quit that skipped on_close_request still writes it out */
+  }
   if (w->status_source != 0) {
     g_source_remove(w->status_source);
     w->status_source = 0;

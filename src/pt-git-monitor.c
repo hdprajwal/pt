@@ -148,18 +148,21 @@ static void restart_timer(PtGitMonitor *m) {
       m->active ? PT_GIT_POLL_ACTIVE_S : PT_GIT_POLL_INACTIVE_S, on_timer, m);
 }
 
-void pt_git_monitor_set_want_line_counts(PtGitMonitor *m, gboolean want) {
-  if (m == NULL || m->want_line_counts == want) return;
+/* Both setters store and report, they do not poll: a caller that flips both on
+ * the same monitor would otherwise spawn two `git status` runs and throw the
+ * first one's answer away. The refresh is the caller's to make, once. */
+gboolean pt_git_monitor_set_want_line_counts(PtGitMonitor *m, gboolean want) {
+  if (m == NULL || m->want_line_counts == want) return FALSE;
   m->want_line_counts = want;
   /* The next delivery must carry counts, not the next poll's. */
-  if (want) pt_git_monitor_refresh(m);
+  return want;
 }
 
-void pt_git_monitor_set_active(PtGitMonitor *m, gboolean active) {
-  if (m == NULL || m->active == active) return;
+gboolean pt_git_monitor_set_active(PtGitMonitor *m, gboolean active) {
+  if (m == NULL || m->active == active) return FALSE;
   m->active = active;
   restart_timer(m);
-  if (active) pt_git_monitor_refresh(m);
+  return active;
 }
 
 static GFileMonitor *watch(PtGitMonitor *m, const char *rel) {
