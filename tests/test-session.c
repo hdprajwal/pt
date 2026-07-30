@@ -176,53 +176,10 @@ static void test_accent_out_of_range_is_clamped(void) {
   pt_session_state_free(s);
 }
 
-/* Reordering the sidebar moves a project, and active_project is a position:
- * every case below is a way for the app to silently switch projects. */
-static void test_index_after_move(void) {
-  /* The moved project itself follows the drop. */
-  g_assert_cmpint(pt_session_index_after_move(0, 0, 3), ==, 3);
-  g_assert_cmpint(pt_session_index_after_move(3, 3, 0), ==, 0);
-
-  /* Dragged down past the active one: active slides up a slot. */
-  g_assert_cmpint(pt_session_index_after_move(2, 0, 3), ==, 1);
-  g_assert_cmpint(pt_session_index_after_move(3, 0, 3), ==, 2);
-
-  /* Dragged up past it: active slides down a slot. */
-  g_assert_cmpint(pt_session_index_after_move(1, 3, 1), ==, 2);
-  g_assert_cmpint(pt_session_index_after_move(2, 3, 1), ==, 3);
-
-  /* Moves that step over neither side leave it alone. */
-  g_assert_cmpint(pt_session_index_after_move(0, 1, 3), ==, 0);
-  g_assert_cmpint(pt_session_index_after_move(4, 1, 3), ==, 4);
-  g_assert_cmpint(pt_session_index_after_move(0, 3, 1), ==, 0);
-  g_assert_cmpint(pt_session_index_after_move(4, 3, 1), ==, 4);
-
-  /* Neighbour swap, both directions. */
-  g_assert_cmpint(pt_session_index_after_move(1, 2, 1), ==, 2);
-  g_assert_cmpint(pt_session_index_after_move(2, 1, 2), ==, 1);
-
-  /* A dropped-on-itself move and the empty window's -1 change nothing. */
-  g_assert_cmpint(pt_session_index_after_move(2, 2, 2), ==, 2);
-  g_assert_cmpint(pt_session_index_after_move(-1, 0, 2), ==, -1);
-}
-
-/* The remap has to agree with the array move it describes, for every pair. */
-static void test_index_after_move_matches_array(void) {
-  const int n = 6;
-  for (int from = 0; from < n; from++) {
-    for (int to = 0; to < n; to++) {
-      GPtrArray *a = g_ptr_array_new();
-      for (int i = 0; i < n; i++) g_ptr_array_add(a, GINT_TO_POINTER(i));
-      gpointer moved = g_ptr_array_steal_index(a, from);
-      g_ptr_array_insert(a, to, moved);
-      for (int i = 0; i < n; i++) {
-        int after = pt_session_index_after_move(i, from, to);
-        g_assert_cmpint(GPOINTER_TO_INT(g_ptr_array_index(a, after)), ==, i);
-      }
-      g_ptr_array_free(a, TRUE);
-    }
-  }
-}
+/* Reorder-survival used to live here as pt_session_index_after_move; the
+ * workspace's stable ids replaced it, and its semantics are pinned by
+ * tests/test-workspace.c (/workspace/move-spot-checks and
+ * /workspace/move-matches-array). */
 
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
@@ -237,8 +194,5 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/session/accent-explicit-zero",
                   test_accent_explicit_zero_beats_index_default);
   g_test_add_func("/session/accent-clamp", test_accent_out_of_range_is_clamped);
-  g_test_add_func("/session/index-after-move", test_index_after_move);
-  g_test_add_func("/session/index-after-move-matches-array",
-                  test_index_after_move_matches_array);
   return g_test_run();
 }
