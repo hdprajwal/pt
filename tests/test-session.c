@@ -1,6 +1,6 @@
 #include "pt-session.h"
 
-#include <string.h>   /* strstr */
+#include <json-glib/json-glib.h>
 
 static PtSessionState *sample_state(void) {
   PtSessionState *s = pt_session_state_new();
@@ -48,14 +48,29 @@ static void test_roundtrip(void) {
  * directory is missing): the window writes active_tab -1 for it, the value the
  * old int bookkeeping's clamp left behind — and serialization must carry the
  * -1 through untouched, not clamp or default it, so the file keeps its old
- * shape. */
+ * shape. Pinned at the serializer, the deepest testable layer: capture_state
+ * itself lives in the window. The written JSON is parsed back structurally and
+ * the project object's "active_tab" member checked for exactly -1 — a
+ * substring scan could be satisfied by any stray "-1" in the text. */
 static void test_tabless_project_active_tab_minus_one(void) {
   PtSessionState *s = pt_session_state_new();
   PtProjectState *p = pt_project_state_new("empty", "/tmp/empty");
-  p->active_tab = -1;
+  p->active_tab = -1;   /* what capture_state writes for zero tabs */
   g_ptr_array_add(s->projects, p);
   char *text = pt_session_to_json_text(s);
-  g_assert_nonnull(strstr(text, "-1"));
+
+  /* Structural check on the emitted JSON itself. */
+  JsonParser *parser = json_parser_new();
+  g_assert_true(json_parser_load_from_data(parser, text, -1, NULL));
+  JsonObject *root = json_node_get_object(json_parser_get_root(parser));
+  JsonArray *projects = json_object_get_array_member(root, "projects");
+  g_assert_cmpuint(json_array_get_length(projects), ==, 1);
+  JsonObject *po = json_array_get_object_element(projects, 0);
+  g_assert_true(json_object_has_member(po, "active_tab"));
+  g_assert_cmpint(json_object_get_int_member(po, "active_tab"), ==, -1);
+  g_object_unref(parser);
+
+  /* And the round trip hands the unclamped -1 back. */
   PtSessionState *back = pt_session_from_json_text(text);
   g_free(text);
   g_assert_nonnull(back);
