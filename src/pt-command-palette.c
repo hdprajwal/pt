@@ -1,38 +1,38 @@
-#include "pt-palette.h"
+#include "pt-command-palette.h"
 #include "pt-fuzzy.h"
 #include "pt-accent.h"
 #include "pt-overlay.h"
 #include "pt-rowlist.h"
 
 /* The palette never scrolls: it shows the six best matches and nothing else. */
-#define PT_PALETTE_ROWS  6
-#define PT_PALETTE_WIDTH 620
+#define PT_COMMAND_PALETTE_ROWS  6
+#define PT_COMMAND_PALETTE_WIDTH 620
 
 enum { SIG_ACTIVATED, SIG_CLOSED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
-struct _PtPalette {
+struct _PtCommandPalette {
   GtkWidget parent_instance;
   PtOverlay *overlay;   /* scrim, panel, keys, dismiss, open/closed state */
   GtkWidget *entry;     /* GtkText holding the query */
   GtkWidget *list;      /* box the rows live in */
   PtRowList *rows;      /* rebuilt per query */
-  PtPaletteItem *items; /* owned; NULL when closed */
+  PtCommandPaletteItem *items; /* owned; NULL when closed */
   int n_items;
   int *scores;          /* one per item, refilled per query; sized with items */
-  int shown[PT_PALETTE_ROWS];  /* row -> index into items */
+  int shown[PT_COMMAND_PALETTE_ROWS];  /* row -> index into items */
   int n_shown;
   int selected;         /* index into shown[]; -1 when nothing matches */
 };
 
-G_DEFINE_FINAL_TYPE(PtPalette, pt_palette, GTK_TYPE_WIDGET)
+G_DEFINE_FINAL_TYPE(PtCommandPalette, pt_command_palette, GTK_TYPE_WIDGET)
 
-static gboolean is_open(PtPalette *p) {
+static gboolean is_open(PtCommandPalette *p) {
   return p->overlay != NULL && pt_overlay_is_open(p->overlay);
 }
 
 /* ---------- owned items ---------- */
-static void free_items(PtPalette *p) {
+static void free_items(PtCommandPalette *p) {
   for (int i = 0; i < p->n_items; i++) {
     g_free(p->items[i].name);
     g_free(p->items[i].detail);
@@ -48,7 +48,7 @@ static void free_items(PtPalette *p) {
 /* ---------- helpers ---------- */
 /* Pick the six best matches for `q`, score descending, ties in natural order.
  * An empty query scores everything 1, so it degenerates to "the first six". */
-static void filter_items(PtPalette *p, const char *q) {
+static void filter_items(PtCommandPalette *p, const char *q) {
   /* An item is worth what its better half matches: typing a path fragment has
    * to find a project by its detail line, not only by its name. The stable
    * top-N selection over those scores is pt_fuzzy_rank_scored's job. */
@@ -57,15 +57,16 @@ static void filter_items(PtPalette *p, const char *q) {
     p->scores[i] = MAX(pt_fuzzy_score(needle, p->items[i].name),
                        pt_fuzzy_score(needle, p->items[i].detail));
   p->n_shown = pt_fuzzy_rank_scored(p->scores, p->n_items, p->shown,
-                                    PT_PALETTE_ROWS);
+                                    PT_COMMAND_PALETTE_ROWS);
 }
 
 /* ---------- row rendering ---------- */
 /* One row per *shown* position, so the index a click reports indexes shown[]
  * — the same space `selected` lives in. */
 static GtkWidget *build_row(gpointer items, guint idx, gpointer user) {
-  PtPalette *p = user;
-  const PtPaletteItem *it = &((const PtPaletteItem *)items)[p->shown[idx]];
+  PtCommandPalette *p = user;
+  const PtCommandPaletteItem *it =
+      &((const PtCommandPaletteItem *)items)[p->shown[idx]];
 
   GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   gtk_widget_add_css_class(row, "pt-palette-row");
@@ -107,7 +108,7 @@ static GtkWidget *build_row(gpointer items, guint idx, gpointer user) {
 /* The rows are cheap and every keystroke re-ranks them, so there is nothing to
  * dedupe against: no items_equal, and the items block stays the palette's (the
  * row list borrows it, and clear_rows below runs before it is freed). */
-static void rebuild(PtPalette *p) {
+static void rebuild(PtCommandPalette *p) {
   if (!is_open(p)) return;
   filter_items(p, gtk_editable_get_text(GTK_EDITABLE(p->entry)));
   /* The list can shrink under a selection that was valid a keystroke ago. */
@@ -118,30 +119,30 @@ static void rebuild(PtPalette *p) {
   pt_rowlist_set(p->rows, p->items, (guint)p->n_shown, build_row, NULL, p, NULL);
 }
 
-static void clear_rows(PtPalette *p) {
+static void clear_rows(PtCommandPalette *p) {
   pt_rowlist_set(p->rows, NULL, 0, build_row, NULL, p, NULL);
 }
 
 /* ---------- activation ---------- */
-static void activate_selected(PtPalette *p) {
+static void activate_selected(PtCommandPalette *p) {
   if (!is_open(p)) return;
   if (p->selected < 0 || p->selected >= p->n_shown) {
-    pt_palette_close(p);
+    pt_command_palette_close(p);
     return;
   }
   /* Copy before emitting: the handler switches projects, and close() below
    * frees the array the item lives in. */
-  const PtPaletteItem *it = &p->items[p->shown[p->selected]];
+  const PtCommandPaletteItem *it = &p->items[p->shown[p->selected]];
   guint project_id = it->project_id;
   guint tab_id = it->tab_id;
   int command = it->is_command ? it->command : -1;
   g_signal_emit(p, signals[SIG_ACTIVATED], 0, project_id, tab_id, command);
-  pt_palette_close(p);
+  pt_command_palette_close(p);
 }
 
 static void on_row_activated(PtRowList *rl, int idx, gpointer user) {
   (void)rl;
-  PtPalette *p = user;
+  PtCommandPalette *p = user;
   p->selected = idx;
   activate_selected(p);
 }
@@ -149,13 +150,13 @@ static void on_row_activated(PtRowList *rl, int idx, gpointer user) {
 /* ---------- input ---------- */
 static void on_query_changed(GtkEditable *ed, gpointer user) {
   (void)ed;
-  PtPalette *p = user;
+  PtCommandPalette *p = user;
   /* Every edit re-ranks the list, so the old highlight means nothing. */
   p->selected = 0;
   rebuild(p);
 }
 
-static void move_selection(PtPalette *p, int delta) {
+static void move_selection(PtCommandPalette *p, int delta) {
   if (p->n_shown == 0) return;
   int next = p->selected + delta;
   p->selected = CLAMP(next, 0, p->n_shown - 1);
@@ -166,7 +167,7 @@ static void move_selection(PtPalette *p, int delta) {
 
 /* Runs in the overlay's CAPTURE phase, and only while the palette is open. */
 static gboolean on_key(guint keyval, GdkModifierType state, gpointer user) {
-  PtPalette *p = user;
+  PtCommandPalette *p = user;
   switch (keyval) {
     case GDK_KEY_Down:
     case GDK_KEY_KP_Down:
@@ -196,7 +197,7 @@ static gboolean on_key(guint keyval, GdkModifierType state, gpointer user) {
       if (q != NULL && q[0] != '\0')
         gtk_editable_set_text(GTK_EDITABLE(p->entry), "");  /* fires changed */
       else
-        pt_palette_close(p);
+        pt_command_palette_close(p);
       return TRUE;
     }
     default:
@@ -207,21 +208,22 @@ static gboolean on_key(guint keyval, GdkModifierType state, gpointer user) {
 /* A press outside the panel closes, query or no query. */
 static void on_dismissed(PtOverlay *o, gpointer user) {
   (void)o;
-  pt_palette_close(PT_PALETTE(user));
+  pt_command_palette_close(PT_COMMAND_PALETTE(user));
 }
 
 /* The overlay is already hidden by here; what is left is what it was showing. */
 static void on_overlay_closed(PtOverlay *o, gpointer user) {
   (void)o;
-  PtPalette *p = PT_PALETTE(user);
+  PtCommandPalette *p = PT_COMMAND_PALETTE(user);
   clear_rows(p);
   free_items(p);
   g_signal_emit(p, signals[SIG_CLOSED], 0);
 }
 
 /* ---------- public API ---------- */
-void pt_palette_open(PtPalette *p, PtPaletteItem *items, int n_items) {
-  g_return_if_fail(PT_IS_PALETTE(p));
+void pt_command_palette_open(PtCommandPalette *p, PtCommandPaletteItem *items,
+                             int n_items) {
+  g_return_if_fail(PT_IS_COMMAND_PALETTE(p));
   clear_rows(p);   /* the rows borrow the items free_items is about to drop */
   free_items(p);
   p->items = items;
@@ -240,13 +242,13 @@ void pt_palette_open(PtPalette *p, PtPaletteItem *items, int n_items) {
   gtk_widget_grab_focus(p->entry);
 }
 
-void pt_palette_close(PtPalette *p) {
-  g_return_if_fail(PT_IS_PALETTE(p));
+void pt_command_palette_close(PtCommandPalette *p) {
+  g_return_if_fail(PT_IS_COMMAND_PALETTE(p));
   if (p->overlay != NULL) pt_overlay_close(p->overlay);
 }
 
-gboolean pt_palette_is_open(PtPalette *p) {
-  g_return_val_if_fail(PT_IS_PALETTE(p), FALSE);
+gboolean pt_command_palette_is_open(PtCommandPalette *p) {
+  g_return_val_if_fail(PT_IS_COMMAND_PALETTE(p), FALSE);
   return is_open(p);
 }
 
@@ -254,34 +256,36 @@ gboolean pt_palette_is_open(PtPalette *p) {
 /* No "closed" here on purpose: the window is on its way out too, and its
  * handler would reach for panes that dispose has already dropped. Dropping the
  * overlay is what takes the scrim down, and it emits nothing either. */
-static void pt_palette_dispose(GObject *obj) {
-  PtPalette *p = PT_PALETTE(obj);
+static void pt_command_palette_dispose(GObject *obj) {
+  PtCommandPalette *p = PT_COMMAND_PALETTE(obj);
   /* Overlay first: it takes the rows down, and a row must never outlive the row
    * list its gesture points at. */
   g_clear_object(&p->overlay);
   g_clear_object(&p->rows);
   free_items(p);
   p->entry = p->list = NULL;
-  G_OBJECT_CLASS(pt_palette_parent_class)->dispose(obj);
+  G_OBJECT_CLASS(pt_command_palette_parent_class)->dispose(obj);
 }
 
-static void pt_palette_class_init(PtPaletteClass *klass) {
-  G_OBJECT_CLASS(klass)->dispose = pt_palette_dispose;
+static void pt_command_palette_class_init(PtCommandPaletteClass *klass) {
+  G_OBJECT_CLASS(klass)->dispose = pt_command_palette_dispose;
   gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(klass),
                                            GTK_TYPE_BIN_LAYOUT);
-  signals[SIG_ACTIVATED] = g_signal_new("activated", PT_TYPE_PALETTE,
+  signals[SIG_ACTIVATED] = g_signal_new("activated", PT_TYPE_COMMAND_PALETTE,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
       G_TYPE_UINT, G_TYPE_UINT, G_TYPE_INT);
-  signals[SIG_CLOSED] = g_signal_new("closed", PT_TYPE_PALETTE,
+  signals[SIG_CLOSED] = g_signal_new("closed", PT_TYPE_COMMAND_PALETTE,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
-static void pt_palette_init(PtPalette *p) {
+static void pt_command_palette_init(PtCommandPalette *p) {
   p->selected = -1;
 
+  /* ".pt-palette", not ".pt-command-palette": the CSS names stay put on
+   * purpose — see the note in the header. */
   p->overlay = pt_overlay_new(GTK_WIDGET(p), "pt-palette");
   GtkBox *panel = pt_overlay_panel(p->overlay);
-  gtk_widget_set_size_request(GTK_WIDGET(panel), PT_PALETTE_WIDTH, -1);
+  gtk_widget_set_size_request(GTK_WIDGET(panel), PT_COMMAND_PALETTE_WIDTH, -1);
   pt_overlay_set_key_handler(p->overlay, on_key, p);
   g_signal_connect(p->overlay, "dismissed", G_CALLBACK(on_dismissed), p);
   g_signal_connect(p->overlay, "closed", G_CALLBACK(on_overlay_closed), p);
@@ -309,6 +313,6 @@ static void pt_palette_init(PtPalette *p) {
   g_signal_connect(p->rows, "row-activated", G_CALLBACK(on_row_activated), p);
 }
 
-GtkWidget *pt_palette_new(void) {
-  return g_object_new(PT_TYPE_PALETTE, NULL);
+GtkWidget *pt_command_palette_new(void) {
+  return g_object_new(PT_TYPE_COMMAND_PALETTE, NULL);
 }

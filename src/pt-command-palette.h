@@ -1,6 +1,12 @@
 #pragma once
 #include <gtk/gtk.h>
 
+/* The CSS classes this widget carries are still ".pt-palette-*" (and the
+ * overlay host is still ".pt-palette"): style.css names the *look*, and
+ * renaming the C symbols is no reason to churn a stylesheet that the settings
+ * dialog also borrows from. The mismatch between the C name and the CSS name
+ * is deliberate. */
+
 /* One row of the command palette. All strings are owned by the item and are
  * freed by the palette; `shortcut` may be NULL. */
 typedef struct {
@@ -18,19 +24,21 @@ typedef struct {
   guint project_id;
   guint tab_id;
   int command;          /* which command, when is_command; else -1 */
-} PtPaletteItem;
+} PtCommandPaletteItem;
 
-#define PT_TYPE_PALETTE (pt_palette_get_type())
-G_DECLARE_FINAL_TYPE(PtPalette, pt_palette, PT, PALETTE, GtkWidget)
+#define PT_TYPE_COMMAND_PALETTE (pt_command_palette_get_type())
+G_DECLARE_FINAL_TYPE(PtCommandPalette, pt_command_palette, PT, COMMAND_PALETTE,
+                     GtkWidget)
 
-GtkWidget *pt_palette_new(void);
+GtkWidget *pt_command_palette_new(void);
 
-/* Takes ownership of `items` (an array of n_items PtPaletteItem allocated with
- * g_malloc; freed internally, strings included). Shows the overlay, clears the
- * query and focuses the input. */
-void pt_palette_open(PtPalette *p, PtPaletteItem *items, int n_items);
-void pt_palette_close(PtPalette *p);
-gboolean pt_palette_is_open(PtPalette *p);
+/* Takes ownership of `items` (an array of n_items PtCommandPaletteItem
+ * allocated with g_malloc; freed internally, strings included). Shows the
+ * overlay, clears the query and focuses the input. */
+void pt_command_palette_open(PtCommandPalette *p, PtCommandPaletteItem *items,
+                             int n_items);
+void pt_command_palette_close(PtCommandPalette *p);
+gboolean pt_command_palette_is_open(PtCommandPalette *p);
 
 /* Signals: "activated" (guint project_id, guint tab_id, int command),
  *          "closed" (void) — emitted on any dismissal. */

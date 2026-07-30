@@ -10,7 +10,7 @@
 #include "pt-statusline.h"
 #include "pt-project-bar.h"
 #include "pt-pane-grid.h"
-#include "pt-palette.h"
+#include "pt-command-palette.h"
 #include "pt-settings.h"
 #include "pt-session.h"
 #include "pt-git-parse.h"
@@ -1461,9 +1461,9 @@ enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL };
 /* Every project, each followed by its shells, then the commands. The palette
  * ranks this flat list and hands back the workspace ids the user picked —
  * ids, not positions, because the palette sits open across an async gap
- * (see PtPaletteItem). */
+ * (see PtCommandPaletteItem). */
 static void action_open_palette(PtWindow *w) {
-  GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtPaletteItem));
+  GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtCommandPaletteItem));
   for (guint i = 0; i < pt_workspace_project_count(w->ws); i++) {
     PtWsId id = pt_workspace_project_at(w->ws, i);
     PtProjectUI *p = pt_workspace_get_data(w->ws, id);
@@ -1474,7 +1474,7 @@ static void action_open_palette(PtWindow *w) {
     char shown_path[512];
     pt_path_home_abbrev(pt_workspace_project_path(w->ws, id),
                         g_get_home_dir(), shown_path, sizeof shown_path);
-    PtPaletteItem it = {
+    PtCommandPaletteItem it = {
       .name = g_strdup(name),
       .detail = p->is_repo
           ? g_strdup_printf("%s · %s", shown_path, p->git.branch)
@@ -1487,7 +1487,7 @@ static void action_open_palette(PtWindow *w) {
     for (guint j = 0; j < pt_workspace_tab_count(w->ws, id); j++) {
       PtWsId tab = pt_workspace_tab_at(w->ws, id, j);
       PtTabUI *t = pt_workspace_get_data(w->ws, tab);
-      PtPaletteItem sh = {
+      PtCommandPaletteItem sh = {
         .name = g_strdup(t->title),
         .detail = g_strdup(name),
         .shortcut = NULL, .accent = accent, .is_shell = TRUE,
@@ -1498,7 +1498,7 @@ static void action_open_palette(PtWindow *w) {
   }
   /* The row says which way it is currently pointing, so the toggle is not a
    * coin flip. */
-  PtPaletteItem mr = {
+  PtCommandPaletteItem mr = {
     .name = g_strdup("Toggle mouse reporting"),
     .detail = g_strdup(active_mouse_reporting(w)
         ? "on · apps own the mouse, shift+drag selects"
@@ -1511,7 +1511,7 @@ static void action_open_palette(PtWindow *w) {
 
   /* The detail spells out what is lost and what is not: the row is one Enter
    * away from discarding the scrollback, and nothing asks again afterwards. */
-  PtPaletteItem rst = {
+  PtCommandPaletteItem rst = {
     .name = g_strdup("Reset terminal"),
     .detail = g_strdup("clears the screen, scrollback and modes · "
                        "the shell keeps running"),
@@ -1522,8 +1522,8 @@ static void action_open_palette(PtWindow *w) {
   g_array_append_val(arr, rst);
 
   int n = (int)arr->len;
-  pt_palette_open(PT_PALETTE(w->palette),
-                  (PtPaletteItem *)g_array_free(arr, FALSE), n);
+  pt_command_palette_open(PT_COMMAND_PALETTE(w->palette),
+                  (PtCommandPaletteItem *)g_array_free(arr, FALSE), n);
 }
 
 /* Ids resolve at activation time: a project or tab that died while the
@@ -1531,7 +1531,7 @@ static void action_open_palette(PtWindow *w) {
  * dead id and a no-op — never the row that slid into its old position. A live
  * project whose picked tab died still switches to the project, landing on its
  * current active tab. */
-static void on_palette_activated(PtPalette *pal, guint project_id,
+static void on_palette_activated(PtCommandPalette *pal, guint project_id,
                                  guint tab_id, int command, gpointer user) {
   (void)pal;
   PtWindow *w = PT_WINDOW(user);
@@ -1547,7 +1547,7 @@ static void on_palette_activated(PtPalette *pal, guint project_id,
   if (tab_id != PT_WS_ID_NONE) switch_tab_id(w, tab_id);
 }
 
-static void on_palette_closed(PtPalette *pal, gpointer user) {
+static void on_palette_closed(PtCommandPalette *pal, gpointer user) {
   (void)pal;
   focus_active_terminal(PT_WINDOW(user));
 }
@@ -1628,7 +1628,7 @@ static void action_zoom(PtWindow *w, int delta) {
  * overlay is open every accelerator reports "not handled" and falls through to
  * it — each overlay's own toggle (⌃K, ⌃,) still acts. */
 static gboolean overlay_open(PtWindow *w) {
-  return (w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette))) ||
+  return (w->palette != NULL && pt_command_palette_is_open(PT_COMMAND_PALETTE(w->palette))) ||
          (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)));
 }
 
@@ -1639,8 +1639,8 @@ static gboolean overlay_open(PtWindow *w) {
 static gboolean sc_palette(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
   PtWindow *w = PT_WINDOW(u);
-  if (w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette))) {
-    pt_palette_close(PT_PALETTE(w->palette));
+  if (w->palette != NULL && pt_command_palette_is_open(PT_COMMAND_PALETTE(w->palette))) {
+    pt_command_palette_close(PT_COMMAND_PALETTE(w->palette));
     return TRUE;
   }
   if (overlay_open(w)) return FALSE;   /* settings dialog is up */
@@ -2042,7 +2042,7 @@ static void pt_window_init(PtWindow *w) {
    * of its size request, so a hidden palette costs the layout nothing. */
   GtkWidget *overlay = gtk_overlay_new();
   gtk_overlay_set_child(GTK_OVERLAY(overlay), body);
-  w->palette = pt_palette_new();
+  w->palette = pt_command_palette_new();
   gtk_widget_set_visible(w->palette, FALSE);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), w->palette);
   /* Same treatment, same stack: the settings dialog has to be a sibling of the
