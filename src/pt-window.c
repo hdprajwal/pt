@@ -1,6 +1,7 @@
 #include "pt-window.h"
 
 #include <glib/gstdio.h>   /* g_mkdir_with_parents */
+#include <string.h>        /* strrchr */
 
 #include "pt-terminal.h"
 #include "pt-sidebar.h"
@@ -9,44 +10,50 @@
 #include "pt-statusline.h"
 #include "pt-project-bar.h"
 #include "pt-pane-grid.h"
-#include "pt-palette.h"
+#include "pt-command-palette.h"
 #include "pt-settings.h"
 #include "pt-session.h"
 #include "pt-git-parse.h"
 #include "pt-git-monitor.h"
+#include "pt-path.h"
 #include "pt-config.h"
 #include "pt-theme.h"
 #include "pt-style.h"
+#include "pt-workspace.h"
+
+/* The window no longer keeps the project/tab structure itself: PtWorkspace
+ * (ptcore, headless) owns order and selection, addressed by stable ids. The
+ * structs below are the widget half — what a workspace id hangs its UI on,
+ * stored in the id's pt_workspace_set_data slot. The window frees them; the
+ * workspace only drops the slot. */
 
 typedef struct {
+  PtWsId id;            /* this tab in the workspace */
   char *title;
   GtkWidget *grid;      /* PtPaneGrid, owned ref */
+  PtWindow *window;     /* back-pointer; the data the grid handlers carry */
 } PtTabUI;
 
 typedef struct {
-  char *name;
-  char *path;
-  GPtrArray *tabs;      /* PtTabUI* */
-  int active_tab;
+  PtWsId id;            /* this project in the workspace */
   gboolean missing;
   PtGitStatus git;
   GPtrArray *git_files;  /* PtGitFile*, owned copy of the monitor's list */
   gboolean is_repo;
-  int accent;           /* 0..5 index into the fixed accent cycle */
   PtGitMonitor *monitor;
   PtWindow *window;     /* back-pointer; Task 11 wires git monitors through it */
 } PtProjectUI;
 
 struct _PtWindow {
   AdwApplicationWindow parent_instance;
-  GPtrArray *projects;  /* PtProjectUI* */
-  int active_project;
+  PtWorkspace *ws;      /* NULL after dispose, like projects used to be */
   GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
   GtkWidget *infopanel;  /* right rail; hidden until ⌃I */
   GtkWidget *palette;   /* overlay child; hidden unless ⌃K is up */
   GtkWidget *settings;  /* overlay child, same stack as the palette; ⌃, */
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
+  guint sidebar_idle;   /* pending coalesced refresh_sidebar; 0 = none */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
   PtConfig *config;
   GFileMonitor *config_monitor;
@@ -56,6 +63,12 @@ struct _PtWindow {
   guint config_reload_source;
   guint theme_reload_source;
   guint config_save_source;     /* debounce */
+  /* The accent hexes handed to spawned shells as PT_ACCENT, in "#rrggbb" form.
+   * Filled from the resolved theme's accent-0..5 tokens on every render, which
+   * is once per config; a project's env is built per spawn and reads whichever
+   * one its accent points at. Seeded with pt-dark's accents in init so an env
+   * built before the first render still carries a sane value. */
+  char accent_hex[PT_ACCENT_COUNT][8];
 };
 
 G_DEFINE_FINAL_TYPE(PtWindow, pt_window, ADW_TYPE_APPLICATION_WINDOW)
@@ -63,18 +76,55 @@ G_DEFINE_FINAL_TYPE(PtWindow, pt_window, ADW_TYPE_APPLICATION_WINDOW)
 /* ---------- helpers ---------- */
 static PtProjectUI *active_project(PtWindow *w) {
   /* NULL after dispose: a dialog response or a queued grid signal can still
-   * land on the window after its projects are gone. */
-  if (w->projects == NULL || w->active_project < 0 ||
-      (guint)w->active_project >= w->projects->len)
-    return NULL;
-  return g_ptr_array_index(w->projects, w->active_project);
+   * land on the window after its workspace is gone. */
+  if (w->ws == NULL) return NULL;
+  return pt_workspace_get_data(w->ws, pt_workspace_active_project(w->ws));
 }
 
 static PtTabUI *active_tab(PtProjectUI *p) {
-  if (p == NULL || p->active_tab < 0 ||
-      (guint)p->active_tab >= p->tabs->len)
-    return NULL;
-  return g_ptr_array_index(p->tabs, p->active_tab);
+  if (p == NULL || p->window->ws == NULL) return NULL;
+  return pt_workspace_get_data(p->window->ws,
+                               pt_workspace_active_tab(p->window->ws, p->id));
+}
+
+/* The project fields the workspace owns, read back through the UI struct that
+ * hangs off it. Borrowed strings; valid while the project is. */
+static const char *proj_name(const PtProjectUI *p) {
+  return pt_workspace_project_name(p->window->ws, p->id);
+}
+
+static const char *proj_path(const PtProjectUI *p) {
+  return pt_workspace_project_path(p->window->ws, p->id);
+}
+
+static int proj_accent(const PtProjectUI *p) {
+  return pt_workspace_project_accent(p->window->ws, p->id);
+}
+
+/* Grid → owning tab, the same trick pt-pane-grid plays with "pt-leaf" on a
+ * terminal. Grid signals arrive carrying the grid and nothing else while every
+ * handler wants its tab, so without this each one walked every project's tabs
+ * to find it. Set in tab_ui_new and cleared in tab_ui_free: a grid can outlive
+ * its tab (pt-pane-grid's idle holds its own ref), and an unset back-pointer is
+ * exactly the "no tab owns this grid any more" answer the close paths want,
+ * where a stale one would be a read after free. */
+#define PT_GRID_TAB_KEY "pt-grid-tab"
+
+static PtTabUI *grid_tab(PtPaneGrid *g) {
+  return g != NULL ? g_object_get_data(G_OBJECT(g), PT_GRID_TAB_KEY) : NULL;
+}
+
+/* The tab that owns a grid, provided the workspace still knows it. NULL when
+ * no live tab owns it: confirmation is async, so by response time the tab may
+ * have been dropped already (its last shell exited cleanly → on_grid_emptied
+ * removed it) — its id is then dead, and a dead id resolves to nothing rather
+ * than to whatever slid into the old slot. No scan: the tab pointer comes from
+ * the grid, the liveness check is one id lookup. */
+static PtTabUI *find_grid_tab(PtWindow *w, PtPaneGrid *g) {
+  PtTabUI *t = grid_tab(g);
+  if (w->ws == NULL || t == NULL) return NULL;
+  if (pt_workspace_tab_project(w->ws, t->id) == PT_WS_ID_NONE) return NULL;
+  return t;
 }
 
 static void mark_dirty(PtWindow *w);   /* persistence hook; body in Task 12 */
@@ -86,30 +136,90 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
 
 /* ---------- config ---------- */
 
-/* The accent hexes handed to spawned shells as PT_ACCENT, kept module-level
- * because set_spawn_env_for() runs per project while the theme is resolved
- * once per config. Seeded with pt-dark's accents so any spawn that somehow
- * beats the first render_config() still gets a sane value; render_config()
- * overwrites it from the resolved accent tokens. */
-static char accent_env[PT_ACCENT_COUNT][8] =
-    { "#6ee7a0", "#8ab4f8", "#f2b25c", "#c99bf0", "#5ed3c4", "#e0849b" };
+/* The last theme parse, kept between renders: the settings dialog emits
+ * "changed" at key-repeat rate when an arrow is held on a row, and re-reading
+ * and re-parsing the theme file per repeat is pure waste when neither the
+ * name nor the file moved. Keyed by name + file stamp, and dropped outright
+ * when the themes-dir monitor fires — belt over the stamp's braces for a
+ * same-size rewrite on a filesystem without subsecond mtimes. Module-level
+ * rather than per-window: the themes dir is per-user. */
+static char *theme_cache_name;
+static char *theme_cache_stamp;   /* NULL = no file backing (builtin/missing) */
+static PtTheme *theme_cache_theme;
+
+static void theme_cache_drop(void) {
+  g_clear_pointer(&theme_cache_name, g_free);
+  g_clear_pointer(&theme_cache_stamp, g_free);
+  g_clear_pointer(&theme_cache_theme, pt_theme_free);
+}
+
+/* mtime.usec+size of the named theme's file — subsecond, same fingerprint the
+ * pt_theme_is_dark cache uses, so a same-size in-place rewrite within one
+ * second still moves the stamp and a settings preview racing the monitor
+ * delivery cannot render a stale parse. NULL when there is no file (the
+ * builtin, or a missing name — both render the same fallback text every time,
+ * so "no file" is itself a valid stamp for the cached name). */
+static char *theme_file_stamp(const char *dir, const char *name) {
+  char *path = g_build_filename(dir, name, NULL);
+  GFile *f = g_file_new_for_path(path);
+  GFileInfo *info = g_file_query_info(
+      f,
+      G_FILE_ATTRIBUTE_TIME_MODIFIED "," G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC
+      "," G_FILE_ATTRIBUTE_STANDARD_SIZE,
+      G_FILE_QUERY_INFO_NONE, NULL, NULL);
+  g_object_unref(f);
+  g_free(path);
+  if (info == NULL) return NULL;
+  char *stamp = g_strdup_printf(
+      "%" G_GUINT64_FORMAT ".%06u:%" G_GINT64_FORMAT,
+      g_file_info_get_attribute_uint64(info, G_FILE_ATTRIBUTE_TIME_MODIFIED),
+      g_file_info_get_attribute_uint32(info,
+                                       G_FILE_ATTRIBUTE_TIME_MODIFIED_USEC),
+      (gint64)g_file_info_get_size(info));
+  g_object_unref(info);
+  return stamp;
+}
 
 /* Parse `cfg`'s theme and push colors+fonts everywhere. Deliberately takes the
  * config rather than reading w->config: the settings dialog previews a
  * candidate it still owns, and nothing about rendering it may put that
- * candidate anywhere the debounced save could later find it. */
-static void render_config(const PtConfig *cfg) {
+ * candidate anywhere the debounced save could later find it. `w` is only
+ * written for the resolved accent hexes, which are not config state. */
+static void render_config(PtWindow *w, const PtConfig *cfg) {
   char *tdir = pt_theme_dir();
-  char *text = pt_theme_load_text(tdir, cfg->theme);
-  if (text == NULL) {
-    g_warning("pt: theme '%s' not found; using pt-dark", cfg->theme);
-    text = g_strdup(pt_theme_builtin_pt_dark());
+  char *stamp = theme_file_stamp(tdir, cfg->theme);
+  if (theme_cache_theme == NULL ||
+      g_strcmp0(theme_cache_name, cfg->theme) != 0 ||
+      g_strcmp0(theme_cache_stamp, stamp) != 0) {
+    char *text = pt_theme_load_text(tdir, cfg->theme);
+    if (text == NULL) {
+      g_warning("pt: theme '%s' not found; using pt-dark", cfg->theme);
+      text = g_strdup(pt_theme_builtin_pt_dark());
+    }
+    theme_cache_drop();
+    theme_cache_theme = pt_theme_parse(text);
+    theme_cache_name = g_strdup(cfg->theme);
+    theme_cache_stamp = g_steal_pointer(&stamp);
+    g_free(text);
   }
-  PtTheme *theme = pt_theme_parse(text);
+  g_free(stamp);
+  /* Resolution is re-run every time — it is 33 color derivations, and it must
+   * see the config's app_overrides, which change independently of the file. */
   PtResolvedTheme rt;
-  pt_theme_resolve(theme, cfg->app_overrides, &rt);
+  pt_theme_resolve(theme_cache_theme, cfg->app_overrides, &rt);
   pt_style_apply(&rt, cfg);
-  pt_terminal_set_theme(&rt);
+  /* Push the theme into the terminals only when it moved: a font-size drag
+   * re-renders per key-repeat with an identical theme, and set_theme repaints
+   * every pane. memcmp is safe here because pt_theme_resolve zeroes the whole
+   * struct before filling it; a stray padding byte could at worst force a
+   * redundant push, never skip a real change. */
+  static PtResolvedTheme last_pushed;
+  static gboolean theme_pushed;
+  if (!theme_pushed || memcmp(&last_pushed, &rt, sizeof rt) != 0) {
+    pt_terminal_set_theme(&rt);
+    last_pushed = rt;
+    theme_pushed = TRUE;
+  }
   pt_terminal_set_font(cfg->font_family, cfg->font_size);
   pt_terminal_set_mouse_reporting(cfg->mouse_reporting);
   pt_terminal_set_osc52(cfg->osc52);
@@ -117,17 +227,15 @@ static void render_config(const PtConfig *cfg) {
    * Accents always resolve opaque, so the css form is "#rrggbb". */
   for (int i = 0; i < PT_ACCENT_COUNT; i++) {
     char *hex = pt_color_to_css(&rt.tokens[PT_TOK_ACCENT_0 + i]);
-    g_strlcpy(accent_env[i], hex, sizeof accent_env[i]);
+    g_strlcpy(w->accent_hex[i], hex, sizeof w->accent_hex[i]);
     g_free(hex);
   }
-  pt_theme_free(theme);
-  g_free(text);
   g_free(tdir);
 }
 
 /* NULL config = disposed window, same guard convention as active_project(). */
 static void apply_config(PtWindow *w) {
-  if (w->config != NULL) render_config(w->config);
+  if (w->config != NULL) render_config(w, w->config);
 }
 
 static gboolean config_save_now(gpointer user) {
@@ -197,10 +305,16 @@ static gboolean theme_reload_now(gpointer user) {
   PtWindow *w = PT_WINDOW(user);
   w->theme_reload_source = 0;
   /* Same as config_reload_now: the candidate on screen wins while the dialog
-   * is open. Notably the mkdir in action_open_settings makes the themes dir
-   * fire a CREATED event on the first-ever ⌃,. */
-  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)))
+   * is open — but a theme-file edit must still reach the preview, so the
+   * candidate itself is re-rendered rather than skipped (re-applying w->config
+   * here would snap the preview back mid-edit). Notably the mkdir in
+   * action_open_settings makes the themes dir fire a CREATED event on the
+   * first-ever ⌃,; rendering the candidate again is a no-op for it. */
+  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings))) {
+    const PtConfig *cand = pt_settings_config(PT_SETTINGS(w->settings));
+    if (cand != NULL) render_config(w, cand);
     return G_SOURCE_REMOVE;
+  }
   apply_config(w);
   return G_SOURCE_REMOVE;
 }
@@ -213,6 +327,10 @@ static void on_theme_file_changed(GFileMonitor *m, GFile *f, GFile *other,
       ev != G_FILE_MONITOR_EVENT_CREATED)
     return;
   PtWindow *w = PT_WINDOW(user);
+  /* Dropped immediately, not from the debounced reload: the reload bails while
+   * the settings dialog is open, but the dialog's own previews keep calling
+   * render_config and must see the edited file, not the cached parse. */
+  theme_cache_drop();
   if (w->theme_reload_source != 0) g_source_remove(w->theme_reload_source);
   w->theme_reload_source = g_timeout_add(150, theme_reload_now, w);
 }
@@ -268,37 +386,42 @@ static void init_config(PtWindow *w, PtSessionState *state) {
 static void refresh_projectbar(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   pt_project_bar_update(PT_PROJECT_BAR(w->projectbar),
-      p != NULL ? p->name : "pt",
-      p != NULL ? p->path : "",
-      (p != NULL && p->is_repo) ? p->git.branch : NULL,
-      p != NULL ? p->git.changed : 0,
-      p != NULL ? p->accent : 0);
+      p != NULL ? proj_name(p) : "pt",
+      p != NULL ? proj_path(p) : "",
+      (p != NULL && p->is_repo) ? &p->git : NULL,
+      p != NULL ? proj_accent(p) : 0);
 }
 
 static void refresh_sidebar(PtWindow *w) {
-  int n = (int)w->projects->len;
+  int n = (int)pt_workspace_project_count(w->ws);
   PtSidebarRow *rows = g_new0(PtSidebarRow, n);
   for (int i = 0; i < n; i++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, i);
-    rows[i].name = p->name;
-    rows[i].path = p->path;
+    PtWsId id = pt_workspace_project_at(w->ws, (guint)i);
+    PtProjectUI *p = pt_workspace_get_data(w->ws, id);
+    rows[i].name = pt_workspace_project_name(w->ws, id);
+    rows[i].path = pt_workspace_project_path(w->ws, id);
     rows[i].missing = p->missing;
     rows[i].is_repo = p->is_repo;
-    rows[i].changed = p->git.changed;
-    g_strlcpy(rows[i].branch, p->git.branch, sizeof(rows[i].branch));
-    rows[i].accent = p->accent;
-    rows[i].shell_count = (int)p->tabs->len;
+    rows[i].git = p->git;
+    rows[i].accent = pt_workspace_project_accent(w->ws, id);
+    guint tabs = pt_workspace_tab_count(w->ws, id);
+    rows[i].shell_count = (int)tabs;
     int running = 0;
-    for (guint j = 0; j < p->tabs->len; j++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, j);
+    for (guint j = 0; j < tabs; j++) {
+      PtTabUI *t =
+          pt_workspace_get_data(w->ws, pt_workspace_tab_at(w->ws, id, j));
       if (pt_pane_grid_any_running(PT_PANE_GRID(t->grid))) running++;
     }
     rows[i].running = running;
   }
-  pt_sidebar_set_projects(PT_SIDEBAR(w->sidebar), rows, n, w->active_project);
+  guint active_idx =
+      pt_workspace_project_index(w->ws, pt_workspace_active_project(w->ws));
+  pt_sidebar_set_projects(PT_SIDEBAR(w->sidebar), rows, n,
+                          active_idx == PT_WS_INDEX_NONE ? -1
+                                                         : (int)active_idx);
   g_free(rows);
   PtProjectUI *ap = active_project(w);
-  char *top = ap != NULL ? g_strdup_printf("pt :: %s", ap->name)
+  char *top = ap != NULL ? g_strdup_printf("pt :: %s", proj_name(ap))
                          : g_strdup("pt");
   /* GTK4 does not dedupe this; each call is a Wayland round-trip, and this
    * runs on every foreground-command change. */
@@ -309,23 +432,46 @@ static void refresh_sidebar(PtWindow *w) {
   refresh_projectbar(w);
 }
 
+/* refresh_sidebar walks every pane of every project, so callers that can fire
+ * in bursts (one "command-changed" per pane after a broadcast keystroke, git
+ * monitors of several projects polling together) queue it instead: however
+ * many requests land in one main-loop iteration, the walk happens once. The
+ * pending source id doubles as the dirty flag; dispose removes it, so the
+ * callback can never see a dead window. */
+static gboolean sidebar_refresh_idle(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->sidebar_idle = 0;
+  refresh_sidebar(w);
+  return G_SOURCE_REMOVE;
+}
+
+static void queue_refresh_sidebar(PtWindow *w) {
+  if (w->sidebar_idle == 0)
+    w->sidebar_idle = g_idle_add(sidebar_refresh_idle, w);
+}
+
 static void refresh_tabstrip(PtWindow *w) {
   PtProjectUI *p = active_project(w);
-  int n = p != NULL ? (int)p->tabs->len : 0;
+  int n = p != NULL ? (int)pt_workspace_tab_count(w->ws, p->id) : 0;
   /* infos[].title borrows each tab's live string; the strip copies it before
    * this returns, and nothing here can free a title in between. */
   PtTabInfo *infos = g_new0(PtTabInfo, n);
   for (int i = 0; i < n; i++) {
-    PtTabUI *t = g_ptr_array_index(p->tabs, i);
+    PtTabUI *t = pt_workspace_get_data(
+        w->ws, pt_workspace_tab_at(w->ws, p->id, (guint)i));
     PtPaneGrid *grid = PT_PANE_GRID(t->grid);
     PtTerminal *foc = pt_pane_grid_focused_terminal(grid);
     infos[i].title = t->title;
     infos[i].running = pt_pane_grid_any_running(grid);
     infos[i].last_exit = foc != NULL ? pt_terminal_last_exit(foc) : -1;
   }
+  guint active_ti =
+      p != NULL ? pt_workspace_tab_index(w->ws,
+                                         pt_workspace_active_tab(w->ws, p->id))
+                : PT_WS_INDEX_NONE;
   pt_tab_strip_set_tabs(PT_TAB_STRIP(w->tabstrip), infos, n,
-                        p != NULL ? p->active_tab : -1,
-                        p != NULL ? p->accent : 0);
+                        active_ti == PT_WS_INDEX_NONE ? -1 : (int)active_ti,
+                        p != NULL ? proj_accent(p) : 0);
   g_free(infos);
 }
 
@@ -345,29 +491,20 @@ static void refresh_statusline(PtWindow *w) {
   PtProgress prog;
   gboolean has_prog = FALSE;
   const char *task = NULL;
-  /* Only a running command can have progress, and scraping the grid is not
-   * free — so this whole block is skipped while the pane sits at a prompt. */
+  /* Only a running command can have progress, so the row read is skipped while
+   * the pane sits at a prompt. Progress counters live on the last non-empty
+   * row of the visible grid; anything above it is scrollback of an older
+   * state. `running` implies the core exists (pt_terminal_running is FALSE
+   * before spawn). */
   if (running) {
     task = pt_terminal_last_command(term);
-    char *grid = pt_term_core_grid_text(pt_terminal_core(term));
-    if (grid != NULL) {
-      /* Progress counters live on the last non-empty row of the visible grid;
-       * anything above it is scrollback of an older state. */
-      char **lines = g_strsplit(grid, "\n", -1);
-      for (int i = (int)g_strv_length(lines) - 1; i >= 0; i--) {
-        g_strchomp(lines[i]);
-        if (lines[i][0] != '\0') {
-          has_prog = pt_progress_parse_line(lines[i], &prog);
-          break;
-        }
-      }
-      g_strfreev(lines);
-      g_free(grid);
-    }
+    char row[1024];
+    if (pt_term_core_last_nonempty_row(pt_terminal_core(term), row, sizeof row))
+      has_prog = pt_progress_parse_line(row, &prog);
   }
   pt_statusline_update(PT_STATUSLINE(w->statusline), running, last_exit,
                        has_prog ? &prog : NULL, task,
-                       p != NULL ? p->accent : 0);
+                       p != NULL ? proj_accent(p) : 0);
 }
 
 /* ---------- info panel ---------- */
@@ -379,26 +516,21 @@ static char *panel_dir(PtWindow *w) {
   char *cwd = term != NULL ? pt_terminal_current_cwd(term) : NULL;
   if (cwd != NULL) return cwd;
   PtProjectUI *p = active_project(w);
-  return p != NULL ? g_strdup(p->path) : NULL;
+  return p != NULL ? g_strdup(proj_path(p)) : NULL;
 }
 
 /* The shell's own name, not the foreground command: the pane's shell pid is a
- * direct child, so its comm stays "zsh" while a build runs under it. $SHELL
- * covers a pid we cannot read. Caller frees. */
-static char *shell_name_for(int pid) {
-  if (pid > 0) {
-    char *path = g_strdup_printf("/proc/%d/comm", pid);
-    char *comm = NULL;
-    gboolean ok = g_file_get_contents(path, &comm, NULL, NULL);
-    g_free(path);
-    if (ok) {
-      g_strstrip(comm);
-      if (comm[0] != '\0') return comm;
-    }
-    g_free(comm);
-  }
+ * direct child, so its comm stays "zsh" while a build runs under it. The core
+ * derives it at spawn, so this costs nothing; $SHELL/"sh" cover a pane with no
+ * live core (a tab restored into the background, a failed respawn). Borrowed,
+ * not freed. */
+static const char *shell_name_for(PtTerminal *term) {
+  const char *name = term != NULL ? pt_terminal_shell_name(term) : NULL;
+  if (name != NULL) return name;
   const char *sh = g_getenv("SHELL");
-  return g_path_get_basename(sh != NULL && sh[0] != '\0' ? sh : "sh");
+  if (sh == NULL || sh[0] == '\0') return "sh";
+  const char *slash = strrchr(sh, '/');
+  return slash != NULL ? slash + 1 : sh;
 }
 
 /* Hidden is the default state, and the 500ms tick calls this unconditionally —
@@ -412,12 +544,11 @@ static void refresh_infopanel(PtWindow *w) {
    * show until it does. */
   PtTermCore *core = term != NULL ? pt_terminal_core(term) : NULL;
   int pid = core != NULL ? (int)pt_term_core_shell_pid(core) : 0;
-  char *shell = shell_name_for(pid);
+  const char *shell = shell_name_for(term);
   char *dir = panel_dir(w);
   pt_info_panel_set_info(PT_INFO_PANEL(w->infopanel), shell, pid,
                          dir != NULL ? dir : "",
-                         p != NULL ? p->accent : 0);
-  g_free(shell);
+                         p != NULL ? proj_accent(p) : 0);
   g_free(dir);
   PtGitStatus none = {0};
   pt_info_panel_set_git(PT_INFO_PANEL(w->infopanel),
@@ -478,12 +609,12 @@ static void show_active_grid(PtWindow *w) {
 /* Every grid handler below opens with this. A grid outlives the window in the
  * shutdown window: pt-pane-grid's close idle holds its own ref, so a shell that
  * exits in the same main-loop frame as the window close emits into a window
- * whose dispose already dropped w->projects. NULL there means "gone" — bail
- * before touching the array (or re-arming a save through mark_dirty). */
+ * whose dispose already dropped w->ws. NULL there means "gone" — bail before
+ * touching the model (or re-arming a save through mark_dirty). */
 static void on_grid_structure(PtPaneGrid *g, gpointer user) {
   (void)g;
   PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
+  if (w->ws == NULL) return;
   refresh_statusline(w);
   mark_dirty(w);
 }
@@ -491,42 +622,37 @@ static void on_grid_structure(PtPaneGrid *g, gpointer user) {
 static void on_grid_focus(PtPaneGrid *g, gpointer user) {
   (void)g;
   PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
+  if (w->ws == NULL) return;
   refresh_statusline(w);
 }
 
-/* Drop tab ti of project pi and everything under it — the array's free func
- * unparents the grid, which kills its panes and their PTYs. Every "the tab is
- * going away" path ends here: a clean shell exit, the last pane closing, the
- * tab's × button. active_tab follows the tab that stayed under it (decrement
- * when a lower slot went), then clamps to the new end. */
-static void remove_tab_at(PtWindow *w, guint pi, guint ti) {
-  PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-  g_ptr_array_remove_index(p->tabs, ti);
-  if (p->active_tab > (int)ti) p->active_tab--;
-  if (p->active_tab >= (int)p->tabs->len)
-    p->active_tab = (int)p->tabs->len - 1;
-  if ((int)pi == w->active_project) show_active_grid(w);
+static void tab_ui_free(gpointer data);   /* body below, with tab_ui_new */
+
+/* Drop a tab and everything under it — freeing the UI struct unparents the
+ * grid, which kills its panes and their PTYs. Every "the tab is going away"
+ * path ends here: a clean shell exit, the last pane closing, the tab's ×
+ * button. Active-tab succession is the workspace's job now (the tab that
+ * slides into the slot, else the new last). */
+static void remove_tab(PtWindow *w, PtTabUI *t) {
+  gboolean was_visible = pt_workspace_tab_project(w->ws, t->id) ==
+                         pt_workspace_active_project(w->ws);
+  pt_workspace_remove_tab(w->ws, t->id);
+  tab_ui_free(t);
+  if (was_visible) show_active_grid(w);
   refresh_sidebar(w);   /* shell count dropped; do not wait for the poll */
   mark_dirty(w);
 }
 
 /* Last pane in a grid closed via a clean shell exit → drop the owning tab.
  * The grid may belong to a background project/tab (a background shell can exit),
- * so scan every project. The emitting grid survives this (the idle in
- * pt-pane-grid holds its own ref) even though tab removal unrefs it here. */
+ * which is why the lookup goes through find_grid_tab rather than assuming the
+ * active tab. The emitting grid survives this (the idle in pt-pane-grid holds
+ * its own ref) even though tab removal unrefs it here. */
 static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
-  for (guint pi = 0; pi < w->projects->len; pi++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-    for (guint ti = 0; ti < p->tabs->len; ti++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (t->grid != GTK_WIDGET(g)) continue;
-      remove_tab_at(w, pi, ti);
-      return;
-    }
-  }
+  PtTabUI *t = find_grid_tab(w, g);
+  if (t == NULL) return;
+  remove_tab(w, t);
 }
 
 /* Focused pane's foreground program changed → relabel the owning tab live.
@@ -537,25 +663,19 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
  * title is captured on the next structural save anyway. */
 static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
-  for (guint pi = 0; pi < w->projects->len; pi++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-    for (guint ti = 0; ti < p->tabs->len; ti++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (t->grid != GTK_WIDGET(g)) continue;
-      g_free(t->title);
-      t->title = g_strdup(comm);
-      if ((int)pi == w->active_project) {
-        refresh_tabstrip(w);
-        /* run-state just flipped for a pane of the visible project: this is the
-         * edge the 500ms poll deliberately does not cover (it only runs while
-         * something is running), so the "✓ / ✗ exit N" settle happens here. */
-        refresh_statusline(w);
-      }
-      refresh_sidebar(w);
-      return;
-    }
+  PtTabUI *t = find_grid_tab(w, g);
+  if (t == NULL) return;
+  g_free(t->title);
+  t->title = g_strdup(comm);
+  if (pt_workspace_tab_project(w->ws, t->id) ==
+      pt_workspace_active_project(w->ws)) {
+    refresh_tabstrip(w);
+    /* run-state just flipped for a pane of the visible project: this is the
+     * edge the 500ms poll deliberately does not cover (it only runs while
+     * something is running), so the "✓ / ✗ exit N" settle happens here. */
+    refresh_statusline(w);
   }
+  queue_refresh_sidebar(w);
 }
 
 /* The prompt smuggles the last exit code out through the terminal title, so a
@@ -566,7 +686,7 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
 static void on_grid_title(PtPaneGrid *g, const char *title, gpointer user) {
   (void)title;
   PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
+  if (w->ws == NULL) return;
   PtTabUI *t = active_tab(active_project(w));
   if (t == NULL || t->grid != GTK_WIDGET(g)) return;
   refresh_statusline(w);
@@ -581,45 +701,68 @@ static void on_grid_title(PtPaneGrid *g, const char *title, gpointer user) {
  * Leaves the branch untouched when there is no .git/HEAD (non-repo, or a
  * worktree/submodule whose .git is a gitdir: pointer — the monitor covers it). */
 static void seed_git_branch(PtProjectUI *p) {
-  static const char ref_prefix[] = "ref: refs/heads/";
-  char *head = g_build_filename(p->path, ".git", "HEAD", NULL);
+  char *head = g_build_filename(proj_path(p), ".git", "HEAD", NULL);
   char *txt = NULL;
   if (g_file_get_contents(head, &txt, NULL, NULL)) {
-    g_strstrip(txt);
-    if (g_str_has_prefix(txt, ref_prefix))
-      g_strlcpy(p->git.branch, txt + sizeof(ref_prefix) - 1,
-                sizeof p->git.branch);
-    else if (txt[0] != '\0')
+    char *branch = pt_git_parse_head(txt);
+    if (branch != NULL)
+      g_strlcpy(p->git.branch, branch, sizeof p->git.branch);
+    else if (*g_strstrip(txt) != '\0')
+      /* HEAD said something, just not a branch: a detached sha. An empty file
+       * says nothing, and leaves the branch for the monitor's first poll. */
       g_strlcpy(p->git.branch, "(detached)", sizeof p->git.branch);
+    g_free(branch);
   }
   g_free(txt);
   g_free(head);
 }
 
-/* Terminals are spawned deep inside the pane grid (leaves become terminals
- * during rebuild), so the project context reaches the child through the
- * module-level default env instead of a parameter. Every path that can create
- * a terminal for project p calls this immediately before doing so; the grid
- * builds synchronously, so the default is never read for a different project
- * than the one that just set it. */
-static void set_spawn_env_for(PtProjectUI *p) {
-  /* Accent hexes come from the resolved theme's accent-0..5 tokens (see
-   * accent_env above), seeded with pt-dark's values. */
-  char *proj = g_strdup_printf("PT_PROJECT=%s", p->name);
-  char *acc  = g_strdup_printf("PT_ACCENT=%s",
-                               accent_env[((p->accent % PT_ACCENT_COUNT) +
-                                           PT_ACCENT_COUNT) % PT_ACCENT_COUNT]);
+/* What a shell of project p is told about it: the project's name, its accent as
+ * a hex the prompt can colour with, and its branch. Given to the grid, which is
+ * what actually builds the panes — leaves become terminals inside it, with no
+ * project context of their own. Rebuilt at every point that can add a pane, so
+ * a split hours later still sees the current theme's accent and the branch as
+ * it stands now. */
+static void set_spawn_env_for(PtProjectUI *p, PtPaneGrid *g) {
+  PtWindow *w = p->window;
+  int a = ((proj_accent(p) % PT_ACCENT_COUNT) + PT_ACCENT_COUNT)
+          % PT_ACCENT_COUNT;
+  char *proj = g_strdup_printf("PT_PROJECT=%s", proj_name(p));
+  char *acc  = g_strdup_printf("PT_ACCENT=%s", w->accent_hex[a]);
   char *br   = g_strdup_printf("PT_BRANCH=%s", p->git.branch);
   const char *pairs[] = { proj, acc, br, NULL };
-  pt_terminal_set_default_env(pairs);
+  pt_pane_grid_set_env(g, pairs);
   g_free(proj); g_free(acc); g_free(br);
 }
 
-static PtTabUI *tab_ui_new(PtWindow *w, const char *title, PtSplitNode *tree) {
+/* The two per-pane config values as they stand now — what a pane built from
+ * here on starts out with. The terminal widget remembers neither between panes:
+ * the grid that builds a pane is what carries them to it, so that arming a new
+ * pane cannot drag a pane the user toggled by hand back into line with the file.
+ * That is the config apply's job, and it re-arms every live pane itself.
+ * The NULL config is a window mid-teardown; the compiled-in defaults are then
+ * as good an answer as any. */
+static gboolean pane_mouse_reporting(PtWindow *w) {
+  return w->config != NULL ? w->config->mouse_reporting
+                           : PT_CONFIG_MOUSE_REPORTING_DEFAULT;
+}
+
+static PtOsc52Mode pane_osc52(PtWindow *w) {
+  return w->config != NULL ? w->config->osc52 : PT_CONFIG_OSC52_DEFAULT;
+}
+
+static PtTabUI *tab_ui_new(PtWindow *w, PtProjectUI *p, const char *title,
+                           PtSplitNode *tree) {
   PtTabUI *t = g_new0(PtTabUI, 1);
+  t->window = w;
   t->title = g_strdup(title);
-  t->grid = pt_pane_grid_new(tree);
+  t->grid = pt_pane_grid_new(tree, pane_mouse_reporting(w), pane_osc52(w));
   g_object_ref_sink(t->grid);
+  /* The grid built its first panes above, so this is a back-fill — safe, and
+   * still ahead of every spawn: the grid is not parented yet, and a pane only
+   * spawns when it allocates. */
+  set_spawn_env_for(p, PT_PANE_GRID(t->grid));
+  g_object_set_data(G_OBJECT(t->grid), PT_GRID_TAB_KEY, t);
   g_signal_connect(t->grid, "structure-changed",
                    G_CALLBACK(on_grid_structure), w);
   g_signal_connect(t->grid, "focus-changed", G_CALLBACK(on_grid_focus), w);
@@ -635,11 +778,28 @@ static void tab_ui_free(gpointer data) {
   PtTabUI *t = data;
   g_free(t->title);
   if (t->grid != NULL) {
+    /* The six handlers above all carry the window, and the grid can outlive
+     * this tab (pt-pane-grid's close idle holds its own ref). Drop them here
+     * or a background shell exiting in the same frame as window close would
+     * emit "emptied" into a finalized window. */
+    g_signal_handlers_disconnect_by_data(t->grid, t->window);
+    g_object_set_data(G_OBJECT(t->grid), PT_GRID_TAB_KEY, NULL);
     if (gtk_widget_get_parent(t->grid) != NULL)
       gtk_widget_unparent(t->grid);
     g_object_unref(t->grid);
   }
   g_free(t);
+}
+
+/* The one way a tab comes into being: the widget struct, its workspace id, and
+ * the data slot binding them, in one place. Appends — the caller decides
+ * whether the new tab is also selected. */
+static PtTabUI *add_tab_ui(PtWindow *w, PtProjectUI *p, const char *title,
+                           PtSplitNode *tree) {
+  PtTabUI *t = tab_ui_new(w, p, title, tree);
+  t->id = pt_workspace_add_tab(w->ws, p->id);
+  pt_workspace_set_data(w->ws, t->id, t);
+  return t;
 }
 
 static void on_git_update(const PtGitStatus *st, GPtrArray *files,
@@ -648,30 +808,46 @@ static void on_git_update(const PtGitStatus *st, GPtrArray *files,
   PtProjectUI *p = user;
   p->git = *st;
   p->is_repo = is_repo;
-  /* `files` dies with this call, so the project keeps its own copy. */
+  /* `files` transfers from the monitor: the project keeps the array itself,
+   * and everything downstream (sidebar, project bar, palette, info panel)
+   * reads from here — no copies anywhere on the path. */
   g_clear_pointer(&p->git_files, g_ptr_array_unref);
-  p->git_files = pt_git_files_copy(files);
+  p->git_files = files;
   /* No refresh_statusline here: the status bar stopped speaking for git in the
    * rebuild (that moved to the project bar), and scraping the terminal grid on
    * every git poll would be pure waste. */
-  refresh_sidebar(p->window);
+  queue_refresh_sidebar(p->window);
   refresh_infopanel(p->window);
 }
 
-static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
-                                   const char *path) {
+/* Everything a project is before it has tabs: its workspace entry (identity,
+ * accent, order — `accent` < 0 takes the next colour in the cycle), the UI
+ * struct in its data slot, and — for a project whose directory is actually
+ * there — the branch seed its first shells' PT_BRANCH comes from. Tabs stay
+ * the caller's business because that is the one place the two entry points
+ * differ: a restored project brings its own from the session, a freshly added
+ * one gets a single shell. */
+static PtProjectUI *project_ui_alloc(PtWindow *w, const char *name,
+                                     const char *path, int accent) {
   PtProjectUI *p = g_new0(PtProjectUI, 1);
-  p->name = g_strdup(name);
-  p->path = g_strdup(path);
   p->window = w;
-  /* called before the project joins the array, so len is its future index */
-  p->accent = (int)(w->projects->len % PT_ACCENT_COUNT);
-  p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
+  p->id = pt_workspace_add_project(w->ws, name, path, accent);
+  pt_workspace_set_data(w->ws, p->id, p);
   p->missing = !g_file_test(path, G_FILE_TEST_IS_DIR);
-  if (!p->missing) {
+  /* Before the caller builds any tab: PT_BRANCH is part of the env every one of
+   * them hands its shells, and the git monitor's first poll lands far later. */
+  if (!p->missing)
     seed_git_branch(p);   /* the monitor has not polled yet; read HEAD directly */
-    set_spawn_env_for(p);
-    g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(path)));
+  return p;
+}
+
+/* A project the user just added (or one restored with no tabs saved): one
+ * shell, git monitor running. `accent` < 0 = next in the cycle. */
+static PtProjectUI *project_ui_new(PtWindow *w, const char *name,
+                                   const char *path, int accent) {
+  PtProjectUI *p = project_ui_alloc(w, name, path, accent);
+  if (!p->missing) {
+    add_tab_ui(w, p, "shell", pt_split_leaf_new(path));
     p->monitor = pt_git_monitor_new(path, on_git_update, p);
   }
   return p;
@@ -681,17 +857,78 @@ static void project_ui_free(gpointer data) {
   PtProjectUI *p = data;
   pt_git_monitor_free(p->monitor);
   g_clear_pointer(&p->git_files, g_ptr_array_unref);
-  g_free(p->name);
-  g_free(p->path);
-  g_ptr_array_free(p->tabs, TRUE);
   g_free(p);
 }
 
+/* Drop a project from the model, then free the UI hung off it — strictly in
+ * that order: grid teardown can fire grid signals, and a handler running
+ * mid-teardown must find dead ids (a defined no-op), never live ids whose data
+ * slots point at freed memory. Successor selection is the removal's job in the
+ * model; refreshes stay with the caller (dispose wants none). */
+static void remove_project_ui(PtWorkspace *ws, PtWsId project) {
+  guint tabs = pt_workspace_tab_count(ws, project);
+  GPtrArray *dead = g_ptr_array_new();
+  for (guint i = 0; i < tabs; i++)
+    g_ptr_array_add(
+        dead, pt_workspace_get_data(ws, pt_workspace_tab_at(ws, project, i)));
+  PtProjectUI *p = pt_workspace_get_data(ws, project);
+  pt_workspace_remove_project(ws, project);
+  for (guint i = 0; i < dead->len; i++)
+    tab_ui_free(g_ptr_array_index(dead, i));
+  project_ui_free(p);
+  g_ptr_array_free(dead, TRUE);
+}
+
+/* Poll cost follows attention: the active project's monitor polls at 5s, the
+ * rest back off to 60s, and the numstat subprocess only runs for the project
+ * on screen while the info panel is. Called whenever the active project or
+ * the panel's visibility moves; the setters no-op when nothing changed. */
+static void sync_git_monitors(PtWindow *w) {
+  gboolean panel = w->infopanel != NULL &&
+                   gtk_widget_get_visible(w->infopanel);
+  PtWsId active = pt_workspace_active_project(w->ws);
+  for (guint i = 0; i < pt_workspace_project_count(w->ws); i++) {
+    PtWsId id = pt_workspace_project_at(w->ws, i);
+    PtProjectUI *p = pt_workspace_get_data(w->ws, id);
+    if (p->monitor == NULL) continue;
+    gboolean is_active = id == active;
+    /* One refresh even when both settings move together — the setters only
+     * say a poll is due, they never spawn one themselves. */
+    gboolean due =
+        pt_git_monitor_set_want_line_counts(p->monitor, panel && is_active);
+    if (pt_git_monitor_set_active(p->monitor, is_active)) due = TRUE;
+    if (due) pt_git_monitor_refresh(p->monitor);
+  }
+}
+
 /* ---------- actions ---------- */
-static void action_switch_project(PtWindow *w, int idx) {
-  if (idx < 0 || (guint)idx >= w->projects->len) return;
-  w->active_project = idx;
+/* Ids inside, indices only at the seams: the id-taking cores are what the
+ * window acts through, and the index wrappers translate exactly where an index
+ * is the caller's native language (shortcut table, sidebar and tab-strip
+ * signals, the palette). A dead id no-ops. */
+static void switch_project_id(PtWindow *w, PtWsId project) {
+  if (w->ws == NULL ||
+      pt_workspace_project_index(w->ws, project) == PT_WS_INDEX_NONE)
+    return;
+  pt_workspace_set_active_project(w->ws, project);
+  sync_git_monitors(w);
   refresh_sidebar(w);
+  show_active_grid(w);
+  refresh_infopanel(w);
+  mark_dirty(w);
+}
+
+static void action_switch_project(PtWindow *w, int idx) {
+  if (w->ws == NULL || idx < 0) return;
+  PtWsId id = pt_workspace_project_at(w->ws, (guint)idx);
+  if (id != PT_WS_ID_NONE) switch_project_id(w, id);
+}
+
+static void switch_tab_id(PtWindow *w, PtWsId tab) {
+  if (w->ws == NULL ||
+      pt_workspace_tab_project(w->ws, tab) == PT_WS_ID_NONE)
+    return;
+  pt_workspace_set_active_tab(w->ws, tab);
   show_active_grid(w);
   refresh_infopanel(w);
   mark_dirty(w);
@@ -699,61 +936,40 @@ static void action_switch_project(PtWindow *w, int idx) {
 
 static void action_switch_tab(PtWindow *w, int idx) {
   PtProjectUI *p = active_project(w);
-  if (p == NULL || idx < 0 || (guint)idx >= p->tabs->len) return;
-  p->active_tab = idx;
+  if (p == NULL || idx < 0) return;
+  PtWsId tab = pt_workspace_tab_at(w->ws, p->id, (guint)idx);
+  if (tab != PT_WS_ID_NONE) switch_tab_id(w, tab);
+}
+
+/* Cycle within the active project. delta is ±1; the workspace guarantees the
+ * active tab is live whenever the project has any, so the index math is safe. */
+static void step_tab(PtWindow *w, int delta) {
+  PtProjectUI *p = active_project(w);
+  if (p == NULL) return;
+  guint len = pt_workspace_tab_count(w->ws, p->id);
+  if (len <= 1) return;
+  guint cur = pt_workspace_tab_index(
+      w->ws, pt_workspace_active_tab(w->ws, p->id));
+  guint next = (cur + (guint)((int)len + delta)) % len;
+  pt_workspace_set_active_tab(w->ws,
+                              pt_workspace_tab_at(w->ws, p->id, next));
   show_active_grid(w);
-  refresh_infopanel(w);
   mark_dirty(w);
 }
 
-static void action_next_tab(PtWindow *w) {
-  PtProjectUI *p = active_project(w);
-  if (p == NULL || p->tabs->len <= 1) return;
-  int len = (int)p->tabs->len;
-  p->active_tab = (p->active_tab + 1 + len) % len;
-  show_active_grid(w);
-  mark_dirty(w);
-}
+static void action_next_tab(PtWindow *w) { step_tab(w, +1); }
 
-static void action_prev_tab(PtWindow *w) {
-  PtProjectUI *p = active_project(w);
-  if (p == NULL || p->tabs->len <= 1) return;
-  int len = (int)p->tabs->len;
-  p->active_tab = (p->active_tab - 1 + len) % len;
-  show_active_grid(w);
-  mark_dirty(w);
-}
+static void action_prev_tab(PtWindow *w) { step_tab(w, -1); }
 
 static void action_new_tab(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   if (p == NULL || p->missing) return;
-  set_spawn_env_for(p);
-  g_ptr_array_add(p->tabs, tab_ui_new(w, "shell", pt_split_leaf_new(p->path)));
-  p->active_tab = (int)p->tabs->len - 1;
+  PtTabUI *t = add_tab_ui(w, p, "shell", pt_split_leaf_new(proj_path(p)));
+  pt_workspace_set_active_tab(w->ws, t->id);
   show_active_grid(w);
   /* the row's shell count just moved; without this it waits for the comm poll */
   refresh_sidebar(w);
   mark_dirty(w);
-}
-
-/* Locate the tab that owns a grid. Confirmation is async, so by response time
- * the grid may have been dropped already (its last shell exited cleanly →
- * on_grid_emptied removed the tab) — a plain "close the active tab's pane"
- * would then hit whatever tab slid into that slot. */
-static gboolean find_grid(PtWindow *w, PtPaneGrid *g, guint *out_pi,
-                          guint *out_ti) {
-  if (w->projects == NULL || g == NULL) return FALSE;
-  for (guint pi = 0; pi < w->projects->len; pi++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-    for (guint ti = 0; ti < p->tabs->len; ti++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (t->grid != GTK_WIDGET(g)) continue;
-      if (out_pi != NULL) *out_pi = pi;
-      if (out_ti != NULL) *out_ti = ti;
-      return TRUE;
-    }
-  }
-  return FALSE;
 }
 
 /* ---------- desktop notifications (OSC 9 / OSC 777) ----------
@@ -768,18 +984,24 @@ static gboolean find_grid(PtWindow *w, PtPaneGrid *g, guint *out_pi,
  * and the window itself. FALSE when no pane has that id, which is what a
  * notification clicked after its pane was closed looks like. */
 static gboolean activate_pane(PtWindow *w, guint64 pane_id) {
-  if (w->projects == NULL) return FALSE;
-  for (guint pi = 0; pi < w->projects->len; pi++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, pi);
-    for (guint ti = 0; ti < p->tabs->len; ti++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, ti);
-      if (!pt_pane_grid_focus_pane_by_id(PT_PANE_GRID(t->grid), pane_id))
-        continue;
-      /* The grid focused the pane already; the switches put that grid on
-       * screen. Order matters — show_active_grid re-focuses the grid's
-       * remembered pane, which the call above has just made the right one. */
-      action_switch_project(w, (int)pi);
-      action_switch_tab(w, (int)ti);
+  if (w->ws == NULL) return FALSE;
+  /* Pane ids are per-process, not per-grid, so the only way to the right grid
+   * is to ask each one; the tab that answers is already the one to switch to —
+   * no second lookup. */
+  for (guint pi = 0; pi < pt_workspace_project_count(w->ws); pi++) {
+    PtWsId proj = pt_workspace_project_at(w->ws, pi);
+    guint tabs = pt_workspace_tab_count(w->ws, proj);
+    for (guint ti = 0; ti < tabs; ti++) {
+      PtTabUI *t = pt_workspace_get_data(
+          w->ws, pt_workspace_tab_at(w->ws, proj, ti));
+      PtPaneGrid *grid = PT_PANE_GRID(t->grid);
+      if (pt_pane_grid_pane_by_id(grid, pane_id) == NULL) continue;
+      /* Focus the pane inside its grid first: the switches below end in
+       * show_active_grid, which re-focuses the grid's remembered pane — which
+       * this call has just made the right one. */
+      pt_pane_grid_focus_pane_by_id(grid, pane_id);
+      switch_project_id(w, proj);
+      switch_tab_id(w, t->id);
       gtk_window_present(GTK_WINDOW(w));
       return TRUE;
     }
@@ -828,7 +1050,7 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
                                  const char *title, const char *body,
                                  gpointer user) {
   PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
+  if (w->ws == NULL) return;
   GtkApplication *app = gtk_window_get_application(GTK_WINDOW(w));
   if (app == NULL) return;
 
@@ -870,13 +1092,13 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
 }
 
 /* Close the focused pane of grid g (not of whatever happens to be active now).
- * No-op when g is no longer owned by any tab. */
+ * No-op when g is no longer owned by any live tab. */
 static void do_close_pane(PtWindow *w, PtPaneGrid *g) {
-  guint pi = 0, ti = 0;
-  if (!find_grid(w, g, &pi, &ti)) return;
+  PtTabUI *t = find_grid_tab(w, g);
+  if (t == NULL) return;
   if (!pt_pane_grid_close_focused(g)) {
     /* last pane closed → close the owning tab, whichever one it is */
-    remove_tab_at(w, pi, ti);
+    remove_tab(w, t);
     return;
   }
   /* The running count on the sidebar row just moved, so refresh rather than
@@ -886,17 +1108,20 @@ static void do_close_pane(PtWindow *w, PtPaneGrid *g) {
 }
 
 /* Close the whole tab that owns grid g — every pane, not just the focused one.
- * No-op when g is no longer owned by any tab (see find_grid). */
+ * No-op when g is no longer owned by any live tab (see find_grid_tab). */
 static void do_close_tab(PtWindow *w, PtPaneGrid *g) {
-  guint pi = 0, ti = 0;
-  if (!find_grid(w, g, &pi, &ti)) return;
-  remove_tab_at(w, pi, ti);
+  PtTabUI *t = find_grid_tab(w, g);
+  if (t == NULL) return;
+  remove_tab(w, t);
 }
 
 /* Response-callback payload: keeps the target grid alive (the tab holding it
  * can be dropped while the dialog is up) and the window resolvable. Freed
  * through the closure's GDestroyNotify, so it survives a dialog that is torn
- * down without ever emitting a response. */
+ * down without ever emitting a response. The grid, not a tab pointer, is what
+ * crosses the async gap: on response the grid resolves to its tab's workspace
+ * id, and a tab that died meanwhile resolves to nothing — a no-op, never
+ * whatever slid into its slot. */
 typedef struct {
   PtWindow *window;    /* owned ref */
   PtPaneGrid *grid;    /* owned ref */
@@ -924,7 +1149,7 @@ static void on_close_pane_response(AdwAlertDialog *dlg, const char *response,
   /* Cancelled (or dismissed): hand the keyboard back to the pane we asked
    * about, if that grid is still on screen. A background tab's grid is
    * unparented, so check for a root before grabbing focus into nowhere. */
-  if (find_grid(c->window, c->grid, NULL, NULL) &&
+  if (find_grid_tab(c->window, c->grid) != NULL &&
       gtk_widget_get_root(GTK_WIDGET(c->grid)) != NULL)
     pt_pane_grid_focus_terminal(c->grid);
 }
@@ -972,8 +1197,10 @@ static void action_close_pane(PtWindow *w) {
 static void action_close_tab(PtWindow *w, int idx) {
   if (w->close_confirm_open) return;   /* never stack confirm dialogs */
   PtProjectUI *p = active_project(w);
-  if (p == NULL || idx < 0 || (guint)idx >= p->tabs->len) return;
-  PtTabUI *t = g_ptr_array_index(p->tabs, idx);
+  if (p == NULL || idx < 0) return;
+  PtTabUI *t = pt_workspace_get_data(
+      w->ws, pt_workspace_tab_at(w->ws, p->id, (guint)idx));
+  if (t == NULL) return;
   PtPaneGrid *grid = PT_PANE_GRID(t->grid);
   if (!pt_pane_grid_any_running(grid)) {
     do_close_tab(w, grid);
@@ -986,7 +1213,13 @@ static void action_split(PtWindow *w, PtSplitKind kind) {
   PtProjectUI *p = active_project(w);
   PtTabUI *t = active_tab(p);
   if (t == NULL) return;
-  set_spawn_env_for(p);
+  /* Re-set rather than relied on: the accent may have followed a theme change,
+   * the branch may have moved and the config may have been edited since this
+   * grid's last pane. Both reach the pane the split is about to build, and
+   * nothing else — the panes already in the grid are left as they are. */
+  set_spawn_env_for(p, PT_PANE_GRID(t->grid));
+  pt_pane_grid_set_pane_defaults(PT_PANE_GRID(t->grid),
+                                 pane_mouse_reporting(w), pane_osc52(w));
   pt_pane_grid_split(PT_PANE_GRID(t->grid), kind);
 }
 
@@ -1055,8 +1288,10 @@ static void on_folder_chosen(GObject *src, GAsyncResult *res, gpointer user) {
   if (file == NULL) return;
   char *path = g_file_get_path(file);
   char *name = g_path_get_basename(path);
-  g_ptr_array_add(w->projects, project_ui_new(w, name, path));
-  w->active_project = (int)w->projects->len - 1;
+  /* -1: take the next accent in the cycle, by the project's new position. */
+  PtProjectUI *p = project_ui_new(w, name, path, -1);
+  pt_workspace_set_active_project(w->ws, p->id);
+  sync_git_monitors(w);
   g_free(name);
   g_free(path);
   g_object_unref(file);
@@ -1081,28 +1316,28 @@ static void on_project_add(PtSidebar *sb, gpointer user) {
 static void on_project_remove(PtSidebar *sb, int idx, gpointer user) {
   (void)sb;
   PtWindow *w = PT_WINDOW(user);
-  if (idx < 0 || (guint)idx >= w->projects->len) return;
-  g_ptr_array_remove_index(w->projects, idx);
-  if (w->active_project >= (int)w->projects->len)
-    w->active_project = (int)w->projects->len - 1;
+  if (idx < 0) return;
+  PtWsId id = pt_workspace_project_at(w->ws, (guint)idx);
+  if (id == PT_WS_ID_NONE) return;
+  remove_project_ui(w->ws, id);
+  sync_git_monitors(w);   /* whoever was picked as active polls fast */
   refresh_sidebar(w);
   show_active_grid(w);
   mark_dirty(w);
 }
 
-/* The sidebar renders w->projects and does not own the order, so a reorder is
- * one array move here plus a save. */
+/* The sidebar renders the workspace order and does not own it, so a reorder is
+ * one model move here plus a save. Active project follows automatically — it
+ * is an id, not a position, so there is no index to patch up. */
 static void on_project_moved(PtSidebar *sb, int from, int to, gpointer user) {
   (void)sb;
   PtWindow *w = PT_WINDOW(user);
-  if (w->projects == NULL) return;
-  int n = (int)w->projects->len;
+  if (w->ws == NULL) return;
+  int n = (int)pt_workspace_project_count(w->ws);
   if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
-  gpointer p = g_ptr_array_steal_index(w->projects, from);
-  g_ptr_array_insert(w->projects, to, p);
-  /* active_project is a position, not an identity: skip this and a reorder
-   * silently switches the user to whatever project slid into that slot. */
-  w->active_project = pt_session_index_after_move(w->active_project, from, to);
+  pt_workspace_move_project(w->ws,
+                            pt_workspace_project_at(w->ws, (guint)from),
+                            (guint)to);
   refresh_sidebar(w);
   mark_dirty(w);
 }
@@ -1125,10 +1360,19 @@ static void on_search_escape(PtSidebar *sb, gpointer user) {
   focus_active_terminal(PT_WINDOW(user));
 }
 
+static void action_toggle_sidebar(PtWindow *w) {
+  gtk_widget_set_visible(w->sidebar, !gtk_widget_get_visible(w->sidebar));
+  /* Hiding while the sidebar search holds focus would strand the keyboard. */
+  focus_active_terminal(w);
+}
+
 /* Shared by ⌃I and the tab strip's panel button. */
 static void action_toggle_infopanel(PtWindow *w) {
   gboolean show = !gtk_widget_get_visible(w->infopanel);
   gtk_widget_set_visible(w->infopanel, show);
+  /* Line counts are only worth a subprocess while the panel can show them;
+   * opening flips the gate on, which also refreshes so they arrive now. */
+  sync_git_monitors(w);
   /* refresh_infopanel is a no-op while hidden, so without this the panel would
    * appear holding whatever it showed when it was last closed. */
   if (show) refresh_infopanel(w);
@@ -1173,7 +1417,7 @@ static void spawn_editor(const char *path) {
 static void on_open_editor(PtTabStrip *s, gpointer user) {
   (void)s;
   PtProjectUI *p = active_project(PT_WINDOW(user));
-  if (p != NULL) spawn_editor(p->path);
+  if (p != NULL) spawn_editor(proj_path(p));
 }
 
 /* ---------- info panel actions ---------- */
@@ -1221,87 +1465,100 @@ static void on_info_refresh(PtInfoPanel *ip, gpointer user) {
 }
 
 /* ---------- command palette ---------- */
-/* Commands ride the same list as projects and shells, marked by a project_idx
- * of -1; tab_idx then carries which command it is. */
+/* Commands ride the same list as projects and shells, marked is_command with
+ * `command` saying which one. */
 enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL };
 
 /* Every project, each followed by its shells, then the commands. The palette
- * ranks this flat list and hands back the (project, tab) pair the user
- * picked. */
+ * ranks this flat list and hands back the workspace ids the user picked —
+ * ids, not positions, because the palette sits open across an async gap
+ * (see PtCommandPaletteItem). */
 static void action_open_palette(PtWindow *w) {
-  GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtPaletteItem));
-  for (guint i = 0; i < w->projects->len; i++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, i);
+  GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtCommandPaletteItem));
+  for (guint i = 0; i < pt_workspace_project_count(w->ws); i++) {
+    PtWsId id = pt_workspace_project_at(w->ws, i);
+    PtProjectUI *p = pt_workspace_get_data(w->ws, id);
+    const char *name = pt_workspace_project_name(w->ws, id);
+    int accent = pt_workspace_project_accent(w->ws, id);
     /* Same spelling as the project bar: home-abbreviated path, plain branch
      * text. The ⑂ glyph is reserved for the terminal's own identity line. */
-    char *shown_path = pt_path_home_abbrev(p->path);
-    PtPaletteItem it = {
-      .name = g_strdup(p->name),
+    char shown_path[512];
+    pt_path_home_abbrev(pt_workspace_project_path(w->ws, id),
+                        g_get_home_dir(), shown_path, sizeof shown_path);
+    PtCommandPaletteItem it = {
+      .name = g_strdup(name),
       .detail = p->is_repo
           ? g_strdup_printf("%s · %s", shown_path, p->git.branch)
           : g_strdup(shown_path),
       .shortcut = i < 9 ? g_strdup_printf("^%u", i + 1) : NULL,
-      .accent = p->accent, .is_shell = FALSE,
-      .project_idx = (int)i, .tab_idx = -1,
+      .accent = accent, .is_shell = FALSE,
+      .project_id = id, .tab_id = PT_WS_ID_NONE, .command = -1,
     };
-    g_free(shown_path);
     g_array_append_val(arr, it);
-    for (guint j = 0; j < p->tabs->len; j++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, j);
-      PtPaletteItem sh = {
+    for (guint j = 0; j < pt_workspace_tab_count(w->ws, id); j++) {
+      PtWsId tab = pt_workspace_tab_at(w->ws, id, j);
+      PtTabUI *t = pt_workspace_get_data(w->ws, tab);
+      PtCommandPaletteItem sh = {
         .name = g_strdup(t->title),
-        .detail = g_strdup(p->name),
-        .shortcut = NULL, .accent = p->accent, .is_shell = TRUE,
-        .project_idx = (int)i, .tab_idx = (int)j,
+        .detail = g_strdup(name),
+        .shortcut = NULL, .accent = accent, .is_shell = TRUE,
+        .project_id = id, .tab_id = tab, .command = -1,
       };
       g_array_append_val(arr, sh);
     }
   }
   /* The row says which way it is currently pointing, so the toggle is not a
    * coin flip. */
-  PtPaletteItem mr = {
+  PtCommandPaletteItem mr = {
     .name = g_strdup("Toggle mouse reporting"),
     .detail = g_strdup(active_mouse_reporting(w)
         ? "on · apps own the mouse, shift+drag selects"
         : "off · click and drag selects"),
     .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
-    .project_idx = -1, .tab_idx = PT_CMD_TOGGLE_MOUSE_REPORTING,
+    .project_id = PT_WS_ID_NONE, .tab_id = PT_WS_ID_NONE,
+    .command = PT_CMD_TOGGLE_MOUSE_REPORTING,
   };
   g_array_append_val(arr, mr);
 
   /* The detail spells out what is lost and what is not: the row is one Enter
    * away from discarding the scrollback, and nothing asks again afterwards. */
-  PtPaletteItem rst = {
+  PtCommandPaletteItem rst = {
     .name = g_strdup("Reset terminal"),
     .detail = g_strdup("clears the screen, scrollback and modes · "
                        "the shell keeps running"),
     .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
-    .project_idx = -1, .tab_idx = PT_CMD_RESET_TERMINAL,
+    .project_id = PT_WS_ID_NONE, .tab_id = PT_WS_ID_NONE,
+    .command = PT_CMD_RESET_TERMINAL,
   };
   g_array_append_val(arr, rst);
 
   int n = (int)arr->len;
-  pt_palette_open(PT_PALETTE(w->palette),
-                  (PtPaletteItem *)g_array_free(arr, FALSE), n);
+  pt_command_palette_open(PT_COMMAND_PALETTE(w->palette),
+                  (PtCommandPaletteItem *)g_array_free(arr, FALSE), n);
 }
 
-static void on_palette_activated(PtPalette *pal, int project_idx, int tab_idx,
-                                 gpointer user) {
+/* Ids resolve at activation time: a project or tab that died while the
+ * palette was open (a background shell exiting takes its tab with it) is a
+ * dead id and a no-op — never the row that slid into its old position. A live
+ * project whose picked tab died still switches to the project, landing on its
+ * current active tab. */
+static void on_palette_activated(PtCommandPalette *pal, guint project_id,
+                                 guint tab_id, int command, gpointer user) {
   (void)pal;
   PtWindow *w = PT_WINDOW(user);
-  if (project_idx < 0) {
-    switch (tab_idx) {
+  if (command >= 0) {
+    switch (command) {
     case PT_CMD_TOGGLE_MOUSE_REPORTING: action_toggle_mouse_reporting(w); break;
     case PT_CMD_RESET_TERMINAL: action_reset_terminal(w); break;
     default: break;
     }
     return;
   }
-  action_switch_project(w, project_idx);
-  if (tab_idx >= 0) action_switch_tab(w, tab_idx);
+  switch_project_id(w, project_id);
+  if (tab_id != PT_WS_ID_NONE) switch_tab_id(w, tab_id);
 }
 
-static void on_palette_closed(PtPalette *pal, gpointer user) {
+static void on_palette_closed(PtCommandPalette *pal, gpointer user) {
   (void)pal;
   focus_active_terminal(PT_WINDOW(user));
 }
@@ -1315,7 +1572,7 @@ static void on_settings_changed(PtSettings *s, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
   if (w->config == NULL) return;   /* disposed window */
   const PtConfig *cand = pt_settings_config(s);
-  if (cand != NULL) render_config(cand);
+  if (cand != NULL) render_config(w, cand);
 }
 
 /* Enter: the candidate becomes the config, and only now does it hit disk. */
@@ -1356,60 +1613,48 @@ static void action_open_settings(PtWindow *w) {
   g_free(tdir);
 }
 
+/* Zoom owns font-size: it pushes the new value into the terminals, into the
+ * session (mark_dirty) and into the config file. delta steps the size (+1/-1);
+ * delta 0 resets to the default. Clamping lives in pt_terminal_set_font_size,
+ * and w->config is read back from the terminal afterwards so all three stay in
+ * step. NULL config = disposed window, same guard convention as
+ * active_project(). */
+static void action_zoom(PtWindow *w, int delta) {
+  if (w->config == NULL) return;
+  pt_terminal_set_font_size(delta == 0 ? PT_CONFIG_FONT_SIZE_DEFAULT
+                                       : pt_terminal_font_size() + delta);
+  mark_dirty(w);
+  w->config->font_size = pt_terminal_font_size();
+  config_save_soon(w);
+}
+
 /* ---------- shortcuts ---------- */
 
-typedef struct { PtWindow *w; int arg; } ShortcutCtx;
-
 /* The shortcut controller below runs in the CAPTURE phase on the window, so it
- * sees every accelerator before the palette's own key controller does. Letting
- * one through while the palette is up would strand it: almost all of these
+ * sees every accelerator before an overlay's own key controller does. Letting
+ * one through while an overlay is up would strand it: almost all of these
  * actions end in pt_pane_grid_focus_terminal, focus would land on a terminal in
- * a sibling subtree, the palette would drop out of the key propagation path
- * entirely, and the overlay would sit there visible with Escape dead. So while
- * the palette is open every accelerator reports "not handled" and falls through
- * to it — ⌃K alone still acts, as a toggle.
- *
- * The settings dialog is the same story with the same overlay stack and the
- * same CAPTURE-phase problem, so it blocks here too; ⌃, is its toggle. */
-static gboolean palette_blocks(PtWindow *w) {
-  if (w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette)))
-    return TRUE;
-  if (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)))
-    return TRUE;
-  return FALSE;
+ * a sibling subtree, the overlay would drop out of the key propagation path
+ * entirely, and it would sit there visible with Escape dead. So while either
+ * overlay is open every accelerator reports "not handled" and falls through to
+ * it — each overlay's own toggle (⌃K, ⌃,) still acts. */
+static gboolean overlay_open(PtWindow *w) {
+  return (w->palette != NULL && pt_command_palette_is_open(PT_COMMAND_PALETTE(w->palette))) ||
+         (w->settings != NULL && pt_settings_is_open(PT_SETTINGS(w->settings)));
 }
 
-static gboolean sc_project(GtkWidget *widget, GVariant *args, gpointer user) {
-  (void)widget; (void)args;
-  ShortcutCtx *c = user;
-  if (palette_blocks(c->w)) return FALSE;
-  action_switch_project(c->w, c->arg);
-  return TRUE;
-}
-static gboolean sc_tab(GtkWidget *widget, GVariant *args, gpointer user) {
-  (void)widget; (void)args;
-  ShortcutCtx *c = user;
-  if (palette_blocks(c->w)) return FALSE;
-  action_switch_tab(c->w, c->arg);
-  return TRUE;
-}
-static gboolean sc_new_tab(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_new_tab(PT_WINDOW(u)); return TRUE;
-}
 /* Two accelerators stay live, each a toggle for its own overlay. Both test
- * their own widget first — otherwise palette_blocks(), which now covers the
- * other overlay too, would eat the toggle — and only then defer to whatever
- * else is up. */
+ * their own widget first — otherwise overlay_open(), which covers the other
+ * overlay too, would eat the toggle — and only then defer to whatever else is
+ * up. */
 static gboolean sc_palette(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
   PtWindow *w = PT_WINDOW(u);
-  if (w->palette != NULL && pt_palette_is_open(PT_PALETTE(w->palette))) {
-    pt_palette_close(PT_PALETTE(w->palette));
+  if (w->palette != NULL && pt_command_palette_is_open(PT_COMMAND_PALETTE(w->palette))) {
+    pt_command_palette_close(PT_COMMAND_PALETTE(w->palette));
     return TRUE;
   }
-  if (palette_blocks(w)) return FALSE;   /* settings dialog is up */
+  if (overlay_open(w)) return FALSE;   /* settings dialog is up */
   action_open_palette(w);
   return TRUE;
 }
@@ -1424,121 +1669,139 @@ static gboolean sc_settings(GtkWidget *wg, GVariant *a, gpointer u) {
     if (w->config != NULL) apply_config(w);
     return TRUE;
   }
-  if (palette_blocks(w)) return FALSE;   /* palette is up */
+  if (overlay_open(w)) return FALSE;   /* palette is up */
   action_open_settings(w);
   return TRUE;
 }
-static gboolean sc_add_project(GtkWidget *wg, GVariant *a, gpointer u) {
+/* Every other accelerator is one row in the table below and goes through one
+ * callback: the blocking rule is the same for all of them, so it is written
+ * once, and the row says which action to run and with what argument. */
+typedef enum {
+  PT_ACTION_SWITCH_PROJECT,
+  PT_ACTION_SWITCH_TAB,
+  PT_ACTION_NEW_TAB,
+  PT_ACTION_ADD_PROJECT,
+  PT_ACTION_TOGGLE_SIDEBAR,
+  PT_ACTION_TOGGLE_INFOPANEL,
+  PT_ACTION_NEXT_TAB,
+  PT_ACTION_PREV_TAB,
+  PT_ACTION_SPLIT,
+  PT_ACTION_CLOSE_PANE,
+  PT_ACTION_FOCUS_NEXT,
+  PT_ACTION_FOCUS_PREV,
+  PT_ACTION_FOCUS_DIRECTION,
+  PT_ACTION_PASTE,
+  PT_ACTION_COPY,
+  PT_ACTION_ZOOM,
+} PtActionId;
+
+/* accel spells the trigger; a row with no accel binds keyval + mods raw
+ * instead, for ISO_Left_Tab, which some setups deliver for Shift+Tab and which
+ * does not always round-trip through parse_string. arg is the action's
+ * argument: project/tab index, PtSplitKind, PtPaneDirection, zoom delta. */
+static const struct {
+  const char *accel;
+  guint keyval;
+  GdkModifierType mods;
+  PtActionId id;
+  int arg;
+} shortcuts[] = {
+  { .accel = "<Control>1", .id = PT_ACTION_SWITCH_PROJECT, .arg = 0 },
+  { .accel = "<Control>2", .id = PT_ACTION_SWITCH_PROJECT, .arg = 1 },
+  { .accel = "<Control>3", .id = PT_ACTION_SWITCH_PROJECT, .arg = 2 },
+  { .accel = "<Control>4", .id = PT_ACTION_SWITCH_PROJECT, .arg = 3 },
+  { .accel = "<Control>5", .id = PT_ACTION_SWITCH_PROJECT, .arg = 4 },
+  { .accel = "<Control>6", .id = PT_ACTION_SWITCH_PROJECT, .arg = 5 },
+  { .accel = "<Control>7", .id = PT_ACTION_SWITCH_PROJECT, .arg = 6 },
+  { .accel = "<Control>8", .id = PT_ACTION_SWITCH_PROJECT, .arg = 7 },
+  { .accel = "<Control>9", .id = PT_ACTION_SWITCH_PROJECT, .arg = 8 },
+  { .accel = "<Alt>1", .id = PT_ACTION_SWITCH_TAB, .arg = 0 },
+  { .accel = "<Alt>2", .id = PT_ACTION_SWITCH_TAB, .arg = 1 },
+  { .accel = "<Alt>3", .id = PT_ACTION_SWITCH_TAB, .arg = 2 },
+  { .accel = "<Alt>4", .id = PT_ACTION_SWITCH_TAB, .arg = 3 },
+  { .accel = "<Alt>5", .id = PT_ACTION_SWITCH_TAB, .arg = 4 },
+  { .accel = "<Alt>6", .id = PT_ACTION_SWITCH_TAB, .arg = 5 },
+  { .accel = "<Alt>7", .id = PT_ACTION_SWITCH_TAB, .arg = 6 },
+  { .accel = "<Alt>8", .id = PT_ACTION_SWITCH_TAB, .arg = 7 },
+  { .accel = "<Alt>9", .id = PT_ACTION_SWITCH_TAB, .arg = 8 },
+  { .accel = "<Control>n", .id = PT_ACTION_ADD_PROJECT },
+  { .accel = "<Control>b", .id = PT_ACTION_TOGGLE_SIDEBAR },
+  /* ⌃I costs the terminal its Ctrl+I (which a shell reads as Tab): this
+   * window-level controller runs in the CAPTURE phase and takes it first. That
+   * is the requested binding. */
+  { .accel = "<Control>i", .id = PT_ACTION_TOGGLE_INFOPANEL },
+  { .accel = "<Control>t", .id = PT_ACTION_NEW_TAB },
+  { .accel = "<Control><Shift>t", .id = PT_ACTION_NEW_TAB },
+  { .accel = "<Control>Tab", .id = PT_ACTION_NEXT_TAB },
+  { .accel = "<Control><Shift>Tab", .id = PT_ACTION_PREV_TAB },
+  { .keyval = GDK_KEY_ISO_Left_Tab, .mods = GDK_CONTROL_MASK,
+    .id = PT_ACTION_PREV_TAB },
+  /* ⌥⇥ / ⌥⇧⇥ cycle tabs when the compositor does not claim them first; ⌃⇥
+   * stays the reliable fallback. No grab is attempted. */
+  { .accel = "<Alt>Tab", .id = PT_ACTION_NEXT_TAB },
+  { .accel = "<Alt><Shift>Tab", .id = PT_ACTION_PREV_TAB },
+  { .keyval = GDK_KEY_ISO_Left_Tab, .mods = GDK_ALT_MASK,
+    .id = PT_ACTION_PREV_TAB },
+  { .accel = "<Control><Shift>d", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_H },
+  { .accel = "<Control><Shift>s", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_V },
+  { .accel = "<Control><Shift>w", .id = PT_ACTION_CLOSE_PANE },
+  { .accel = "<Control><Shift>o", .id = PT_ACTION_FOCUS_NEXT },
+  /* Ghostty parity: Ctrl+Super+] / [ cycle next / previous pane. */
+  { .accel = "<Control><Super>bracketright", .id = PT_ACTION_FOCUS_NEXT },
+  { .accel = "<Control><Super>bracketleft", .id = PT_ACTION_FOCUS_PREV },
+  { .accel = "<Control><Alt>Left", .id = PT_ACTION_FOCUS_DIRECTION,
+    .arg = PT_PANE_DIR_LEFT },
+  { .accel = "<Control><Alt>Right", .id = PT_ACTION_FOCUS_DIRECTION,
+    .arg = PT_PANE_DIR_RIGHT },
+  { .accel = "<Control><Alt>Up", .id = PT_ACTION_FOCUS_DIRECTION,
+    .arg = PT_PANE_DIR_UP },
+  { .accel = "<Control><Alt>Down", .id = PT_ACTION_FOCUS_DIRECTION,
+    .arg = PT_PANE_DIR_DOWN },
+  { .accel = "<Control><Shift>v", .id = PT_ACTION_PASTE },
+  { .accel = "<Control><Shift>c", .id = PT_ACTION_COPY },
+  /* Font zoom: cover =, shifted + (both plain and explicit-shift forms),
+   * and the keypad. */
+  { .accel = "<Control>equal", .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control>plus", .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control><Shift>plus", .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control>KP_Add", .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control>minus", .id = PT_ACTION_ZOOM, .arg = -1 },
+  { .accel = "<Control>underscore", .id = PT_ACTION_ZOOM, .arg = -1 },
+  { .accel = "<Control>KP_Subtract", .id = PT_ACTION_ZOOM, .arg = -1 },
+  { .accel = "<Control>0", .id = PT_ACTION_ZOOM, .arg = 0 },
+};
+
+/* What a table row's callback carries: the window (the only per-instance part)
+ * plus the row's action. One array of these per window, not one heap block per
+ * accelerator. */
+typedef struct { PtWindow *w; PtActionId id; int arg; } ShortcutCtx;
+
+static gboolean shortcut_dispatch(GtkWidget *wg, GVariant *a, gpointer u) {
   (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_add_project(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_toggle_sidebar(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) return FALSE;
-  gtk_widget_set_visible(w->sidebar, !gtk_widget_get_visible(w->sidebar));
-  /* Hiding while the sidebar search holds focus would strand the keyboard. */
-  focus_active_terminal(w);
+  const ShortcutCtx *c = u;
+  PtWindow *w = c->w;
+  if (overlay_open(w)) return FALSE;
+  switch (c->id) {
+    case PT_ACTION_SWITCH_PROJECT:   action_switch_project(w, c->arg); break;
+    case PT_ACTION_SWITCH_TAB:       action_switch_tab(w, c->arg); break;
+    case PT_ACTION_NEW_TAB:          action_new_tab(w); break;
+    case PT_ACTION_ADD_PROJECT:      action_add_project(w); break;
+    case PT_ACTION_TOGGLE_SIDEBAR:   action_toggle_sidebar(w); break;
+    case PT_ACTION_TOGGLE_INFOPANEL: action_toggle_infopanel(w); break;
+    case PT_ACTION_NEXT_TAB:         action_next_tab(w); break;
+    case PT_ACTION_PREV_TAB:         action_prev_tab(w); break;
+    case PT_ACTION_SPLIT:            action_split(w, (PtSplitKind)c->arg); break;
+    case PT_ACTION_CLOSE_PANE:       action_close_pane(w); break;
+    case PT_ACTION_FOCUS_NEXT:       action_focus_next(w); break;
+    case PT_ACTION_FOCUS_PREV:       action_focus_prev(w); break;
+    case PT_ACTION_FOCUS_DIRECTION:
+      action_focus_direction(w, (PtPaneDirection)c->arg);
+      break;
+    case PT_ACTION_PASTE:            action_paste(w); break;
+    case PT_ACTION_COPY:             action_copy(w); break;
+    case PT_ACTION_ZOOM:             action_zoom(w, c->arg); break;
+  }
   return TRUE;
-}
-/* ⌃I costs the terminal its Ctrl+I (which a shell reads as Tab): this
- * window-level controller runs in the CAPTURE phase and takes it first. That
- * is the requested binding. */
-static gboolean sc_toggle_infopanel(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) return FALSE;
-  action_toggle_infopanel(w);
-  return TRUE;
-}
-static gboolean sc_next_tab(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_next_tab(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_prev_tab(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_prev_tab(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_split_h(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_split(PT_WINDOW(u), PT_SPLIT_H); return TRUE;
-}
-static gboolean sc_split_v(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_split(PT_WINDOW(u), PT_SPLIT_V); return TRUE;
-}
-static gboolean sc_close_pane(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_close_pane(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_focus_next(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_focus_next(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_paste(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_paste(PT_WINDOW(u)); return TRUE;
-}
-static gboolean sc_copy(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_copy(PT_WINDOW(u)); return TRUE;
-}
-/* The three zoom handlers own font-size: they push it into the terminals, into
- * the session (mark_dirty) and into the config file. NULL config = disposed
- * window, same guard convention as active_project(). */
-static gboolean sc_zoom_in(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) return FALSE;
-  if (w->config == NULL) return TRUE;
-  pt_terminal_set_font_size(pt_terminal_font_size() + 1);
-  mark_dirty(w);
-  w->config->font_size = pt_terminal_font_size();
-  config_save_soon(w);
-  return TRUE;
-}
-static gboolean sc_zoom_out(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) return FALSE;
-  if (w->config == NULL) return TRUE;
-  pt_terminal_set_font_size(pt_terminal_font_size() - 1);
-  mark_dirty(w);
-  w->config->font_size = pt_terminal_font_size();
-  config_save_soon(w);
-  return TRUE;
-}
-static gboolean sc_zoom_reset(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  PtWindow *w = PT_WINDOW(u);
-  if (palette_blocks(w)) return FALSE;
-  if (w->config == NULL) return TRUE;
-  pt_terminal_set_font_size(PT_CONFIG_FONT_SIZE_DEFAULT);
-  mark_dirty(w);
-  w->config->font_size = pt_terminal_font_size();
-  config_save_soon(w);
-  return TRUE;
-}
-static gboolean sc_focus_dir(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  ShortcutCtx *c = u;
-  if (palette_blocks(c->w)) return FALSE;
-  action_focus_direction(c->w, (PtPaneDirection)c->arg);
-  return TRUE;
-}
-static gboolean sc_focus_prev(GtkWidget *wg, GVariant *a, gpointer u) {
-  (void)wg; (void)a;
-  if (palette_blocks(PT_WINDOW(u))) return FALSE;
-  action_focus_prev(PT_WINDOW(u)); return TRUE;
 }
 
 static void add_shortcut(GtkShortcutController *ctl, const char *accel,
@@ -1565,91 +1828,57 @@ static void install_shortcuts(PtWindow *w) {
       GTK_SHORTCUT_CONTROLLER(gtk_shortcut_controller_new());
   gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(ctl),
                                              GTK_PHASE_CAPTURE);
-  for (int i = 0; i < 9; i++) {
-    ShortcutCtx *pc = g_new(ShortcutCtx, 1);
-    pc->w = w; pc->arg = i;
-    char accel[32];
-    g_snprintf(accel, sizeof(accel), "<Control>%d", i + 1);
-    add_shortcut(ctl, accel, sc_project, pc, g_free);
-    ShortcutCtx *tc = g_new(ShortcutCtx, 1);
-    tc->w = w; tc->arg = i;
-    g_snprintf(accel, sizeof(accel), "<Alt>%d", i + 1);
-    add_shortcut(ctl, accel, sc_tab, tc, g_free);
-  }
   add_shortcut(ctl, "<Control>k", sc_palette, w, NULL);
   add_shortcut(ctl, "<Control>comma", sc_settings, w, NULL);
-  add_shortcut(ctl, "<Control>n", sc_add_project, w, NULL);
-  add_shortcut(ctl, "<Control>b", sc_toggle_sidebar, w, NULL);
-  add_shortcut(ctl, "<Control>i", sc_toggle_infopanel, w, NULL);
-  add_shortcut(ctl, "<Control>t", sc_new_tab, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>t", sc_new_tab, w, NULL);
-  add_shortcut(ctl, "<Control>Tab", sc_next_tab, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>Tab", sc_prev_tab, w, NULL);
-  add_keyval_shortcut(ctl, GDK_KEY_ISO_Left_Tab, GDK_CONTROL_MASK,
-                      sc_prev_tab, w, NULL);
-  /* ⌥⇥ / ⌥⇧⇥ cycle tabs when the compositor does not claim them first; ⌃⇥
-   * stays the reliable fallback. No grab is attempted. */
-  add_shortcut(ctl, "<Alt>Tab", sc_next_tab, w, NULL);
-  add_shortcut(ctl, "<Alt><Shift>Tab", sc_prev_tab, w, NULL);
-  add_keyval_shortcut(ctl, GDK_KEY_ISO_Left_Tab, GDK_ALT_MASK,
-                      sc_prev_tab, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>d", sc_split_h, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>s", sc_split_v, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>w", sc_close_pane, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>o", sc_focus_next, w, NULL);
-  /* Ghostty parity: Ctrl+Super+] / [ cycle next / previous pane. */
-  add_shortcut(ctl, "<Control><Super>bracketright", sc_focus_next, w, NULL);
-  add_shortcut(ctl, "<Control><Super>bracketleft", sc_focus_prev, w, NULL);
-  {
-    static const struct { const char *accel; PtPaneDirection dir; } dirs[] = {
-      { "<Control><Alt>Left",  PT_PANE_DIR_LEFT  },
-      { "<Control><Alt>Right", PT_PANE_DIR_RIGHT },
-      { "<Control><Alt>Up",    PT_PANE_DIR_UP    },
-      { "<Control><Alt>Down",  PT_PANE_DIR_DOWN  },
-    };
-    for (gsize i = 0; i < G_N_ELEMENTS(dirs); i++) {
-      ShortcutCtx *dc = g_new(ShortcutCtx, 1);
-      dc->w = w; dc->arg = (int)dirs[i].dir;
-      add_shortcut(ctl, dirs[i].accel, sc_focus_dir, dc, g_free);
-    }
+  /* One allocation for the whole table, owned by the window: the rows are
+   * static, so the only thing a callback needs on top of its row is w. */
+  ShortcutCtx *ctxs = g_new(ShortcutCtx, G_N_ELEMENTS(shortcuts));
+  g_object_set_data_full(G_OBJECT(w), "pt-shortcut-ctxs", ctxs, g_free);
+  for (gsize i = 0; i < G_N_ELEMENTS(shortcuts); i++) {
+    ctxs[i].w = w;
+    ctxs[i].id = shortcuts[i].id;
+    ctxs[i].arg = shortcuts[i].arg;
+    if (shortcuts[i].accel != NULL)
+      add_shortcut(ctl, shortcuts[i].accel, shortcut_dispatch, &ctxs[i], NULL);
+    else
+      add_keyval_shortcut(ctl, shortcuts[i].keyval, shortcuts[i].mods,
+                          shortcut_dispatch, &ctxs[i], NULL);
   }
-  add_shortcut(ctl, "<Control><Shift>v", sc_paste, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>c", sc_copy, w, NULL);
-  /* Font zoom: cover =, shifted + (both plain and explicit-shift forms),
-   * and the keypad. */
-  add_shortcut(ctl, "<Control>equal", sc_zoom_in, w, NULL);
-  add_shortcut(ctl, "<Control>plus", sc_zoom_in, w, NULL);
-  add_shortcut(ctl, "<Control><Shift>plus", sc_zoom_in, w, NULL);
-  add_shortcut(ctl, "<Control>KP_Add", sc_zoom_in, w, NULL);
-  add_shortcut(ctl, "<Control>minus", sc_zoom_out, w, NULL);
-  add_shortcut(ctl, "<Control>underscore", sc_zoom_out, w, NULL);
-  add_shortcut(ctl, "<Control>KP_Subtract", sc_zoom_out, w, NULL);
-  add_shortcut(ctl, "<Control>0", sc_zoom_reset, w, NULL);
   gtk_widget_add_controller(GTK_WIDGET(w), GTK_EVENT_CONTROLLER(ctl));
 }
 
 /* ---------- persistence ---------- */
+/* The session file speaks positions (it names nothing between runs), so this
+ * is one of the two places ids become indices on purpose. The file format is
+ * unchanged. */
 static PtSessionState *capture_state(PtWindow *w) {
   PtSessionState *s = pt_session_state_new();
-  s->active_project = w->active_project;
+  guint active_idx =
+      pt_workspace_project_index(w->ws, pt_workspace_active_project(w->ws));
+  s->active_project = active_idx == PT_WS_INDEX_NONE ? -1 : (int)active_idx;
   /* The committed config, not the live terminal size: a settings preview moves
    * the terminals while w->config deliberately stays put, and a save armed
    * mid-preview would otherwise persist a size the user never accepted (and
    * the next launch's migration would seed it into the config file). */
   s->font_size = w->config != NULL ? w->config->font_size : pt_terminal_font_size();
-  for (guint i = 0; i < w->projects->len; i++) {
-    PtProjectUI *p = g_ptr_array_index(w->projects, i);
-    PtProjectState *ps = pt_project_state_new(p->name, p->path);
-    ps->active_tab = p->active_tab;
-    ps->accent = p->accent;
-    for (guint j = 0; j < p->tabs->len; j++) {
-      PtTabUI *t = g_ptr_array_index(p->tabs, j);
+  for (guint i = 0; i < pt_workspace_project_count(w->ws); i++) {
+    PtWsId id = pt_workspace_project_at(w->ws, i);
+    PtProjectState *ps =
+        pt_project_state_new(pt_workspace_project_name(w->ws, id),
+                             pt_workspace_project_path(w->ws, id));
+    guint at = pt_workspace_tab_index(w->ws,
+                                      pt_workspace_active_tab(w->ws, id));
+    /* -1 for a project with no tabs, byte-compatible with the old int
+     * bookkeeping (whose clamp left -1 when the last tab closed); restore
+     * clamps it back into range once tabs exist again. */
+    ps->active_tab = at == PT_WS_INDEX_NONE ? -1 : (int)at;
+    ps->accent = pt_workspace_project_accent(w->ws, id);
+    for (guint j = 0; j < pt_workspace_tab_count(w->ws, id); j++) {
+      PtTabUI *t = pt_workspace_get_data(
+          w->ws, pt_workspace_tab_at(w->ws, id, j));
       PtPaneGrid *grid = PT_PANE_GRID(t->grid);
       pt_pane_grid_sync_cwds(grid);
-      /* Deep-copy the live tree via JSON round-trip (cheap, reuses code). */
-      JsonNode *j_tree = pt_split_to_json(pt_pane_grid_tree(grid));
-      PtSplitNode *copy = pt_split_from_json(j_tree);
-      json_node_unref(j_tree);
+      PtSplitNode *copy = pt_split_copy(pt_pane_grid_tree(grid));
       g_ptr_array_add(ps->tabs, pt_tab_state_new(t->title, copy));
     }
     g_ptr_array_add(s->projects, ps);
@@ -1687,35 +1916,39 @@ static void restore_state(PtWindow *w) {
   if (s == NULL) return;
   for (guint i = 0; i < s->projects->len; i++) {
     PtProjectState *ps = g_ptr_array_index(s->projects, i);
-    PtProjectUI *p = g_new0(PtProjectUI, 1);
-    p->window = w;
-    p->name = g_strdup(ps->name);
-    p->path = g_strdup(ps->path);
-    p->accent = ps->accent;
-    p->tabs = g_ptr_array_new_with_free_func(tab_ui_free);
-    p->missing = !g_file_test(ps->path, G_FILE_TEST_IS_DIR);
+    /* Same construction as a project the user adds — the saved accent instead
+     * of the next one in the cycle, and the saved tabs instead of one fresh
+     * shell. project_ui_alloc has already seeded the branch, which the tabs
+     * below put in the env of every shell they spawn. */
+    PtProjectUI *p = project_ui_alloc(w, ps->name, ps->path, ps->accent);
     if (!p->missing) {
-      /* per project, not once for the whole restore: each project's shells must
-       * see their own PT_PROJECT/PT_ACCENT/PT_BRANCH */
-      seed_git_branch(p);
-      set_spawn_env_for(p);
       for (guint j = 0; j < ps->tabs->len; j++) {
         PtTabState *ts = g_ptr_array_index(ps->tabs, j);
         /* steal the tree from the session copy */
-        g_ptr_array_add(p->tabs, tab_ui_new(w, ts->title, ts->tree));
+        add_tab_ui(w, p, ts->title, ts->tree);
         ts->tree = NULL;
       }
-      if (p->tabs->len == 0)
-        g_ptr_array_add(p->tabs,
-                        tab_ui_new(w, "shell", pt_split_leaf_new(p->path)));
-      p->active_tab = CLAMP(ps->active_tab, 0, (int)p->tabs->len - 1);
-      p->monitor = pt_git_monitor_new(p->path, on_git_update, p);
+      int tabs = (int)pt_workspace_tab_count(w->ws, p->id);
+      if (tabs == 0) {
+        add_tab_ui(w, p, "shell", pt_split_leaf_new(ps->path));
+        tabs = 1;
+      }
+      pt_workspace_set_active_tab(
+          w->ws, pt_workspace_tab_at(w->ws, p->id,
+                                     (guint)CLAMP(ps->active_tab, 0,
+                                                  tabs - 1)));
+      p->monitor = pt_git_monitor_new(ps->path, on_git_update, p);
     }
-    g_ptr_array_add(w->projects, p);
   }
-  if (w->projects->len > 0)
-    w->active_project = CLAMP(s->active_project, 0,
-                              (int)w->projects->len - 1);
+  guint count = pt_workspace_project_count(w->ws);
+  if (count > 0)
+    pt_workspace_set_active_project(
+        w->ws, pt_workspace_project_at(
+                   w->ws, (guint)CLAMP(s->active_project, 0,
+                                       (int)count - 1)));
+  /* Monitors start on the fast poll; back the restored background projects
+   * off now that the active one is known. */
+  sync_git_monitors(w);
   pt_session_state_free(s);
 }
 
@@ -1731,13 +1964,22 @@ static gboolean on_close_request(GtkWindow *win, gpointer user) {
 /* ---------- construction ---------- */
 static void pt_window_dispose(GObject *obj) {
   PtWindow *w = PT_WINDOW(obj);
-  if (w->save_source != 0) { g_source_remove(w->save_source); w->save_source = 0; }
+  if (w->save_source != 0) {
+    g_source_remove(w->save_source);
+    w->save_source = 0;
+    do_save(w);   /* a quit that skipped on_close_request still writes it out */
+  }
   if (w->status_source != 0) {
     g_source_remove(w->status_source);
     w->status_source = 0;
   }
+  if (w->sidebar_idle != 0) {
+    g_source_remove(w->sidebar_idle);
+    w->sidebar_idle = 0;
+  }
   g_clear_object(&w->config_monitor);
   g_clear_object(&w->theme_monitor);
+  theme_cache_drop();   /* module-level, but nothing renders past dispose */
   if (w->config_reload_source != 0) {
     g_source_remove(w->config_reload_source);
     w->config_reload_source = 0;
@@ -1752,7 +1994,16 @@ static void pt_window_dispose(GObject *obj) {
     config_save_now(w);        /* flush the pending write before the free */
   }
   g_clear_pointer(&w->config, pt_config_free);
-  g_clear_pointer(&w->projects, g_ptr_array_unref);
+  /* w->ws goes NULL before any teardown work, so a grid signal fired by the
+   * unparenting below (or a queued one landing later) sees a dead window and
+   * bails — the same contract the projects array's clear-before-free gave. */
+  if (w->ws != NULL) {
+    PtWorkspace *ws = w->ws;
+    w->ws = NULL;
+    while (pt_workspace_project_count(ws) > 0)
+      remove_project_ui(ws, pt_workspace_project_at(ws, 0));
+    pt_workspace_free(ws);
+  }
   G_OBJECT_CLASS(pt_window_parent_class)->dispose(obj);
 }
 
@@ -1761,8 +2012,13 @@ static void pt_window_class_init(PtWindowClass *klass) {
 }
 
 static void pt_window_init(PtWindow *w) {
-  w->projects = g_ptr_array_new_with_free_func(project_ui_free);
-  w->active_project = -1;
+  w->ws = pt_workspace_new();
+  /* pt-dark's accents, until the first render resolves the real theme. */
+  static const char *const accent_seed[PT_ACCENT_COUNT] = {
+    "#6ee7a0", "#8ab4f8", "#f2b25c", "#c99bf0", "#5ed3c4", "#e0849b",
+  };
+  for (int i = 0; i < PT_ACCENT_COUNT; i++)
+    g_strlcpy(w->accent_hex[i], accent_seed[i], sizeof w->accent_hex[i]);
 
   /* The sidebar runs the full window height, so the project bar (which owns the
    * window controls and the drag handle) sits atop the content column only. */
@@ -1801,7 +2057,7 @@ static void pt_window_init(PtWindow *w) {
    * of its size request, so a hidden palette costs the layout nothing. */
   GtkWidget *overlay = gtk_overlay_new();
   gtk_overlay_set_child(GTK_OVERLAY(overlay), body);
-  w->palette = pt_palette_new();
+  w->palette = pt_command_palette_new();
   gtk_widget_set_visible(w->palette, FALSE);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), w->palette);
   /* Same treatment, same stack: the settings dialog has to be a sibling of the

@@ -1,6 +1,6 @@
 #include "pt-pane-grid.h"
 
-enum { SIG_STRUCTURE, SIG_ACTIVITY, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
+enum { SIG_STRUCTURE, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
        SIG_EMPTIED, SIG_NOTIFICATION, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
@@ -9,14 +9,15 @@ struct _PtPaneGrid {
   PtSplitNode *tree;
   PtSplitNode *focused;   /* always a leaf of tree, or NULL when empty */
   GtkWidget *root_widget; /* current widget tree child */
+  char **env;             /* child env for the panes we build, or NULL */
+  /* What a pane we build starts out with, from the config. Held here rather
+   * than in the widget file so that arming a new pane cannot touch the panes
+   * that already exist — one of them may have been toggled by hand. */
+  gboolean pane_mouse_reporting;
+  PtOsc52Mode pane_osc52;
 };
 
 G_DEFINE_FINAL_TYPE(PtPaneGrid, pt_pane_grid, GTK_TYPE_WIDGET)
-
-static void on_term_activity(PtTerminal *t, gpointer user) {
-  (void)t;
-  g_signal_emit(PT_PANE_GRID(user), signals[SIG_ACTIVITY], 0);
-}
 
 /* Re-emit "command-changed" for the currently focused pane, when known, so the
  * tab relabels on focus moves (not just when the fg program itself changes). */
@@ -109,10 +110,16 @@ static void on_term_exited(PtTerminal *t, int status, gpointer user) {
 static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   if (leaf->user != NULL) return GTK_WIDGET(leaf->user);
   GtkWidget *term = pt_terminal_new(leaf->cwd);
+  /* Everything the pane needs from its window, and this pane only. The env goes
+   * in before the pane is parented, so before it can allocate and spawn. */
+  pt_terminal_set_spawn_env(PT_TERMINAL(term),
+                            (const char *const *)g->env);
+  pt_terminal_set_pane_mouse_reporting(PT_TERMINAL(term),
+                                       g->pane_mouse_reporting);
+  pt_terminal_set_pane_osc52(PT_TERMINAL(term), g->pane_osc52);
   g_object_ref_sink(term);
   leaf->user = term;
   g_object_set_data(G_OBJECT(term), "pt-leaf", leaf);
-  g_signal_connect(term, "activity", G_CALLBACK(on_term_activity), g);
   g_signal_connect(term, "exited", G_CALLBACK(on_term_exited), g);
   g_signal_connect(term, "command-changed", G_CALLBACK(on_term_command), g);
   g_signal_connect(term, "title-changed", G_CALLBACK(on_term_title), g);
@@ -229,8 +236,12 @@ static void rebuild(PtPaneGrid *g) {
   gtk_widget_set_parent(g->root_widget, GTK_WIDGET(g));
 }
 
-GtkWidget *pt_pane_grid_new(PtSplitNode *tree) {
+GtkWidget *pt_pane_grid_new(PtSplitNode *tree, gboolean mouse_reporting,
+                            PtOsc52Mode osc52) {
   PtPaneGrid *g = g_object_new(PT_TYPE_PANE_GRID, NULL);
+  /* Set before rebuild(): it is what builds this grid's first panes. */
+  g->pane_mouse_reporting = mouse_reporting;
+  g->pane_osc52 = osc52;
   g->tree = tree;
   g->focused = pt_split_first_leaf(tree);
   rebuild(g);
@@ -238,6 +249,36 @@ GtkWidget *pt_pane_grid_new(PtSplitNode *tree) {
 }
 
 PtSplitNode *pt_pane_grid_tree(PtPaneGrid *g) { return g->tree; }
+
+static void set_env_walk(PtSplitNode *n, char **envv) {
+  if (n == NULL) return;
+  if (n->kind == PT_SPLIT_LEAF) {
+    if (n->user != NULL)
+      pt_terminal_set_spawn_env(PT_TERMINAL(n->user),
+                                (const char *const *)envv);
+    return;
+  }
+  set_env_walk(n->a, envv);
+  set_env_walk(n->b, envv);
+}
+
+void pt_pane_grid_set_env(PtPaneGrid *g, const char *const *envv) {
+  g_clear_pointer(&g->env, g_strfreev);
+  if (envv != NULL) g->env = g_strdupv((char **)envv);
+  /* The panes that already exist get it too: a pane whose shell has not
+   * spawned yet (a restored tab never shown, so never allocated) must not be
+   * left with the env of whatever the grid was told first. */
+  set_env_walk(g->tree, g->env);
+}
+
+void pt_pane_grid_set_pane_defaults(PtPaneGrid *g, gboolean mouse_reporting,
+                                    PtOsc52Mode osc52) {
+  /* Deliberately no walk over the panes that exist: the config apply that
+   * carries a change does its own re-arm of every live pane, and every other
+   * caller is only saying what the *next* pane should start out with. */
+  g->pane_mouse_reporting = mouse_reporting;
+  g->pane_osc52 = osc52;
+}
 
 void pt_pane_grid_split(PtPaneGrid *g, PtSplitKind kind) {
   if (g->focused == NULL) return;
@@ -281,11 +322,7 @@ void pt_pane_grid_focus_next(PtPaneGrid *g) {
 
 void pt_pane_grid_focus_prev(PtPaneGrid *g) {
   if (g->focused == NULL) return;
-  /* Cyclic list only walks forward; the previous leaf is the one whose
-   * successor is the focused leaf. */
-  PtSplitNode *leaf = g->focused;
-  while (pt_split_next_leaf(g->tree, leaf) != g->focused)
-    leaf = pt_split_next_leaf(g->tree, leaf);
+  PtSplitNode *leaf = pt_split_prev_leaf(g->tree, g->focused);
   if (leaf == g->focused) return;
   g->focused = leaf;
   pt_pane_grid_focus_terminal(g);
@@ -383,10 +420,6 @@ PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g) {
   return g->focused != NULL ? PT_TERMINAL(g->focused->user) : NULL;
 }
 
-int pt_pane_grid_pane_count(PtPaneGrid *g) {
-  return pt_split_count_leaves(g->tree);
-}
-
 static gboolean any_running_walk(PtSplitNode *n) {
   if (n == NULL) return FALSE;
   if (n->kind == PT_SPLIT_LEAF)
@@ -396,24 +429,6 @@ static gboolean any_running_walk(PtSplitNode *n) {
 
 gboolean pt_pane_grid_any_running(PtPaneGrid *g) {
   return any_running_walk(g->tree);
-}
-
-static void index_walk(PtSplitNode *n, PtSplitNode *target, int *idx,
-                       int *found) {
-  if (n == NULL || *found >= 0) return;
-  if (n->kind == PT_SPLIT_LEAF) {
-    if (n == target) *found = *idx;
-    (*idx)++;
-    return;
-  }
-  index_walk(n->a, target, idx, found);
-  index_walk(n->b, target, idx, found);
-}
-
-int pt_pane_grid_focused_index(PtPaneGrid *g) {
-  int idx = 0, found = -1;
-  index_walk(g->tree, g->focused, &idx, &found);
-  return found >= 0 ? found : 0;
 }
 
 static void sync_cwd_walk(PtSplitNode *n) {
@@ -461,6 +476,7 @@ static void pt_pane_grid_dispose(GObject *obj) {
   }
   free_terminals(g->tree);
   g_clear_pointer(&g->tree, pt_split_free);
+  g_clear_pointer(&g->env, g_strfreev);
   G_OBJECT_CLASS(pt_pane_grid_parent_class)->dispose(obj);
 }
 
@@ -469,8 +485,6 @@ static void pt_pane_grid_class_init(PtPaneGridClass *klass) {
   gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(klass),
                                            GTK_TYPE_BIN_LAYOUT);
   signals[SIG_STRUCTURE] = g_signal_new("structure-changed", PT_TYPE_PANE_GRID,
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
-  signals[SIG_ACTIVITY] = g_signal_new("activity", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_FOCUS] = g_signal_new("focus-changed", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
@@ -486,6 +500,10 @@ static void pt_pane_grid_class_init(PtPaneGridClass *klass) {
 }
 
 static void pt_pane_grid_init(PtPaneGrid *g) {
+  /* Overwritten by pt_pane_grid_new before it builds a single pane; here so a
+   * grid can never hand a pane a zero-initialized "config". */
+  g->pane_mouse_reporting = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
+  g->pane_osc52 = PT_CONFIG_OSC52_DEFAULT;
   gtk_widget_set_hexpand(GTK_WIDGET(g), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(g), TRUE);
 }

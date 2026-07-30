@@ -51,7 +51,7 @@ add_custom_command(
           src/icons/scalable/actions/pt-git-branch-symbolic.svg
   COMMENT "Compiling GResources")
 
-add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-palette.c src/pt-settings.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c ${PT_RES_C})
+add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-command-palette.c src/pt-settings.c src/pt-overlay.c src/pt-rowlist.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c ${PT_RES_C})
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
@@ -59,11 +59,14 @@ add_library(ptcore STATIC
   src/pt-config.c
   src/pt-fuzzy.c
   src/pt-git-parse.c
+  src/pt-path.c
   src/pt-status-parse.c
+  src/pt-style-css.c
   src/pt-split-tree.c
   src/pt-theme.c
   src/pt-session.c
-  src/pt-term-core.c)
+  src/pt-term-core.c
+  src/pt-workspace.c)
 target_include_directories(ptcore PUBLIC src)
 # Static: the shared imported target leaves the binary with a RUNPATH into
 # the build tree and a runtime dependency no user machine can satisfy.
@@ -91,6 +94,10 @@ add_executable(test-fuzzy tests/test-fuzzy.c)
 target_link_libraries(test-fuzzy PRIVATE ptcore)
 add_test(NAME fuzzy COMMAND test-fuzzy)
 
+add_executable(test-path tests/test-path.c)
+target_link_libraries(test-path PRIVATE ptcore)
+add_test(NAME path COMMAND test-path)
+
 add_executable(test-split-tree tests/test-split-tree.c)
 target_link_libraries(test-split-tree PRIVATE ptcore)
 add_test(NAME split-tree COMMAND test-split-tree)
@@ -111,6 +118,10 @@ add_executable(test-theme tests/test-theme.c)
 target_link_libraries(test-theme PRIVATE ptcore)
 add_test(NAME theme COMMAND test-theme)
 
+add_executable(test-style tests/test-style.c)
+target_link_libraries(test-style PRIVATE ptcore)
+add_test(NAME style COMMAND test-style)
+
 add_executable(test-block tests/test-block.c)
 target_link_libraries(test-block PRIVATE ptcore)
 add_test(NAME block COMMAND test-block)
@@ -118,6 +129,10 @@ add_test(NAME block COMMAND test-block)
 add_executable(test-osc-scan tests/test-osc-scan.c)
 target_link_libraries(test-osc-scan PRIVATE ptcore)
 add_test(NAME osc-scan COMMAND test-osc-scan)
+
+add_executable(test-workspace tests/test-workspace.c)
+target_link_libraries(test-workspace PRIVATE ptcore)
+add_test(NAME workspace COMMAND test-workspace)
 
 add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
 target_include_directories(test-keymap PRIVATE src)

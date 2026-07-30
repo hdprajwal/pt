@@ -1,11 +1,11 @@
 /* pt-sidebar.h */
 #pragma once
 #include <gtk/gtk.h>
+#include "pt-git-parse.h"
 typedef struct {
   const char *name;
   const char *path;
-  char branch[128];
-  int changed;
+  PtGitStatus git;   /* branch + changed count; only read when is_repo */
   gboolean is_repo;
   gboolean missing;
   int accent;        /* 0..5 */

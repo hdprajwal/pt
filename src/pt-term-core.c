@@ -16,8 +16,6 @@
 struct PtTermCore {
   GhosttyTerminal terminal;
   GhosttyRenderState render_state;
-  GhosttyRenderStateRowIterator row_iter;
-  GhosttyRenderStateRowCells row_cells;
   GhosttyKeyEncoder key_encoder;
   GhosttyKeyEvent key_event;
   GhosttyMouseEncoder mouse_encoder;
@@ -26,16 +24,19 @@ struct PtTermCore {
 
   int pty_fd;
   pid_t child;
+  char *shell_name;         /* basename of what spawn exec'd; set once at spawn */
   guint fd_source;
   guint child_source;
   guint cmd_timer;
   char last_comm[64];
+  char *last_title;         /* last title handed to cbs.title, for the dedupe */
   char **env_pairs;         /* extra "KEY=VALUE" set in the child, or NULL */
   guint16 cols, rows;
   int cell_w, cell_h;
 
   gboolean eof;
   gboolean child_exited;
+  gboolean fg_running;      /* cached fg-pgrp-vs-child; see pt_term_core_running */
   int exit_status;
   int last_exit;            /* from the "pt-exit:<n>;" title marker; -1 = none */
 
@@ -64,6 +65,12 @@ struct PtTermCore {
   gboolean sb_valid;             /* sb has been filled at least once */
   gboolean sb_dirty;             /* something moved since it was filled */
   guint64 sb_reads;              /* library reads, counted for the tests */
+
+  /* what a frame would draw changed; see pt_term_core_take_render_dirty.
+   * content_serial is bumped by every change, taken_serial latches it on
+   * take, so "dirty" is the two disagreeing and readers move neither. */
+  guint content_serial;
+  guint taken_serial;
 
   PtTermCoreCallbacks cbs;
   gpointer cbs_user;
@@ -151,6 +158,12 @@ static void effect_title_changed(GhosttyTerminal t, void *ud) {
     c->last_exit = code;
     memmove(buf, rest, strlen(rest) + 1);
   }
+  /* Shells re-emit the same title every prompt; only a change is worth a
+   * callback. Compared after the marker strip, so a prompt whose exit code
+   * moved but whose title did not still updates last_exit above in silence. */
+  if (g_strcmp0(buf, c->last_title) == 0) return;
+  g_free(c->last_title);
+  c->last_title = g_strdup(buf);
   if (c->cbs.title != NULL) c->cbs.title(c, buf, c->cbs_user);
 }
 
@@ -162,6 +175,10 @@ static gboolean poll_foreground_command(gpointer ud) {
   PtTermCore *c = ud;
   if (c->child_exited) return G_SOURCE_CONTINUE;
   pid_t fg = tcgetpgrp(c->pty_fd);
+  /* Recorded here, before the fixup below, so pt_term_core_running() is a
+   * field read instead of a tcgetpgrp per call — this poll already pays for
+   * the syscall every 700ms. */
+  c->fg_running = fg > 0 && fg != c->child;
   if (fg <= 0) fg = c->child;
   char path[64];
   g_snprintf(path, sizeof(path), "/proc/%d/comm", (int)fg);
@@ -590,6 +607,7 @@ static void on_child_exited(GPid pid, gint wait_status, gpointer ud) {
   PtTermCore *c = ud;
   (void)pid;
   c->child_exited = TRUE;
+  c->fg_running = FALSE;    /* nothing runs on a tty whose child is gone */
   c->child_source = 0;
   if (WIFEXITED(wait_status)) c->exit_status = WEXITSTATUS(wait_status);
   else if (WIFSIGNALED(wait_status)) c->exit_status = 128 + WTERMSIG(wait_status);
@@ -660,11 +678,19 @@ static void poll_mode_edges(PtTermCore *c) {
   c->was_in_band_resize = in_band_resize;
 }
 
+/* How much one dispatch may drain before handing the main loop back. A child
+ * flooding the pty (`cat bigfile`) can otherwise hold this callback for as
+ * long as the kernel keeps refilling the buffer; past the cap the dispatch
+ * ends normally and the still-readable fd re-fires the source immediately, so
+ * input and redraws stay interleaved with the flood. */
+#define PT_READ_MAX_PER_DISPATCH (256u * 1024u)
+
 static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
   PtTermCore *c = ud;
   gboolean got_data = FALSE;
   if (cond & (G_IO_IN | G_IO_HUP)) {
     uint8_t buf[4096];
+    gsize drained = 0;
     for (;;) {
       ssize_t n = read(fd, buf, sizeof(buf));
       if (n > 0) {
@@ -676,6 +702,8 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
             c->cbs.notification != NULL)
           pt_osc_scan_feed(&c->osc, buf, (size_t)n, core_osc_dispatch, c);
         got_data = TRUE;
+        drained += (gsize)n;
+        if (drained >= PT_READ_MAX_PER_DISPATCH) break;
       } else if (n == 0) { c->eof = TRUE; break; }
       else {
         if (errno == EAGAIN) break;
@@ -688,7 +716,7 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
   /* Bytes reached the parser, so rows may have been added, scrolled away or
    * reflowed and the cached scrollbar is stale. This is the only place the
    * terminal is written to. */
-  if (got_data) c->sb_dirty = TRUE;
+  if (got_data) { c->sb_dirty = TRUE; c->content_serial++; }
   if (got_data) poll_mode_edges(c);
   if (got_data && c->cbs.output != NULL) c->cbs.output(c, c->cbs_user);
   if (got_data && c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
@@ -697,8 +725,26 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
 }
 
 /* ---- spawn ---- */
+/* The shell a NULL-argv spawn execs, as the *child* will see it: the inherited
+ * $SHELL with any env_pairs "SHELL=" override applied on top (last one wins,
+ * exactly like the child's putenv sequence), then the passwd entry, then
+ * /bin/sh. Resolved once, pre-fork, and handed to both consumers — the child's
+ * exec and the parent's shell-name cache — so the two cannot disagree, and
+ * nothing is ever read back from /proc/<child>/comm (a read that races the
+ * child's exec and can see the parent's own comm). */
+static const char *resolve_shell(char *const *env_pairs) {
+  const char *shell = getenv("SHELL");
+  for (int i = 0; env_pairs != NULL && env_pairs[i] != NULL; i++)
+    if (strncmp(env_pairs[i], "SHELL=", 6) == 0) shell = env_pairs[i] + 6;
+  if (shell != NULL && shell[0] != '\0') return shell;
+  struct passwd *pw = getpwuid(getuid());
+  return (pw != NULL && pw->pw_shell != NULL && pw->pw_shell[0] != '\0')
+             ? pw->pw_shell : "/bin/sh";
+}
+
+/* `shell` is resolve_shell()'s answer and is consumed iff argv == NULL. */
 static int spawn_pty(const char *cwd, const char *const *argv,
-                     char *const *env_pairs,
+                     const char *shell, char *const *env_pairs,
                      guint16 cols, guint16 rows, int cell_w, int cell_h,
                      pid_t *child_out) {
   struct winsize ws = {
@@ -706,6 +752,14 @@ static int spawn_pty(const char *cwd, const char *const *argv,
     .ws_xpixel = (unsigned short)(cols * cell_w),
     .ws_ypixel = (unsigned short)(rows * cell_h),
   };
+  /* Everything the child touches between fork and exec is computed here,
+   * before the fork: getenv/getpwuid/allocation are not async-signal-safe,
+   * so the child branch only follows precomputed pointers. */
+  const char *shell_argv0 = NULL;
+  if (shell != NULL) {
+    shell_argv0 = strrchr(shell, '/');
+    shell_argv0 = shell_argv0 != NULL ? shell_argv0 + 1 : shell;
+  }
   int fd;
   pid_t child = forkpty(&fd, NULL, NULL, &ws);
   if (child < 0) return -1;
@@ -720,15 +774,7 @@ static int spawn_pty(const char *cwd, const char *const *argv,
     if (argv != NULL) {
       execvp(argv[0], (char *const *)argv);
     } else {
-      const char *shell = getenv("SHELL");
-      if (shell == NULL || shell[0] == '\0') {
-        struct passwd *pw = getpwuid(getuid());
-        shell = (pw != NULL && pw->pw_shell != NULL && pw->pw_shell[0] != '\0')
-                    ? pw->pw_shell : "/bin/sh";
-      }
-      const char *name = strrchr(shell, '/');
-      name = name != NULL ? name + 1 : shell;
-      execl(shell, name, NULL);
+      execl(shell, shell_argv0, (char *)NULL);
     }
     _exit(127);
   }
@@ -750,14 +796,13 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   /* pt ships one theme and it is dark, so a core nobody configures answers
    * dark rather than lying about a light background it is not painting. */
   c->dark = TRUE;
+  c->content_serial = 1;    /* a first frame always has everything to draw */
   if (env_pairs != NULL) c->env_pairs = g_strdupv((char **)env_pairs);
 
   GhosttyTerminalOptions opts = { .cols = cols, .rows = rows,
                                   .max_scrollback = 10000 };
   if (ghostty_terminal_new(NULL, &c->terminal, opts) != GHOSTTY_SUCCESS ||
       ghostty_render_state_new(NULL, &c->render_state) != GHOSTTY_SUCCESS ||
-      ghostty_render_state_row_iterator_new(NULL, &c->row_iter) != GHOSTTY_SUCCESS ||
-      ghostty_render_state_row_cells_new(NULL, &c->row_cells) != GHOSTTY_SUCCESS ||
       ghostty_key_encoder_new(NULL, &c->key_encoder) != GHOSTTY_SUCCESS ||
       ghostty_key_event_new(NULL, &c->key_event) != GHOSTTY_SUCCESS ||
       ghostty_mouse_encoder_new(NULL, &c->mouse_encoder) != GHOSTTY_SUCCESS ||
@@ -770,14 +815,26 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   ghostty_terminal_resize(c->terminal, cols, rows,
                           (uint32_t)cell_w, (uint32_t)cell_h);
 
-  c->pty_fd = spawn_pty(cwd, argv, c->env_pairs, cols, rows, cell_w, cell_h,
-                        &c->child);
+  /* One resolution, two consumers (the exec below and the cached name after
+   * it); see resolve_shell. Resolved against env_pairs because the child
+   * putenv's them before the old in-child resolution ran, so an env_pairs
+   * SHELL override changes what gets exec'd. */
+  const char *shell = argv == NULL ? resolve_shell(c->env_pairs) : NULL;
+  c->pty_fd = spawn_pty(cwd, argv, shell, c->env_pairs, cols, rows,
+                        cell_w, cell_h, &c->child);
   if (c->pty_fd < 0) {
     g_set_error(error, g_quark_from_static_string("pt-term-core"), 2,
                 "forkpty failed: %s", g_strerror(errno));
     pt_term_core_free(c);
     return NULL;
   }
+  /* Conservative until the first poll (at the end of this function) reads the
+   * tty: a spawn with a command is running it right now. */
+  c->fg_running = TRUE;
+  /* Named from the very resolution the exec consumed, never read back from
+   * the child: comm only settles after the exec, so a /proc read here can
+   * race it and cache the parent's own name instead. */
+  c->shell_name = g_path_get_basename(argv != NULL ? argv[0] : shell);
 
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_USERDATA, c);
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
@@ -839,6 +896,44 @@ void pt_term_core_set_color_scheme(PtTermCore *c, gboolean dark) {
   pty_write_raw(c->pty_fd, seq, strlen(seq));
 }
 
+/* Theme colors pushed into libghostty: the ANSI slots the theme pins (so
+ * status output matches the app chrome) plus the default bg/fg/cursor. Slots
+ * the theme leaves alone (alpha 0) keep libghostty's built-in defaults. */
+void pt_term_core_set_colors(PtTermCore *c, const PtTermColors *colors) {
+  /* Without these the render state reports libghostty's unset defaults
+   * (black on white) and the theme's bg/fg would never reach the screen.
+   * Set first: they must land even if the palette read below fails. */
+  GhosttyColorRgb bg = { colors->bg.r, colors->bg.g, colors->bg.b };
+  GhosttyColorRgb fg = { colors->fg.r, colors->fg.g, colors->fg.b };
+  GhosttyColorRgb cursor = { colors->cursor.r, colors->cursor.g,
+                             colors->cursor.b };
+  ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg);
+  ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg);
+  ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, &cursor);
+  c->content_serial++;
+
+  /* Reset to libghostty's stock palette before reading it: on a theme
+   * switch DATA_COLOR_PALETTE_DEFAULT would otherwise still report the
+   * *previous* theme's pins (our own last OPT_COLOR_PALETTE write became
+   * the new default), so slots the incoming theme leaves alone would keep
+   * the old theme's colors and diverge from a freshly created pane.
+   * set(COLOR_PALETTE, NULL) restores the stock defaults while preserving
+   * any OSC 4 overrides the program set, which the dirty mask tracks. */
+  ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, NULL);
+  GhosttyColorRgb palette[256];
+  if (ghostty_terminal_get(c->terminal,
+                           GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT,
+                           palette) != GHOSTTY_SUCCESS)
+    return;
+  for (int i = 0; i < 16; i++)
+    if (colors->palette[i].a > 0)
+      palette[i] = (GhosttyColorRgb){ colors->palette[i].r,
+                                      colors->palette[i].g,
+                                      colors->palette[i].b };
+  ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+                       palette);
+}
+
 void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
                          int cell_w, int cell_h) {
   if (cols < 1 || rows < 1) return;
@@ -879,6 +974,7 @@ void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
                           (uint32_t)cell_w, (uint32_t)cell_h);
   /* A reflow rewrites the row count and the visible area both. */
   c->sb_dirty = TRUE;
+  c->content_serial++;
 }
 
 void pt_term_core_write(PtTermCore *c, const char *buf, gssize len) {
@@ -925,13 +1021,21 @@ void pt_term_core_scroll_delta(PtTermCore *c, int rows) {
   };
   ghostty_terminal_scroll_viewport(c->terminal, sv);
   c->sb_dirty = TRUE;
+  c->content_serial++;
   if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
 }
 
 void pt_term_core_scroll_bottom(PtTermCore *c) {
+  /* Every keypress snaps to the bottom, where the viewport nearly always
+   * already is: nothing would move, so skip the redraw. Only a clean cache
+   * can say so without paying the library's expensive scrollbar walk; a
+   * dirty one lets the scroll go through, which is what it did before. */
+  if (c->sb_valid && !c->sb_dirty && c->sb.offset + c->sb.len == c->sb.total)
+    return;
   GhosttyTerminalScrollViewport sv = { .tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM };
   ghostty_terminal_scroll_viewport(c->terminal, sv);
   c->sb_dirty = TRUE;
+  c->content_serial++;
   if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
 }
 
@@ -1001,6 +1105,10 @@ static gboolean sel_ref_at(PtTermCore *c, uint16_t col, uint16_t row,
 static void sel_install(PtTermCore *c, const GhosttySelection *sel) {
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, sel);
   c->sel_active = TRUE;
+  c->content_serial++;      /* selected cells draw differently */
+  /* The draw callback owns queueing the repaint, here as everywhere the core
+   * changes what a frame shows — consumers do not queue after selection calls. */
+  if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
 }
 
 static void sel_install_linear(PtTermCore *c,
@@ -1041,6 +1149,8 @@ void pt_term_core_selection_clear(PtTermCore *c) {
   if (!c->sel_active) return;
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_SELECTION, NULL);
   c->sel_active = FALSE;
+  c->content_serial++;
+  if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);   /* as in sel_install */
 }
 
 void pt_term_core_selection_press(PtTermCore *c, double px, double py,
@@ -1134,16 +1244,10 @@ gboolean pt_term_core_hyperlink_is_safe(const char *uri) {
   return FALSE;
 }
 
-char *pt_term_core_hyperlink_at(PtTermCore *c, double px, double py) {
-  /* Not clamped to the grid the way a selection drag is: the padding around it
-   * is not part of any cell, and clamping there would make the edge column's
-   * link openable from outside it. */
-  double cx = (px - PT_CORE_PAD_X) / (double)c->cell_w;
-  double cy = (py - PT_CORE_PAD_Y) / (double)c->cell_h;
-  if (cx < 0 || cy < 0 || cx >= c->cols || cy >= c->rows) return NULL;
-
+char *pt_term_core_link_at_cell(PtTermCore *c, int row, int col) {
+  if (row < 0 || col < 0 || row >= c->rows || col >= c->cols) return NULL;
   GhosttyGridRef ref;
-  if (!sel_ref_at(c, (uint16_t)cx, (uint16_t)cy, &ref)) return NULL;
+  if (!sel_ref_at(c, (uint16_t)col, (uint16_t)row, &ref)) return NULL;
   /* A NULL buffer only asks for the length; no link at all reports zero. */
   size_t need = 0;
   if (ghostty_grid_ref_hyperlink_uri(&ref, NULL, 0, &need) !=
@@ -1164,6 +1268,16 @@ char *pt_term_core_hyperlink_at(PtTermCore *c, double px, double py) {
     return NULL;
   }
   return uri;
+}
+
+char *pt_term_core_hyperlink_at(PtTermCore *c, double px, double py) {
+  /* Not clamped to the grid the way a selection drag is: the padding around it
+   * is not part of any cell, and clamping there would make the edge column's
+   * link openable from outside it. */
+  double cx = (px - PT_CORE_PAD_X) / (double)c->cell_w;
+  double cy = (py - PT_CORE_PAD_Y) / (double)c->cell_h;
+  if (cx < 0 || cy < 0 || cx >= c->cols || cy >= c->rows) return NULL;
+  return pt_term_core_link_at_cell(c, (int)cy, (int)cx);
 }
 
 gboolean pt_term_core_mouse_tracking(PtTermCore *c) {
@@ -1203,6 +1317,24 @@ static void mouse_encoder_sync(PtTermCore *c, gboolean any_button_pressed) {
       &track_last_cell);
 }
 
+/* Room for one encoded report. SGR, the longest of the formats, spends about
+ * sixteen bytes on a four-digit cell; the slack is free, it is a stack byte. */
+#define PT_MOUSE_REPORT_MAX 128
+
+static void mouse_event_fill(PtTermCore *c, GhosttyMouseAction action,
+                             GhosttyMouseButton button, GhosttyMods mods,
+                             double px, double py) {
+  ghostty_mouse_event_set_action(c->mouse_event, action);
+  if (button != GHOSTTY_MOUSE_BUTTON_UNKNOWN)
+    ghostty_mouse_event_set_button(c->mouse_event, button);
+  else
+    ghostty_mouse_event_clear_button(c->mouse_event);
+  ghostty_mouse_event_set_mods(c->mouse_event, mods);
+  ghostty_mouse_event_set_position(c->mouse_event,
+                                   (GhosttyMousePosition){ .x = (float)px,
+                                                           .y = (float)py });
+}
+
 gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
                                    GhosttyMouseButton button, GhosttyMods mods,
                                    double px, double py) {
@@ -1217,18 +1349,9 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
       c->buttons_down &= ~(1u << button);
   }
   mouse_encoder_sync(c, c->buttons_down != 0);
+  mouse_event_fill(c, action, button, mods, px, py);
 
-  ghostty_mouse_event_set_action(c->mouse_event, action);
-  if (button != GHOSTTY_MOUSE_BUTTON_UNKNOWN)
-    ghostty_mouse_event_set_button(c->mouse_event, button);
-  else
-    ghostty_mouse_event_clear_button(c->mouse_event);
-  ghostty_mouse_event_set_mods(c->mouse_event, mods);
-  ghostty_mouse_event_set_position(c->mouse_event,
-                                   (GhosttyMousePosition){ .x = (float)px,
-                                                           .y = (float)py });
-
-  char buf[128];
+  char buf[PT_MOUSE_REPORT_MAX];
   size_t written = 0;
   if (ghostty_mouse_encoder_encode(c->mouse_encoder, c->mouse_event, buf,
                                    sizeof(buf), &written) != GHOSTTY_SUCCESS ||
@@ -1236,6 +1359,48 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
     return FALSE;
   pty_write_raw(c->pty_fd, buf, written);
   return TRUE;
+}
+
+gboolean pt_term_core_wheel_report(PtTermCore *c, GhosttyMouseButton button,
+                                   GhosttyMods mods, double px, double py,
+                                   int notches) {
+  if (c->child_exited || c->pty_fd < 0 || notches <= 0) return FALSE;
+
+  /* Synced once for the whole burst. Nothing the encoder reads can move while
+   * this runs — no pty bytes are parsed between the notches — so the reports
+   * come out byte-identical to the old sync-and-write-per-notch loop. The
+   * wheel is a press, and the encoder's cell dedupe only ever suppresses
+   * motion (input/mouse_encode.zig:108), so repeats are not swallowed.
+   *
+   * The wheel is deliberately *not* recorded in buttons_down. Ghostty reports
+   * a scroll as a button-four/five press without touching its click state
+   * (Surface.zig:3565 reports, 3763 is the only writer of click_state), so
+   * any-button-pressed stays false. Routing this through the plain
+   * mouse_report path used to set the bit and never clear it — no wheel
+   * release exists — which left every later out-of-viewport motion looking
+   * like a drag. */
+  mouse_encoder_sync(c, c->buttons_down != 0);
+  mouse_event_fill(c, GHOSTTY_MOUSE_ACTION_PRESS, button, mods, px, py);
+
+  /* One write for the burst instead of one syscall per notch. Four notches
+   * cover any wheel event; a touchpad flick can ask for more. */
+  char stack[4 * PT_MOUSE_REPORT_MAX];
+  gsize cap = (gsize)notches * PT_MOUSE_REPORT_MAX;
+  char *heap = cap > sizeof(stack) ? g_malloc(cap) : NULL;
+  char *buf = heap != NULL ? heap : stack;
+
+  gsize len = 0;
+  for (int i = 0; i < notches; i++) {
+    size_t written = 0;
+    if (ghostty_mouse_encoder_encode(c->mouse_encoder, c->mouse_event,
+                                     buf + len, PT_MOUSE_REPORT_MAX,
+                                     &written) != GHOSTTY_SUCCESS)
+      break;
+    len += written;
+  }
+  if (len > 0) pty_write_raw(c->pty_fd, buf, len);
+  g_free(heap);
+  return len > 0;
 }
 
 gboolean pt_term_core_focus_report(PtTermCore *c, gboolean focused,
@@ -1283,7 +1448,14 @@ void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count) {
   ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_DECCKM, &app_cursor);
   const char *seq = app_cursor ? (up ? "\x1bOA" : "\x1bOB")
                                : (up ? "\x1b[A" : "\x1b[B");
-  for (int i = 0; i < count; i++) pty_write_raw(c->pty_fd, seq, 3);
+  /* One write for the whole burst instead of one syscall per row; a fast
+   * wheel spills past the stack buffer, nothing else does. */
+  gsize total = (gsize)count * 3;
+  char stack[512];
+  char *buf = total <= sizeof(stack) ? stack : g_malloc(total);
+  for (gsize i = 0; i < total; i += 3) memcpy(buf + i, seq, 3);
+  pty_write_raw(c->pty_fd, buf, total);
+  if (buf != stack) g_free(buf);
 }
 
 gboolean pt_term_core_bracketed_paste(PtTermCore *c) {
@@ -1292,26 +1464,47 @@ gboolean pt_term_core_bracketed_paste(PtTermCore *c) {
   return on;
 }
 
+/* Pastes up to this many bytes are encoded without touching the heap. A line
+ * or two of shell — what nearly every paste is — stays on the stack. */
+#define PT_PASTE_STACK_MAX 4096
+/* "\x1b[200~" + "\x1b[201~", the only bytes bracketed mode adds
+ * (input/paste.zig:95-99). Nothing else changes the length. */
+#define PT_PASTE_MARKERS 12
+
 void pt_term_core_paste(PtTermCore *c, const char *text, gssize len) {
   if (c->pty_fd < 0 || c->child_exited || text == NULL) return;
   size_t n = len < 0 ? strlen(text) : (size_t)len;
   if (n == 0) return;
 
-  /* ghostty_paste_encode rewrites the unsafe bytes in place, so it gets a
-   * copy — the caller's string comes from the clipboard and is not ours. */
-  char *data = g_memdup2(text, n);
   bool bracketed = pt_term_core_bracketed_paste(c);
-  /* A NULL buffer only asks for the size (markers included). The in-place
-   * pass is idempotent, so encoding twice over the same copy is safe. */
-  size_t need = 0;
-  ghostty_paste_encode(data, n, bracketed, NULL, 0, &need);
-  char *out = g_malloc(need);
+  /* Two regions: ghostty_paste_encode rewrites the unsafe bytes in place, so
+   * it needs a copy of the clipboard string (which is not ours to touch), and
+   * then memcpys the segments into a separate output buffer. The encoded size
+   * is known up front — the input length plus the markers — so one pass does
+   * it; the old size-then-fill pair walked the same bytes twice. */
+  size_t need = n + (bracketed ? PT_PASTE_MARKERS : 0);
+  char stack[2 * PT_PASTE_STACK_MAX + PT_PASTE_MARKERS];
+  char *heap = n > PT_PASTE_STACK_MAX ? g_malloc(n + need) : NULL;
+  char *data = heap != NULL ? heap : stack;
+  char *out = data + n;
+  memcpy(data, text, n);
+
   size_t written = 0;
-  if (ghostty_paste_encode(data, n, bracketed, out, need,
-                           &written) == GHOSTTY_SUCCESS)
+  GhosttyResult r = ghostty_paste_encode(data, n, bracketed, out, need,
+                                         &written);
+  if (r != GHOSTTY_SUCCESS) {
+    /* Only reachable if the library ever grows an encoding that is longer
+     * than the input plus the markers; it hands back the size it wants. The
+     * in-place strip already ran and is idempotent, so the retry re-encodes
+     * the same copy safely. */
+    char *big = g_malloc(written);
+    r = ghostty_paste_encode(data, n, bracketed, big, written, &written);
+    if (r == GHOSTTY_SUCCESS) pty_write_raw(c->pty_fd, big, written);
+    g_free(big);
+  } else {
     pty_write_raw(c->pty_fd, out, written);
-  g_free(out);
-  g_free(data);
+  }
+  g_free(heap);
 }
 
 gboolean pt_term_core_paste_is_safe(const char *text, gssize len) {
@@ -1363,6 +1556,7 @@ void pt_term_core_reset(PtTermCore *c) {
 
   ghostty_terminal_reset(c->terminal);
   c->sb_dirty = TRUE;           /* the scrollback it just threw away */
+  c->content_serial++;
 
   /* No ghostty precedent — it does not reset its VT parser either — but it has
    * no scanner of its own to reset. pt's runs beside the library parser and can
@@ -1398,12 +1592,68 @@ void pt_term_core_sync(PtTermCore *c) {
   ghostty_render_state_update(c->render_state, c->terminal);
 }
 
+/* Set wherever the terminal's content, viewport, colors, selection or shape
+ * change: the pty read path, resize, the scroll calls, reset, set_colors and
+ * the selection installs/clears. Everything else that mutates the terminal
+ * reaches it by way of the pty and is covered by the read path. */
+gboolean pt_term_core_take_render_dirty(PtTermCore *c) {
+  gboolean dirty = c->content_serial != c->taken_serial;
+  c->taken_serial = c->content_serial;
+  return dirty;
+}
+
+guint pt_term_core_content_serial(PtTermCore *c) { return c->content_serial; }
+
+/* ---- row walks ----
+ *
+ * Every walk over the synced render state allocates its own iterator pair, so
+ * no two walks can trample each other and any of these may be called from
+ * anywhere — a link lookup from inside a draw callback included. libghostty
+ * populates a pre-allocated handle per walk (render.h: DATA_ROW_ITERATOR,
+ * ROW_DATA_CELLS), so "local" still costs one small allocation each; both
+ * objects are tiny. */
+typedef struct {
+  GhosttyRenderStateRowIterator iter;
+  GhosttyRenderStateRowCells cells;
+} PtRowWalk;
+
+static void row_walk_end(PtRowWalk *w) {
+  if (w->cells != NULL) ghostty_render_state_row_cells_free(w->cells);
+  if (w->iter != NULL) ghostty_render_state_row_iterator_free(w->iter);
+  w->cells = NULL;
+  w->iter = NULL;
+}
+
+static gboolean row_walk_begin(PtRowWalk *w, GhosttyRenderState rs) {
+  w->iter = NULL;
+  w->cells = NULL;
+  if (ghostty_render_state_row_iterator_new(NULL, &w->iter) == GHOSTTY_SUCCESS &&
+      ghostty_render_state_row_cells_new(NULL, &w->cells) == GHOSTTY_SUCCESS &&
+      ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                               &w->iter) == GHOSTTY_SUCCESS)
+    return TRUE;
+  row_walk_end(w);
+  return FALSE;
+}
+
+/* Advance to visible row `row` (0-based) and load its cells. The iterator is
+ * forward-only, so this only moves down from wherever the walk stands. */
+static gboolean row_walk_seek(PtRowWalk *w, int row) {
+  for (int r = 0; r <= row; r++)
+    if (!ghostty_render_state_row_iterator_next(w->iter)) return FALSE;
+  return ghostty_render_state_row_get(w->iter,
+                                      GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                      &w->cells) == GHOSTTY_SUCCESS;
+}
+
 /* ---- cursor shape and blink ----
  *
- * Straight reads off the last synced render state. Each falls back to what a
- * terminal nobody has configured looks like, so a failed query cannot turn the
- * cursor into something stranger than a steady block. */
-GhosttyRenderStateCursorVisualStyle pt_term_core_cursor_style(PtTermCore *c) {
+ * Straight reads off the last synced render state, all internal to
+ * pt_term_core_cursor_info since Task 3 folded the renderer onto that one
+ * call. Each falls back to what a terminal nobody has configured looks like,
+ * so a failed query cannot turn the cursor into something stranger than a
+ * steady block. */
+static GhosttyRenderStateCursorVisualStyle cursor_style(PtTermCore *c) {
   GhosttyRenderStateCursorVisualStyle style =
       GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK;
   ghostty_render_state_get(c->render_state,
@@ -1412,14 +1662,14 @@ GhosttyRenderStateCursorVisualStyle pt_term_core_cursor_style(PtTermCore *c) {
   return style;
 }
 
-gboolean pt_term_core_cursor_blinking(PtTermCore *c) {
+static gboolean cursor_blinking(PtTermCore *c) {
   bool on = false;
   ghostty_render_state_get(c->render_state,
                            GHOSTTY_RENDER_STATE_DATA_CURSOR_BLINKING, &on);
   return on;
 }
 
-gboolean pt_term_core_cursor_password_input(PtTermCore *c) {
+static gboolean cursor_password_input(PtTermCore *c) {
   bool on = false;
   ghostty_render_state_get(c->render_state,
                            GHOSTTY_RENDER_STATE_DATA_CURSOR_PASSWORD_INPUT,
@@ -1427,7 +1677,7 @@ gboolean pt_term_core_cursor_password_input(PtTermCore *c) {
   return on;
 }
 
-gboolean pt_term_core_cursor_wide_tail(PtTermCore *c) {
+static gboolean cursor_wide_tail(PtTermCore *c) {
   /* Undefined unless the cursor is actually in the viewport, so the guard is
    * here rather than at every call site. */
   bool in_vp = false;
@@ -1442,7 +1692,7 @@ gboolean pt_term_core_cursor_wide_tail(PtTermCore *c) {
   return tail;
 }
 
-gboolean pt_term_core_cursor_wide(PtTermCore *c) {
+static gboolean cursor_wide(PtTermCore *c) {
   bool in_vp = false;
   ghostty_render_state_get(c->render_state,
                            GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE,
@@ -1455,37 +1705,89 @@ gboolean pt_term_core_cursor_wide(PtTermCore *c) {
                            GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cy);
 
   /* The render state answers the tail question and not this one, so the only
-   * way to it is the cell itself. Both iterators are forward-only, hence the
-   * two walks — cy rows and cx cells, no grid copy, no allocation. */
-  GhosttyRenderStateRowIterator iter = c->row_iter;
-  if (ghostty_render_state_get(c->render_state,
-                               GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
-                               &iter) != GHOSTTY_SUCCESS)
-    return FALSE;
-  for (uint16_t r = 0; r <= cy; r++)
-    if (!ghostty_render_state_row_iterator_next(iter)) return FALSE;
-
-  GhosttyRenderStateRowCells cells = c->row_cells;
-  if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                                   &cells) != GHOSTTY_SUCCESS)
-    return FALSE;
-  for (uint16_t x = 0; x <= cx; x++)
-    if (!ghostty_render_state_row_cells_next(cells)) return FALSE;
-
+   * way to it is the cell itself: walk to the cursor's row, jump to its
+   * column, ask the raw cell. One row walk, no grid copy. */
+  PtRowWalk w;
+  if (!row_walk_begin(&w, c->render_state)) return FALSE;
+  gboolean wide = FALSE;
   GhosttyCell cell = 0;
-  if (ghostty_render_state_row_cells_get(
-          cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
-          &cell) != GHOSTTY_SUCCESS)
-    return FALSE;
-  GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
-  ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &wide);
-  return wide == GHOSTTY_CELL_WIDE_WIDE;
+  if (row_walk_seek(&w, cy) &&
+      ghostty_render_state_row_cells_select(w.cells, cx) == GHOSTTY_SUCCESS &&
+      ghostty_render_state_row_cells_get(
+          w.cells, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+          &cell) == GHOSTTY_SUCCESS) {
+    GhosttyCellWide cw = GHOSTTY_CELL_WIDE_NARROW;
+    ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &cw);
+    wide = cw == GHOSTTY_CELL_WIDE_WIDE;
+  }
+  row_walk_end(&w);
+  return wide;
 }
 
-GhosttyTerminal pt_term_core_terminal(PtTermCore *c) { return c->terminal; }
-GhosttyRenderState pt_term_core_render_state(PtTermCore *c) { return c->render_state; }
-GhosttyRenderStateRowIterator pt_term_core_row_iter(PtTermCore *c) { return c->row_iter; }
-GhosttyRenderStateRowCells pt_term_core_row_cells(PtTermCore *c) { return c->row_cells; }
+gboolean pt_term_core_cursor_info(PtTermCore *c, PtCursorInfo *out) {
+  out->style = (int)cursor_style(c);
+  out->blinking = cursor_blinking(c);
+  out->password = cursor_password_input(c);
+  bool visible = false;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE, &visible);
+  out->visible = visible;
+  out->x = 0;
+  out->y = 0;
+  out->width = 1;
+
+  /* The cursor color a program set with OSC 12, falling back to the default
+   * foreground — resolved here so the renderer never asks the state twice. */
+  GhosttyColorRgb cc = {0};
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND, &cc);
+  bool cc_set = false;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_COLOR_CURSOR_HAS_VALUE,
+                           &cc_set);
+  if (cc_set)
+    ghostty_render_state_get(c->render_state,
+                             GHOSTTY_RENDER_STATE_DATA_COLOR_CURSOR, &cc);
+  out->color = (PtColor){ cc.r, cc.g, cc.b, 1.0 };
+
+  bool in_vp = false;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_HAS_VALUE,
+                           &in_vp);
+  if (!in_vp) return FALSE;
+  uint16_t cx = 0, cy = 0;
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_X, &cx);
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_CURSOR_VIEWPORT_Y, &cy);
+  out->x = cx;
+  out->y = cy;
+  /* A wide character owns two cells and the cursor has to cover both. Two
+   * ways in, tested in ghostty's order (renderer/generic.zig:3232): on the
+   * spacer tail back up onto the head, on the head just widen. The tail
+   * answer is a render-state field; only the head question walks a row. */
+  if (cursor_wide_tail(c) && cx > 0) {
+    out->x = cx - 1;
+    out->width = 2;
+  } else if (cursor_wide(c)) {
+    out->width = 2;
+  }
+  return TRUE;
+}
+
+void pt_term_core_default_colors(PtTermCore *c, PtColor *bg, PtColor *fg) {
+  GhosttyColorRgb rgb = {0};
+  if (bg != NULL &&
+      ghostty_render_state_get(c->render_state,
+                               GHOSTTY_RENDER_STATE_DATA_COLOR_BACKGROUND,
+                               &rgb) == GHOSTTY_SUCCESS)
+    *bg = (PtColor){ rgb.r, rgb.g, rgb.b, 1.0 };
+  if (fg != NULL &&
+      ghostty_render_state_get(c->render_state,
+                               GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
+                               &rgb) == GHOSTTY_SUCCESS)
+    *fg = (PtColor){ rgb.r, rgb.g, rgb.b, 1.0 };
+}
 
 static int utf8_encode_cp(guint32 cp, char out[4]) {
   if (cp > 0x10FFFF) cp = 0xFFFD;
@@ -1508,29 +1810,37 @@ static int utf8_encode_cp(guint32 cp, char out[4]) {
   return 4;
 }
 
-static char *grid_text(GhosttyRenderState rs, GhosttyRenderStateRowIterator it,
-                       GhosttyRenderStateRowCells rc) {
+static char *grid_text(GhosttyRenderState rs) {
   GString *out = g_string_new(NULL);
-  GhosttyRenderStateRowIterator iter = it;
-  if (ghostty_render_state_get(rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
-                               &iter) != GHOSTTY_SUCCESS)
-    return g_string_free(out, FALSE);
-  while (ghostty_render_state_row_iterator_next(iter)) {
-    GhosttyRenderStateRowCells cells = rc;
-    if (ghostty_render_state_row_get(iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
-                                     &cells) != GHOSTTY_SUCCESS)
+  PtRowWalk w;
+  if (!row_walk_begin(&w, rs)) return g_string_free(out, FALSE);
+  while (ghostty_render_state_row_iterator_next(w.iter)) {
+    if (ghostty_render_state_row_get(w.iter,
+                                     GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                     &w.cells) != GHOSTTY_SUCCESS)
       continue;
+    /* Blank cells are counted, not appended: a run between non-blank cells is
+       flushed in one grow+memset, and the run a row ends on — most of most
+       rows — is simply dropped, which is the old byte-at-a-time trailing
+       trim with no bytes to trim. */
     gsize row_start = out->len;
-    while (ghostty_render_state_row_cells_next(cells)) {
+    gsize blanks = 0;
+    while (ghostty_render_state_row_cells_next(w.cells)) {
       uint32_t glen = 0;
-      ghostty_render_state_row_cells_get(cells,
+      ghostty_render_state_row_cells_get(w.cells,
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
-      if (glen == 0) { g_string_append_c(out, ' '); continue; }
+      if (glen == 0) { blanks++; continue; }
+      if (blanks > 0) {
+        gsize at = out->len;
+        g_string_set_size(out, at + blanks);
+        memset(out->str + at, ' ', blanks);
+        blanks = 0;
+      }
       /* GRAPHEMES_BUF writes ALL glen codepoints; the buffer must hold glen.
          Use a stack buffer for the common case, heap for long clusters. */
       uint32_t cps_stack[16];
       uint32_t *cps = glen <= 16 ? cps_stack : g_new(uint32_t, glen);
-      ghostty_render_state_row_cells_get(cells,
+      ghostty_render_state_row_cells_get(w.cells,
           GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
       for (uint32_t i = 0; i < glen; i++) {
         char u8[4];
@@ -1538,31 +1848,274 @@ static char *grid_text(GhosttyRenderState rs, GhosttyRenderStateRowIterator it,
       }
       if (cps != cps_stack) g_free(cps);
     }
-    /* trim trailing spaces on the row */
+    /* A row can still end in spaces a program wrote (glen 1, ' '); trim those
+       as before — rare enough that byte-at-a-time costs nothing here. */
     while (out->len > row_start && out->str[out->len - 1] == ' ')
       g_string_truncate(out, out->len - 1);
     g_string_append_c(out, '\n');
   }
+  row_walk_end(&w);
   return g_string_free(out, FALSE);
 }
 
 char *pt_term_core_grid_text(PtTermCore *c) {
-  return grid_text(c->render_state, c->row_iter, c->row_cells);
+  return grid_text(c->render_state);
+}
+
+/* One PtCell from the walk's current cell. `fg_default` is the render state's
+ * default foreground, resolved here so a consumer never asks twice. Zeroed
+ * first, so every byte of the struct — padding and the text tail past the NUL
+ * included — is deterministic and two fills of the same cell compare equal
+ * bytewise, whatever the buffer held before. */
+static void fill_cell(PtCell *out, GhosttyRenderStateRowCells cells,
+                      GhosttyColorRgb fg_default) {
+  memset(out, 0, sizeof *out);
+  uint32_t glen = 0;
+  ghostty_render_state_row_cells_get(cells,
+      GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
+  int pos = 0;
+  if (glen > 0) {
+    uint32_t cps_stack[16];
+    uint32_t *cps = glen <= 16 ? cps_stack : g_new(uint32_t, glen);
+    ghostty_render_state_row_cells_get(cells,
+        GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
+    /* Codepoints past the text cap are dropped whole: a cluster that long is
+     * far past anything a real grapheme carries, and a partial UTF-8 byte
+     * must never land in text. utf8_encode_cp turns invalid ones to U+FFFD. */
+    for (uint32_t i = 0; i < glen; i++) {
+      char u8[4];
+      int n = utf8_encode_cp(cps[i], u8);
+      if (pos + n > PT_CELL_TEXT_MAX - 1) break;
+      memcpy(out->text + pos, u8, (gsize)n);
+      pos += n;
+    }
+    if (cps != cps_stack) g_free(cps);
+  }
+  out->text[pos] = '\0';
+
+  GhosttyCell cell = 0;
+  GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+  bool linked = false;
+  if (ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &cell) == GHOSTTY_SUCCESS) {
+    ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &wide);
+    ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &linked);
+  }
+  out->has_link = linked;
+  /* Spacer heads (end-of-line stubs before a wrapped wide char) hold nothing
+   * to draw either, so they report 0 with the tails. */
+  out->width = wide == GHOSTTY_CELL_WIDE_WIDE     ? 2
+             : wide == GHOSTTY_CELL_WIDE_NARROW   ? 1
+                                                  : 0;
+
+  GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
+  ghostty_render_state_row_cells_get(cells,
+      GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
+  out->style = (guint8)((style.bold ? PT_CELL_STYLE_BOLD : 0) |
+                        (style.italic ? PT_CELL_STYLE_ITALIC : 0) |
+                        (style.underline != GHOSTTY_SGR_UNDERLINE_NONE
+                             ? PT_CELL_STYLE_UNDERLINE : 0) |
+                        (style.strikethrough ? PT_CELL_STYLE_STRIKE : 0) |
+                        (style.faint ? PT_CELL_STYLE_FAINT : 0) |
+                        (style.inverse ? PT_CELL_STYLE_INVERSE : 0));
+
+  bool selected = false;
+  ghostty_render_state_row_cells_get(cells,
+      GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_SELECTED, &selected);
+  out->selected = selected;
+
+  GhosttyColorRgb bg = {0};
+  out->has_bg = ghostty_render_state_row_cells_get(cells,
+      GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &bg) == GHOSTTY_SUCCESS;
+  out->bg = out->has_bg ? (PtColor){ bg.r, bg.g, bg.b, 1.0 } : (PtColor){0};
+
+  GhosttyColorRgb fg = fg_default;
+  if (ghostty_render_state_row_cells_get(cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR, &fg) != GHOSTTY_SUCCESS)
+    fg = fg_default;
+  out->fg = (PtColor){ fg.r, fg.g, fg.b, 1.0 };
+}
+
+int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max) {
+  if (row < 0 || out == NULL || max <= 0) return 0;
+  PtRowWalk w;
+  if (!row_walk_begin(&w, c->render_state)) return 0;
+  int n = 0;
+  if (row_walk_seek(&w, row)) {
+    GhosttyColorRgb fg_default = {0};
+    ghostty_render_state_get(c->render_state,
+                             GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
+                             &fg_default);
+    while (n < max && ghostty_render_state_row_cells_next(w.cells))
+      fill_cell(&out[n++], w.cells, fg_default);
+  }
+  row_walk_end(&w);
+  return n;
+}
+
+/* ---- sequential row walk ----
+ *
+ * The frame-shaped read: one iterator pair for the whole pass instead of the
+ * per-call seek row_cells pays, so a full repaint is O(rows) iterator steps
+ * rather than O(rows²). Each next() fills exactly what row_cells would for
+ * that row — both go through fill_cell with the same resolved default fg.
+ *
+ * The reader owns the row buffer and grows it to the widest row it meets, so
+ * no caller ever guesses a column count and no width is ever truncated — an
+ * ultrawide pane at a small font can pass 512 columns, and DECCOLM can move
+ * the grid's width away from what the pty was told. */
+struct PtRowReader {
+  PtRowWalk w;
+  GhosttyColorRgb fg_default;
+  PtCell *cells;              /* owned; handed out by rows_next */
+  int cap;
+};
+
+PtRowReader *pt_term_core_rows_begin(PtTermCore *c) {
+  PtRowReader *r = g_new0(PtRowReader, 1);
+  if (!row_walk_begin(&r->w, c->render_state)) {
+    g_free(r);
+    return NULL;
+  }
+  ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
+                           &r->fg_default);
+  /* Seeded from the pty size so the common case never reallocates; the walk
+   * below still grows past it whenever a row turns out wider. */
+  r->cap = MAX(c->cols, 1);
+  r->cells = g_new(PtCell, r->cap);
+  return r;
+}
+
+int pt_term_core_rows_next(PtRowReader *r, const PtCell **out) {
+  *out = r->cells;
+  if (!ghostty_render_state_row_iterator_next(r->w.iter)) return -1;
+  if (ghostty_render_state_row_get(r->w.iter,
+                                   GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                   &r->w.cells) != GHOSTTY_SUCCESS)
+    return 0;                 /* this row is unreadable; the walk goes on */
+  int n = 0;
+  while (ghostty_render_state_row_cells_next(r->w.cells)) {
+    if (n == r->cap) {
+      r->cap *= 2;
+      r->cells = g_renew(PtCell, r->cells, r->cap);
+    }
+    fill_cell(&r->cells[n++], r->w.cells, r->fg_default);
+  }
+  *out = r->cells;            /* again: the grow may have moved the buffer */
+  return n;
+}
+
+void pt_term_core_rows_end(PtRowReader *r) {
+  if (r == NULL) return;
+  row_walk_end(&r->w);
+  g_free(r->cells);
+  g_free(r);
+}
+
+gboolean pt_term_core_row_has_link(PtTermCore *c, int row) {
+  if (row < 0) return FALSE;
+  PtRowWalk w;
+  if (!row_walk_begin(&w, c->render_state)) return FALSE;
+  gboolean linked = FALSE;
+  gboolean found = TRUE;
+  for (int r = 0; r <= row && found; r++)
+    found = ghostty_render_state_row_iterator_next(w.iter);
+  if (found) {
+    GhosttyRow raw = 0;
+    if (ghostty_render_state_row_get(w.iter, GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
+                                     &raw) == GHOSTTY_SUCCESS) {
+      bool l = false;
+      ghostty_row_get(raw, GHOSTTY_ROW_DATA_HYPERLINK, &l);
+      linked = l;
+    }
+  }
+  row_walk_end(&w);
+  return linked;
+}
+
+gboolean pt_term_core_last_nonempty_row(PtTermCore *c, char *buf, gsize cap) {
+  if (cap == 0) return FALSE;
+  buf[0] = '\0';
+
+  /* The row iterator only walks forward, so two passes: find the last row
+   * holding a non-blank cell, then re-walk to it and render it. Rendering as
+   * we scan would need a per-row buffer to survive the blank rows after it;
+   * this path allocates nothing beyond the walk's own iterator pair. */
+  PtRowWalk w;
+  if (!row_walk_begin(&w, c->render_state)) return FALSE;
+  gssize last = -1;
+  for (gssize row = 0; ghostty_render_state_row_iterator_next(w.iter); row++) {
+    if (ghostty_render_state_row_get(w.iter,
+                                     GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                                     &w.cells) != GHOSTTY_SUCCESS)
+      continue;
+    while (ghostty_render_state_row_cells_next(w.cells)) {
+      uint32_t glen = 0;
+      ghostty_render_state_row_cells_get(w.cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
+      if (glen > 0) { last = row; break; }
+    }
+  }
+  /* Rewind for the second pass: re-populating the iterator from the render
+   * state puts it back at the top. */
+  if (last < 0 ||
+      ghostty_render_state_get(c->render_state,
+                               GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                               &w.iter) != GHOSTTY_SUCCESS ||
+      !row_walk_seek(&w, (int)last)) {
+    row_walk_end(&w);
+    return FALSE;
+  }
+
+  gsize len = 0;    /* bytes written */
+  gsize keep = 0;   /* len as of the last non-blank cell: the trailing-blank cut */
+  while (ghostty_render_state_row_cells_next(w.cells)) {
+    uint32_t glen = 0;
+    ghostty_render_state_row_cells_get(w.cells,
+        GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &glen);
+    if (glen == 0) {
+      if (len + 1 >= cap) break;    /* full; whatever remains is dropped */
+      buf[len++] = ' ';
+      continue;
+    }
+    /* GRAPHEMES_BUF writes all glen codepoints and there is no heap to spill
+     * to here, so a cluster too long for the stack buffer renders as U+FFFD —
+     * far past anything a real grapheme carries (grid_text's common case is
+     * 16), and the row still counts as non-blank. */
+    uint32_t cps[64];
+    if (glen <= G_N_ELEMENTS(cps)) {
+      ghostty_render_state_row_cells_get(w.cells,
+          GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
+    } else {
+      cps[0] = 0xFFFD;
+      glen = 1;
+    }
+    gboolean full = FALSE;
+    for (uint32_t i = 0; i < glen; i++) {
+      char u8[4];
+      int n = utf8_encode_cp(cps[i], u8);
+      if (len + (gsize)n >= cap) { full = TRUE; break; }
+      memcpy(buf + len, u8, (gsize)n);
+      len += (gsize)n;
+    }
+    keep = len;
+    if (full) break;
+  }
+  /* Spaces a program wrote (glen 1, ' ') are trailing blanks too. */
+  while (keep > 0 && buf[keep - 1] == ' ') keep--;
+  buf[keep] = '\0';
+  row_walk_end(&w);
+  return TRUE;
 }
 
 char *pt_term_grid_text_raw(GhosttyTerminal t) {
   GhosttyRenderState rs = NULL;
-  GhosttyRenderStateRowIterator iter = NULL;
-  GhosttyRenderStateRowCells cells = NULL;
   char *out = NULL;
-  if (ghostty_render_state_new(NULL, &rs) == GHOSTTY_SUCCESS &&
-      ghostty_render_state_row_iterator_new(NULL, &iter) == GHOSTTY_SUCCESS &&
-      ghostty_render_state_row_cells_new(NULL, &cells) == GHOSTTY_SUCCESS) {
+  if (ghostty_render_state_new(NULL, &rs) == GHOSTTY_SUCCESS) {
     ghostty_render_state_update(rs, t);
-    out = grid_text(rs, iter, cells);
+    out = grid_text(rs);
   }
-  if (cells != NULL) ghostty_render_state_row_cells_free(cells);
-  if (iter != NULL) ghostty_render_state_row_iterator_free(iter);
   if (rs != NULL) ghostty_render_state_free(rs);
   return out;
 }
@@ -1574,10 +2127,12 @@ gboolean pt_term_core_exited(PtTermCore *c, int *status) {
 
 pid_t pt_term_core_shell_pid(PtTermCore *c) { return c->child; }
 
+const char *pt_term_core_shell_name(PtTermCore *c) { return c->shell_name; }
+
+/* A field read: the 700ms foreground poll keeps it current, spawn seeds it
+ * TRUE and child exit clears it, so per-frame callers cost no syscall. */
 gboolean pt_term_core_running(PtTermCore *c) {
-  if (c->pty_fd < 0 || c->child_exited) return FALSE;
-  pid_t fg = tcgetpgrp(c->pty_fd);
-  return fg > 0 && fg != c->child;
+  return c->fg_running;
 }
 
 int pt_term_core_last_exit(PtTermCore *c) { return c->last_exit; }
@@ -1597,10 +2152,10 @@ void pt_term_core_free(PtTermCore *c) {
   if (c->key_encoder != NULL) ghostty_key_encoder_free(c->key_encoder);
   if (c->mouse_event != NULL) ghostty_mouse_event_free(c->mouse_event);
   if (c->mouse_encoder != NULL) ghostty_mouse_encoder_free(c->mouse_encoder);
-  if (c->row_cells != NULL) ghostty_render_state_row_cells_free(c->row_cells);
-  if (c->row_iter != NULL) ghostty_render_state_row_iterator_free(c->row_iter);
   if (c->render_state != NULL) ghostty_render_state_free(c->render_state);
   if (c->terminal != NULL) ghostty_terminal_free(c->terminal);
   g_strfreev(c->env_pairs);
+  g_free(c->last_title);
+  g_free(c->shell_name);
   g_free(c);
 }

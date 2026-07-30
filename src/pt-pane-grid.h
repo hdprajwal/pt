@@ -6,8 +6,26 @@
 #define PT_TYPE_PANE_GRID (pt_pane_grid_get_type())
 G_DECLARE_FINAL_TYPE(PtPaneGrid, pt_pane_grid, PT, PANE_GRID, GtkWidget)
 
-/* Takes ownership of tree; creates a PtTerminal per leaf (cwd from leaf). */
-GtkWidget *pt_pane_grid_new(PtSplitNode *tree);
+/* Takes ownership of tree; creates a PtTerminal per leaf (cwd from leaf). The
+ * two config values are taken here rather than set afterwards because these
+ * first panes are built inside this call — see pt_pane_grid_set_pane_defaults,
+ * which is the same thing for the panes built later. */
+GtkWidget *pt_pane_grid_new(PtSplitNode *tree, gboolean mouse_reporting,
+                            PtOsc52Mode osc52);
+/* The env every pane of this grid hands its shell: NULL-terminated
+ * "KEY=VALUE" strings, copied (NULL clears). Panes are built deep inside the
+ * grid, from split-tree leaves with no project context of their own, so the
+ * window sets it here once per grid and the grid passes it to each pane.
+ * Applies to future spawns — the grid's existing panes are updated too, but a
+ * shell already running keeps the env it started with. */
+void pt_pane_grid_set_env(PtPaneGrid *g, const char *const *envv);
+/* What a pane this grid builds from here on starts out with: the
+ * `mouse-reporting` and `osc52` config values. Only ever applied to panes the
+ * grid builds *after* this call, so creating a tab or a split leaves a pane
+ * somebody toggled by hand alone — following the file is the config apply's
+ * job, and it re-arms every live pane itself. */
+void pt_pane_grid_set_pane_defaults(PtPaneGrid *g, gboolean mouse_reporting,
+                                    PtOsc52Mode osc52);
 PtSplitNode *pt_pane_grid_tree(PtPaneGrid *g);
 void pt_pane_grid_split(PtPaneGrid *g, PtSplitKind kind);
 /* Close focused pane. Returns FALSE when the grid is now empty (close the tab). */
@@ -30,14 +48,11 @@ PtTerminal *pt_pane_grid_pane_by_id(PtPaneGrid *g, guint64 id);
 /* Same lookup, but focus what it finds. */
 gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id);
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
-int pt_pane_grid_pane_count(PtPaneGrid *g);
 /* TRUE when any pane in the grid has a foreground process other than the shell. */
 gboolean pt_pane_grid_any_running(PtPaneGrid *g);
-int pt_pane_grid_focused_index(PtPaneGrid *g);
 void pt_pane_grid_sync_cwds(PtPaneGrid *g); /* leaf->cwd ← live terminal cwd */
 void pt_pane_grid_focus_terminal(PtPaneGrid *g); /* grab focus on focused pane */
 /* Signals: "structure-changed" (void) — split/close happened (persist!);
- *          "activity" (void) — any child terminal produced output;
  *          "focus-changed" (void) — focused pane changed;
  *          "command-changed" (const char*) — focused pane's foreground program
  *              changed (or a focus move landed on a pane with a known command);

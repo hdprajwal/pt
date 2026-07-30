@@ -1,12 +1,13 @@
 #include "pt-term-core.h"
 #include "pt-term-core-internal.h"   /* pt_osc52_decode, the OSC 52 caps */
 #include "pt-config.h"
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 
 typedef struct { GMainLoop *loop; PtTermCore *core;
                  gboolean found; int exit_status; gboolean exited;
-                 char comm[64]; char title[128];
+                 char comm[64]; char title[128]; int title_count;
                  int osc_code; char osc_payload[128]; int osc_count;
                  char clip[256]; gsize clip_len; gboolean clip_primary;
                  int clip_count;
@@ -72,6 +73,42 @@ static void test_exit_status_reported(void) {
   g_assert_cmpint(st, ==, 7);
   pt_term_core_free(core);
   g_main_loop_unref(ctx.loop);
+}
+
+/* The shell name is derived from what the spawn execs, never read back from
+ * /proc/<child>/comm — a comm read can race the child's exec and see the
+ * parent's own name. Being spawn-derived it is exact and available
+ * immediately, even before the exec has happened. */
+static void test_shell_name(void) {
+  const char *argv[] = {"/bin/sh", "-c", "exit 0", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
+  pt_term_core_free(core);
+
+  /* NULL argv spawns the default shell; the name is $SHELL's basename. */
+  char *old = g_strdup(g_getenv("SHELL"));
+  g_setenv("SHELL", "/bin/sh", TRUE);
+  core = pt_term_core_new("/tmp", NULL, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
+  pt_term_core_free(core);   /* kills+reaps the interactive shell */
+
+  /* A SHELL override in env_pairs reaches the child's environment before the
+   * shell is resolved, so it decides what gets exec'd — and the cached name
+   * must follow the override, not the parent's own $SHELL (here a decoy that
+   * would betray a parent-environment resolution as "fakesh"). */
+  g_setenv("SHELL", "/bin/fakesh", TRUE);
+  const char *envp[] = { "SHELL=/bin/sh", NULL };
+  core = pt_term_core_new("/tmp", NULL, envp, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
+  pt_term_core_free(core);
+
+  if (old != NULL) g_setenv("SHELL", old, TRUE);
+  else g_unsetenv("SHELL");
+  g_free(old);
 }
 
 static void test_key_send_echoes(void) {
@@ -345,18 +382,31 @@ static gboolean fg_is_not_child(PtTermCore *c) {
   return tp > 0 && tp != pt_term_core_shell_pid(c);
 }
 
+static gboolean core_running(PtTermCore *c) {
+  return pt_term_core_running(c);
+}
+
+static gboolean core_not_running(PtTermCore *c) {
+  return !pt_term_core_running(c);
+}
+
+static gboolean core_exited(PtTermCore *c) {
+  return pt_term_core_exited(c, NULL);
+}
+
 static void test_running_state_idle(void) {
   /* Negative case: the spawned program is itself the pty's foreground
      process-group leader (forkpty/login_tty), so nothing is "running" on top
      of it. Wait for the tty to actually settle on the child first, otherwise
-     the assertion would only exercise the `fg > 0` guard. */
+     the assertion would only exercise the `fg > 0` guard. The answer comes
+     from the 700ms foreground poll, so it is waited for, not read once. */
   const char *argv[] = {"/bin/cat", NULL};
   GError *err = NULL;
   PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
   g_assert_no_error(err);
   g_assert_nonnull(core);
   g_assert_true(wait_until(fg_is_child, core));       /* tty settled on cat */
-  g_assert_false(pt_term_core_running(core));
+  g_assert_true(wait_until(core_not_running, core));
   /* No prompt snippet has reported an exit code yet. */
   g_assert_cmpint(pt_term_core_last_exit(core), ==, -1);
   pt_term_core_free(core);
@@ -371,7 +421,25 @@ static void test_running_state_foreground_job(void) {
   g_assert_no_error(err);
   g_assert_nonnull(core);
   g_assert_true(wait_until(fg_is_not_child, core));   /* sleep owns the tty */
-  g_assert_true(pt_term_core_running(core));
+  g_assert_true(wait_until(core_running, core));
+  pt_term_core_free(core);
+}
+
+static void test_running_state_cleared_on_exit(void) {
+  /* The moment the child is gone nothing is running, however recently the
+     foreground poll saw a job on the tty — a tab must not keep its spinner
+     for up to a poll interval after the shell died. */
+  const char *argv[] = {"/bin/sh", "-mc", "sleep 30; true", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_nonnull(core);
+  g_assert_true(wait_until(fg_is_not_child, core));   /* sleep owns the tty */
+  g_assert_true(wait_until(core_running, core));
+
+  kill(pt_term_core_shell_pid(core), SIGKILL);
+  g_assert_true(wait_until(core_exited, core));
+  g_assert_false(pt_term_core_running(core));
   pt_term_core_free(core);
 }
 
@@ -411,6 +479,7 @@ static void test_spawn_env(void) {
 static void on_title_cb(PtTermCore *core, const char *title, gpointer user) {
   (void)core;
   Ctx *ctx = user;
+  ctx->title_count++;
   g_strlcpy(ctx->title, title, sizeof(ctx->title));
 }
 
@@ -498,6 +567,45 @@ static void test_mouse_report_sgr(void) {
                                           29.0, 36.0));
   g_assert_true(wait_for_text(core, "^[[<65;2;2M"));
 
+  pt_term_core_free(core);
+}
+
+static void test_wheel_report_batches_notches(void) {
+  /* A wheel event can carry several notches; the widget hands all of them to
+     the core at once and the core makes one write of it. The bytes have to be
+     exactly what one report per notch produced — three identical button-4
+     presses, back to back, nothing merged and nothing dropped. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(tracking_on, core));
+
+  g_assert_true(pt_term_core_wheel_report(core, GHOSTTY_MOUSE_BUTTON_FOUR, 0,
+                                          21.0, 20.0, 3));
+  g_assert_true(wait_for_text(core, "^[[<64;1;1M^[[<64;1;1M^[[<64;1;1M"));
+
+  /* Nothing to report is not an error, and must not write a stray byte. */
+  g_assert_false(pt_term_core_wheel_report(core, GHOSTTY_MOUSE_BUTTON_FIVE, 0,
+                                           21.0, 20.0, 0));
+
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "^[[<65;"));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
+static void test_wheel_report_needs_tracking(void) {
+  /* Same rule as a click: with no mouse mode set the wheel writes nothing. */
+  const char *argv[] = {"/bin/cat", NULL};
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  g_assert_nonnull(core);
+  g_assert_false(pt_term_core_wheel_report(core, GHOSTTY_MOUSE_BUTTON_FOUR, 0,
+                                           21.0, 20.0, 3));
   pt_term_core_free(core);
 }
 
@@ -1537,6 +1645,81 @@ static void test_paste_is_safe(void) {
   g_assert_false(pt_term_core_paste_is_safe("echo hi\r", 8));   /* trailing */
 }
 
+/* ---- title dedupe ---- */
+
+static void test_title_dedupes(void) {
+  /* Shells re-emit the same OSC 2 title on every prompt; only a real change
+     should reach the consumer, which invalidates a tab label off it. Plain
+     `cat` echoes the escapes raw, so the parser sees them; the probes prove
+     each batch had its turn (the pty is FIFO). */
+  Ctx ctx = {0};
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready-marker; cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .title = on_title_cb };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  g_assert_true(wait_for_text(core, "ready-marker"));
+
+  pt_term_core_write(core,
+      "\033]2;same-title\007\033]2;same-title\007PROBE-1\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-1"));
+  g_assert_cmpint(ctx.title_count, ==, 1);
+  g_assert_cmpstr(ctx.title, ==, "same-title");
+
+  /* A different title still comes through: the dedupe compares, not counts. */
+  pt_term_core_write(core, "\033]2;other-title\007PROBE-2\n", -1);
+  g_assert_true(wait_for_text(core, "PROBE-2"));
+  g_assert_cmpint(ctx.title_count, ==, 2);
+  g_assert_cmpstr(ctx.title, ==, "other-title");
+
+  pt_term_core_free(core);
+}
+
+/* ---- last non-empty row ---- */
+
+static void test_last_nonempty_row(void) {
+  /* `cat` echoes what the test writes back through the parser; the newlines
+     after "world" leave blank rows below it, so "world" is the last row with
+     anything on it and the trailing blanks of its own row are stripped. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready-marker"));
+
+  pt_term_core_write(core, "hello\nworld\n\n\n", -1);
+  g_assert_true(wait_for_text(core, "world"));
+  pt_term_core_sync(core);
+
+  char buf[64];
+  g_assert_true(pt_term_core_last_nonempty_row(core, buf, sizeof buf));
+  g_assert_cmpstr(buf, ==, "world");
+
+  /* Truncation at cap is NUL-terminated: 4 bytes hold "wor" and the NUL. */
+  char small[4];
+  memset(small, 'X', sizeof small);
+  g_assert_true(pt_term_core_last_nonempty_row(core, small, sizeof small));
+  g_assert_cmpuint(strlen(small), <, sizeof small);
+  g_assert_cmpstr(small, ==, "wor");
+
+  pt_term_core_free(core);
+}
+
+static void test_last_nonempty_row_empty_grid(void) {
+  /* A fresh grid nothing has printed to: no row qualifies. */
+  const char *argv[] = {"/bin/sh", "-c", "sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  pt_term_core_sync(core);
+  char buf[64];
+  g_assert_false(pt_term_core_last_nonempty_row(core, buf, sizeof buf));
+  pt_term_core_free(core);
+}
+
 /* ---- scrollbar ---- */
 
 static void test_scrollbar_tracks_the_viewport(void) {
@@ -1658,38 +1841,38 @@ static void test_scrollbar_read_is_cached(void) {
  * tty echoing it a second time and `-icanon` stops it being held until a
  * newline, which an escape sequence never sends.
  *
- * The getters answer as of the last sync, so every predicate syncs first. */
+ * pt_term_core_cursor_info answers as of the last sync, so every predicate
+ * syncs first. */
 static GhosttyRenderStateCursorVisualStyle want_style;
 static gboolean want_blinking;
+static int want_cx, want_cy, want_cw;
 
 static gboolean style_is_wanted(PtTermCore *c) {
   pt_term_core_sync(c);
-  return pt_term_core_cursor_style(c) == want_style;
+  PtCursorInfo info;
+  pt_term_core_cursor_info(c, &info);
+  return info.style == (int)want_style;
 }
 
 static gboolean blinking_is_wanted(PtTermCore *c) {
   pt_term_core_sync(c);
-  return pt_term_core_cursor_blinking(c) == want_blinking;
+  PtCursorInfo info;
+  pt_term_core_cursor_info(c, &info);
+  return info.blinking == want_blinking;
 }
 
-static gboolean wide_tail_on(PtTermCore *c) {
+static gboolean cursor_info_is_wanted(PtTermCore *c) {
   pt_term_core_sync(c);
-  return pt_term_core_cursor_wide_tail(c);
+  PtCursorInfo info;
+  if (!pt_term_core_cursor_info(c, &info)) return FALSE;
+  return info.x == want_cx && info.y == want_cy && info.width == want_cw;
 }
 
-static gboolean wide_tail_off(PtTermCore *c) {
+static gboolean cursor_info_hidden(PtTermCore *c) {
   pt_term_core_sync(c);
-  return !pt_term_core_cursor_wide_tail(c);
-}
-
-static gboolean wide_head_on(PtTermCore *c) {
-  pt_term_core_sync(c);
-  return pt_term_core_cursor_wide(c);
-}
-
-static gboolean wide_head_off(PtTermCore *c) {
-  pt_term_core_sync(c);
-  return !pt_term_core_cursor_wide(c);
+  PtCursorInfo info;
+  pt_term_core_cursor_info(c, &info);
+  return !info.visible;
 }
 
 static PtTermCore *cursor_core_new(void) {
@@ -1729,11 +1912,13 @@ static void test_cursor_style_defaults(void) {
   PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
   g_assert_nonnull(core);
   pt_term_core_sync(core);
-  g_assert_cmpint(pt_term_core_cursor_style(core), ==,
+  PtCursorInfo info;
+  g_assert_true(pt_term_core_cursor_info(core, &info));
+  g_assert_cmpint(info.style, ==,
                   GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK);
-  g_assert_false(pt_term_core_cursor_blinking(core));
+  g_assert_false(info.blinking);
   /* Nothing in pt sets password input yet; the renderer handles it anyway. */
-  g_assert_false(pt_term_core_cursor_password_input(core));
+  g_assert_false(info.password);
   pt_term_core_free(core);
 }
 
@@ -1766,7 +1951,8 @@ static void test_cursor_style_reset_to_default(void) {
      caret. Blink goes back with it. */
   PtTermCore *core = cursor_core_new();
   expect_style(core, "\033[5 q", GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR);
-  g_assert_true(pt_term_core_cursor_blinking(core));
+  want_blinking = TRUE;
+  g_assert_true(blinking_is_wanted(core));
   expect_style(core, "\033[0 q",
                GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK);
   want_blinking = FALSE;
@@ -1790,25 +1976,398 @@ static void test_cursor_blink_mode_12(void) {
 
 static void test_cursor_wide_cells(void) {
   /* A wide character owns two cells and the second holds nothing of its own.
-     Parking the cursor there is the case the renderer has to back up one
+     Parking the cursor there is the case cursor_info has to back up one
      column for, or half a glyph gets a cursor drawn over it. Row 2 keeps this
      clear of the ready marker on row 1. */
   PtTermCore *core = cursor_core_new();
-  /* U+6F22 at row 2, columns 1-2; the cursor lands past it, on column 3. */
+  /* U+6F22 at row 2, columns 1-2; the cursor lands past it, on column 3,
+     which is narrow. */
+  want_cx = 2; want_cy = 1; want_cw = 1;
   pt_term_core_write(core, "\033[2;1H\xE6\xBC\xA2", -1);
   g_assert_true(wait_for_text(core, "\xE6\xBC\xA2"));
-  g_assert_true(wait_until(wide_tail_off, core));
-  g_assert_true(wait_until(wide_head_off, core));   /* column 3 is narrow */
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
 
-  pt_term_core_write(core, "\033[2;2H", -1);   /* onto the tail */
-  g_assert_true(wait_until(wide_tail_on, core));
-  /* The tail is a spacer, not the wide cell: a renderer that widened here
-     without backing up would cover the wrong two cells. */
-  g_assert_false(pt_term_core_cursor_wide(core));
+  /* Onto the spacer tail: x is backed up onto the head and the cursor covers
+     both cells. A renderer that widened in place would cover the wrong two. */
+  want_cx = 0; want_cy = 1; want_cw = 2;
+  pt_term_core_write(core, "\033[2;2H", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
 
-  pt_term_core_write(core, "\033[2;1H", -1);   /* onto the head */
-  g_assert_true(wait_until(wide_head_on, core));
-  g_assert_false(pt_term_core_cursor_wide_tail(core));
+  /* Onto the head: same two cells, no backing up. This is a real transition —
+     the raw cursor column moved from 2 to 1 — even though info.x stays 0, so
+     the wait below is against the narrow probe that follows. */
+  pt_term_core_write(core, "\033[2;1H", -1);
+  want_cx = 4; want_cy = 1; want_cw = 1;
+  pt_term_core_write(core, "\033[2;5H", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+  want_cx = 0; want_cy = 1; want_cw = 2;
+  pt_term_core_write(core, "\033[2;1H", -1);   /* back onto the head */
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+  pt_term_core_free(core);
+}
+
+/* ---- flat cell rows ---- */
+
+static void test_row_cells_text_style_colors(void) {
+  /* Truecolor SGRs pin exact byte values, so nothing here depends on
+     libghostty's stock palette. Row 2 keeps clear of the ready marker. */
+  PtTermCore *core = cursor_core_new();
+  pt_term_core_write(core,
+      "\033[2;1H\033[1;3;4;9;38;2;200;10;20m\033[48;2;1;2;3mA"
+      "\033[0mB\033[2;7mC\033[0m", -1);
+  g_assert_true(wait_for_text(core, "ABC"));
+  pt_term_core_sync(core);
+
+  PtCell cells[80];
+  int n = pt_term_core_row_cells(core, 1, cells, 80);
+  g_assert_cmpint(n, ==, 80);
+
+  g_assert_cmpstr(cells[0].text, ==, "A");
+  g_assert_cmpuint(cells[0].width, ==, 1);
+  g_assert_cmpuint(cells[0].style, ==,
+                   PT_CELL_STYLE_BOLD | PT_CELL_STYLE_ITALIC |
+                   PT_CELL_STYLE_UNDERLINE | PT_CELL_STYLE_STRIKE);
+  g_assert_cmpuint(cells[0].fg.r, ==, 200);
+  g_assert_cmpuint(cells[0].fg.g, ==, 10);
+  g_assert_cmpuint(cells[0].fg.b, ==, 20);
+  g_assert_true(cells[0].has_bg);
+  g_assert_cmpuint(cells[0].bg.r, ==, 1);
+  g_assert_cmpuint(cells[0].bg.g, ==, 2);
+  g_assert_cmpuint(cells[0].bg.b, ==, 3);
+  g_assert_false(cells[0].selected);
+
+  g_assert_cmpstr(cells[1].text, ==, "B");
+  g_assert_cmpuint(cells[1].style, ==, 0);
+  g_assert_false(cells[1].has_bg);
+
+  /* Inverse is reported, never applied: the cell keeps its own colors. */
+  g_assert_cmpstr(cells[2].text, ==, "C");
+  g_assert_cmpuint(cells[2].style, ==,
+                   PT_CELL_STYLE_FAINT | PT_CELL_STYLE_INVERSE);
+  g_assert_false(cells[2].has_bg);
+
+  /* Past the text: blank cells, narrow. */
+  g_assert_cmpstr(cells[3].text, ==, "");
+  g_assert_cmpuint(cells[3].width, ==, 1);
+
+  /* max clamps the fill; a row outside the viewport fills nothing. */
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, cells, 1), ==, 1);
+  g_assert_cmpint(pt_term_core_row_cells(core, 24, cells, 80), ==, 0);
+  g_assert_cmpint(pt_term_core_row_cells(core, -1, cells, 80), ==, 0);
+
+  pt_term_core_free(core);
+}
+
+static void test_row_cells_wide(void) {
+  PtTermCore *core = cursor_core_new();
+  /* U+6F22 owns columns 1-2 of row 3; "x" follows on column 3. */
+  pt_term_core_write(core, "\033[3;1H\xE6\xBC\xA2x", -1);
+  g_assert_true(wait_for_text(core, "\xE6\xBC\xA2"));
+  pt_term_core_sync(core);
+  PtCell cells[8];
+  g_assert_cmpint(pt_term_core_row_cells(core, 2, cells, 8), ==, 8);
+  g_assert_cmpstr(cells[0].text, ==, "\xE6\xBC\xA2");
+  g_assert_cmpuint(cells[0].width, ==, 2);
+  /* The spacer tail holds nothing of its own. */
+  g_assert_cmpuint(cells[1].width, ==, 0);
+  g_assert_cmpstr(cells[1].text, ==, "");
+  g_assert_cmpstr(cells[2].text, ==, "x");
+  g_assert_cmpuint(cells[2].width, ==, 1);
+  pt_term_core_free(core);
+}
+
+static void test_row_cells_selected(void) {
+  PtTermCore *core = cursor_core_new();
+  pt_term_core_write(core, "\033[2;1HSELECTME", -1);
+  g_assert_true(wait_for_text(core, "SELECTME"));
+  /* Cells are 8x16 inset by 20/18, so row 1 spans pixels [34, 50); drag
+     columns 0..2 of it. */
+  pt_term_core_selection_press(core, 21.0, 40.0, 1000000000ULL);
+  pt_term_core_selection_drag(core, 37.0, 40.0);
+  pt_term_core_selection_release(core, 37.0, 40.0);
+  pt_term_core_sync(core);
+  PtCell cells[8];
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, cells, 8), ==, 8);
+  g_assert_true(cells[0].selected);
+  g_assert_true(cells[2].selected);
+  g_assert_false(cells[3].selected);
+  pt_term_core_free(core);
+}
+
+static void test_set_colors_reach_cells(void) {
+  PtTermCore *core = cursor_core_new();
+  PtTermColors colors = {
+    .bg = { 5, 6, 7, 1.0 },
+    .fg = { 10, 20, 30, 1.0 },
+    .cursor = { 40, 50, 60, 1.0 },
+  };
+  colors.palette[1] = (PtColor){ 170, 16, 32, 1.0 };   /* pin ANSI red */
+  pt_term_core_set_colors(core, &colors);
+  /* A plain cell and an SGR-31 cell, printed after the colors landed. */
+  pt_term_core_write(core, "\033[2;1HX\033[31mR\033[0m", -1);
+  g_assert_true(wait_for_text(core, "XR"));
+  pt_term_core_sync(core);
+  PtCell cells[4];
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, cells, 4), ==, 4);
+  /* The plain cell reports the theme's default foreground... */
+  g_assert_cmpuint(cells[0].fg.r, ==, 10);
+  g_assert_cmpuint(cells[0].fg.g, ==, 20);
+  g_assert_cmpuint(cells[0].fg.b, ==, 30);
+  g_assert_false(cells[0].has_bg);
+  /* ...and SGR 31 resolves through the pinned palette slot. */
+  g_assert_cmpuint(cells[1].fg.r, ==, 170);
+  g_assert_cmpuint(cells[1].fg.g, ==, 16);
+  g_assert_cmpuint(cells[1].fg.b, ==, 32);
+
+  /* The effective defaults come back out for the frame's background fill... */
+  PtColor bg = {0}, fg = {0};
+  pt_term_core_default_colors(core, &bg, &fg);
+  g_assert_cmpuint(bg.r, ==, 5);
+  g_assert_cmpuint(bg.g, ==, 6);
+  g_assert_cmpuint(bg.b, ==, 7);
+  g_assert_cmpuint(fg.r, ==, 10);
+  g_assert_cmpuint(fg.g, ==, 20);
+  g_assert_cmpuint(fg.b, ==, 30);
+
+  /* ...and the cursor color rides on cursor_info, already resolved. */
+  PtCursorInfo info;
+  pt_term_core_cursor_info(core, &info);
+  g_assert_cmpuint(info.color.r, ==, 40);
+  g_assert_cmpuint(info.color.g, ==, 50);
+  g_assert_cmpuint(info.color.b, ==, 60);
+  pt_term_core_free(core);
+}
+
+/* ---- sequential row walk ---- */
+
+static void test_rows_walk_matches_row_cells(void) {
+  /* The one-pass reader must agree with the random-access read cell for cell:
+     styles, colors, a wide char and a link all in play. fill_cell zeroes each
+     cell before filling, so memcmp covers padding and text tails too. */
+  PtTermCore *core = cursor_core_new();
+  pt_term_core_write(core,
+      "\033[2;1H\033[1;31mred\033[0m \xE6\xBC\xA2 "
+      "\033]8;;https://example.com/x\033\\link\033]8;;\033\\", -1);
+  g_assert_true(wait_for_text(core, "link"));
+  pt_term_core_sync(core);
+
+  PtRowReader *r = pt_term_core_rows_begin(core);
+  g_assert_nonnull(r);
+  const PtCell *walked;
+  PtCell sought[80];
+  int rows = 0;
+  int n;
+  while ((n = pt_term_core_rows_next(r, &walked)) >= 0) {
+    g_assert_cmpint(pt_term_core_row_cells(core, rows, sought, 80), ==, n);
+    g_assert_cmpint(memcmp(walked, sought, (size_t)n * sizeof(PtCell)), ==, 0);
+    rows++;
+  }
+  /* Past the last row the walk stays done. */
+  g_assert_cmpint(pt_term_core_rows_next(r, &walked), ==, -1);
+  pt_term_core_rows_end(r);
+  g_assert_cmpint(rows, ==, 24);
+  pt_term_core_free(core);
+}
+
+static void test_rows_walk_wide_pane(void) {
+  /* A pane wider than any fixed row buffer: 600 columns. Nothing may be
+     truncated — the reader grows its buffer to the row, and text parked past
+     column 512 comes back through both read paths. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 600, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready-marker"));
+  /* Row 2, columns 591-594 (1-based): all beyond the old 512-cell clip. */
+  pt_term_core_write(core, "\033[2;591HWIDE", -1);
+  g_assert_true(wait_for_text(core, "WIDE"));
+  pt_term_core_sync(core);
+
+  static PtCell sought[600];   /* static: too big for the test's stack */
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, sought, 600), ==, 600);
+  g_assert_cmpstr(sought[590].text, ==, "W");
+  g_assert_cmpstr(sought[593].text, ==, "E");
+
+  PtRowReader *r = pt_term_core_rows_begin(core);
+  g_assert_nonnull(r);
+  const PtCell *walked;
+  g_assert_cmpint(pt_term_core_rows_next(r, &walked), ==, 600);  /* row 0 */
+  g_assert_cmpint(pt_term_core_rows_next(r, &walked), ==, 600);  /* row 1 */
+  g_assert_cmpstr(walked[590].text, ==, "W");
+  g_assert_cmpstr(walked[591].text, ==, "I");
+  g_assert_cmpstr(walked[592].text, ==, "D");
+  g_assert_cmpstr(walked[593].text, ==, "E");
+  g_assert_cmpint(memcmp(walked, sought, sizeof sought), ==, 0);
+  pt_term_core_rows_end(r);
+  pt_term_core_free(core);
+}
+
+/* ---- row/cell link helpers ---- */
+
+static void test_row_link_helpers(void) {
+  /* Same two links as test_hyperlink_at: an https one pt opens on row 1 (row
+     2 keeps clear of the ready marker) and a javascript: one it must not on
+     row 2 — written through cat so the OSC 8 pairs arrive off the pty. */
+  PtTermCore *core = cursor_core_new();
+  pt_term_core_write(core,
+      "\033[2;1H\033]8;;https://example.com/x\033\\GOOD\033]8;;\033\\"
+      "\033[3;1H\033]8;;javascript:alert(1)\033\\EVIL\033]8;;\033\\", -1);
+  g_assert_true(wait_for_text(core, "EVIL"));
+  pt_term_core_sync(core);
+
+  /* The row flag: linked rows answer yes — the unopenable link too, because
+     the flag feeds the underline and the underline must stay honest. */
+  g_assert_true(pt_term_core_row_has_link(core, 1));
+  g_assert_true(pt_term_core_row_has_link(core, 2));
+  g_assert_false(pt_term_core_row_has_link(core, 3));
+  g_assert_false(pt_term_core_row_has_link(core, -1));
+  g_assert_false(pt_term_core_row_has_link(core, 24));
+
+  /* The per-cell flag the underline pass draws from, on the flat rows. */
+  PtCell cells[8];
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, cells, 8), ==, 8);
+  g_assert_true(cells[0].has_link);
+  g_assert_true(cells[3].has_link);
+  g_assert_false(cells[4].has_link);
+  g_assert_cmpint(pt_term_core_row_cells(core, 2, cells, 8), ==, 8);
+  g_assert_true(cells[0].has_link);          /* unsafe scheme still underlines */
+
+  /* The URI itself, by cell: hyperlink_at's rules, addressed by (row, col). */
+  char *uri = pt_term_core_link_at_cell(core, 1, 0);
+  g_assert_cmpstr(uri, ==, "https://example.com/x");
+  g_free(uri);
+  uri = pt_term_core_link_at_cell(core, 1, 3);
+  g_assert_cmpstr(uri, ==, "https://example.com/x");
+  g_free(uri);
+  g_assert_null(pt_term_core_link_at_cell(core, 1, 4));   /* past the text */
+  g_assert_null(pt_term_core_link_at_cell(core, 2, 0));   /* linked, unopenable */
+  g_assert_null(pt_term_core_link_at_cell(core, -1, 0));
+  g_assert_null(pt_term_core_link_at_cell(core, 1, -1));
+  g_assert_null(pt_term_core_link_at_cell(core, 24, 0));
+  g_assert_null(pt_term_core_link_at_cell(core, 1, 80));
+  pt_term_core_free(core);
+}
+
+/* ---- cursor info ---- */
+
+static void test_cursor_info(void) {
+  PtTermCore *core = cursor_core_new();
+  PtCursorInfo info;
+  /* cursor_info answers as of the last sync, like the flat rows. After the
+     ready marker the cursor sits at row 1, column 0. */
+  pt_term_core_sync(core);
+  g_assert_true(pt_term_core_cursor_info(core, &info));
+  g_assert_cmpint(info.x, ==, 0);
+  g_assert_cmpint(info.y, ==, 1);
+  g_assert_cmpint(info.width, ==, 1);
+  g_assert_cmpint(info.style, ==,
+                  GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK);
+  g_assert_true(info.visible);
+  g_assert_false(info.blinking);
+  /* Nothing in pt can set password input yet (see the header). */
+  g_assert_false(info.password);
+
+  /* Printing advances x. */
+  want_cx = 2; want_cy = 1; want_cw = 1;
+  pt_term_core_write(core, "ab", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+
+  /* On the spacer tail of a wide char, x is already backed up onto the head
+     and the cursor covers both cells. */
+  want_cx = 0; want_cy = 2; want_cw = 2;
+  pt_term_core_write(core, "\033[3;1H\xE6\xBC\xA2\033[3;2H", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+
+  /* On the head: same two cells, no backing up. */
+  want_cx = 0; want_cy = 2; want_cw = 2;
+  pt_term_core_write(core, "\033[3;1H", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+
+  /* Past the wide char the cursor is narrow again. */
+  want_cx = 3; want_cy = 2; want_cw = 1;
+  pt_term_core_write(core, "\033[3;4H", -1);
+  g_assert_true(wait_until(cursor_info_is_wanted, core));
+
+  /* DECTCEM hides it; position stays valid. */
+  pt_term_core_write(core, "\033[?25l", -1);
+  g_assert_true(wait_until(cursor_info_hidden, core));
+  pt_term_core_sync(core);
+  g_assert_true(pt_term_core_cursor_info(core, &info));
+
+  pt_term_core_free(core);
+}
+
+/* ---- render dirty ---- */
+
+/* Let any in-flight pty reads land so a take-and-clear assertion cannot race
+   a byte that was already on its way. */
+static void drain_reads(void) {
+  for (int i = 0; i < 20; i++) {
+    g_main_context_iteration(NULL, FALSE);
+    g_usleep(2000);
+  }
+}
+
+static void test_take_render_dirty(void) {
+  PtTermCore *core = cursor_core_new();   /* output has arrived already */
+  drain_reads();
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  /* Bytes from the child set it again — exactly once. */
+  pt_term_core_write(core, "probe\n", -1);
+  g_assert_true(wait_for_text(core, "probe"));
+  drain_reads();
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  /* Moving the viewport is a render change with no output. */
+  pt_term_core_scroll_delta(core, -1);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  /* So are a resize and a theme's colors landing. */
+  pt_term_core_resize(core, 81, 24, 8, 16);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  PtTermColors colors = { .fg = { 1, 2, 3, 1.0 } };
+  pt_term_core_set_colors(core, &colors);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  /* And so is the selection changing. */
+  pt_term_core_selection_press(core, 21.0, 20.0, 1000000000ULL);
+  pt_term_core_selection_drag(core, 60.0, 20.0);
+  pt_term_core_selection_release(core, 60.0, 20.0);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  pt_term_core_selection_clear(core);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_false(pt_term_core_take_render_dirty(core));
+
+  pt_term_core_free(core);
+}
+
+static void test_content_serial(void) {
+  PtTermCore *core = cursor_core_new();
+  drain_reads();
+  guint s0 = pt_term_core_content_serial(core);
+  /* Readers move nothing: not this getter, and not the take. */
+  g_assert_cmpuint(pt_term_core_content_serial(core), ==, s0);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+  g_assert_cmpuint(pt_term_core_content_serial(core), ==, s0);
+
+  /* Bytes from the child move it. */
+  pt_term_core_write(core, "serial-probe\n", -1);
+  g_assert_true(wait_for_text(core, "serial-probe"));
+  drain_reads();
+  guint s1 = pt_term_core_content_serial(core);
+  g_assert_cmpuint(s1, >, s0);
+  g_assert_true(pt_term_core_take_render_dirty(core));
+
+  /* So does a pure viewport move, with no output at all. */
+  pt_term_core_scroll_delta(core, -1);
+  g_assert_cmpuint(pt_term_core_content_serial(core), >, s1);
   pt_term_core_free(core);
 }
 
@@ -2036,6 +2595,7 @@ int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
   g_test_add_func("/termcore/exit", test_exit_status_reported);
+  g_test_add_func("/termcore/shell-name", test_shell_name);
   g_test_add_func("/termcore/keys", test_key_send_echoes);
   g_test_add_func("/termcore/long-grapheme", test_long_grapheme_cluster);
   g_test_add_func("/termcore/selection", test_selection);
@@ -2045,9 +2605,16 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/running-state-idle", test_running_state_idle);
   g_test_add_func("/termcore/running-state-job",
                   test_running_state_foreground_job);
+  g_test_add_func("/termcore/running-state-exit",
+                  test_running_state_cleared_on_exit);
   g_test_add_func("/termcore/spawn-env", test_spawn_env);
   g_test_add_func("/termcore/exit-marker", test_exit_marker_from_title);
+  g_test_add_func("/termcore/title-dedupe", test_title_dedupes);
   g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
+  g_test_add_func("/termcore/wheel-report-batch",
+                  test_wheel_report_batches_notches);
+  g_test_add_func("/termcore/wheel-report-off",
+                  test_wheel_report_needs_tracking);
   g_test_add_func("/termcore/mouse-report-off", test_mouse_report_needs_tracking);
   g_test_add_func("/termcore/focus-report", test_focus_report);
   g_test_add_func("/termcore/focus-report-off", test_focus_report_needs_mode);
@@ -2074,6 +2641,9 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/color-scheme-needs-mode",
                   test_color_scheme_needs_mode);
   g_test_add_func("/termcore/scroll-bottom", test_scroll_bottom);
+  g_test_add_func("/termcore/last-nonempty-row", test_last_nonempty_row);
+  g_test_add_func("/termcore/last-nonempty-row-empty",
+                  test_last_nonempty_row_empty_grid);
   g_test_add_func("/termcore/scrollbar", test_scrollbar_tracks_the_viewport);
   g_test_add_func("/termcore/scrollbar-empty",
                   test_scrollbar_without_scrollback);
@@ -2128,6 +2698,16 @@ int main(int argc, char *argv[]) {
                   test_cursor_style_reset_to_default);
   g_test_add_func("/termcore/cursor-blink-mode-12", test_cursor_blink_mode_12);
   g_test_add_func("/termcore/cursor-wide-cells", test_cursor_wide_cells);
+  g_test_add_func("/termcore/row-cells", test_row_cells_text_style_colors);
+  g_test_add_func("/termcore/row-cells-wide", test_row_cells_wide);
+  g_test_add_func("/termcore/row-cells-selected", test_row_cells_selected);
+  g_test_add_func("/termcore/rows-walk", test_rows_walk_matches_row_cells);
+  g_test_add_func("/termcore/rows-walk-wide", test_rows_walk_wide_pane);
+  g_test_add_func("/termcore/row-link-helpers", test_row_link_helpers);
+  g_test_add_func("/termcore/set-colors", test_set_colors_reach_cells);
+  g_test_add_func("/termcore/cursor-info", test_cursor_info);
+  g_test_add_func("/termcore/render-dirty", test_take_render_dirty);
+  g_test_add_func("/termcore/content-serial", test_content_serial);
   g_test_add_func("/termcore/output-callback-only-for-output",
                   test_output_callback_is_output_only);
   return g_test_run();

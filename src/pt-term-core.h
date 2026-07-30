@@ -3,6 +3,7 @@
 #include <ghostty/vt.h>
 #include <sys/types.h>
 #include "pt-config.h"   /* PtOsc52Mode: what OSC 52 may do to the clipboard */
+#include "pt-theme.h"    /* PtColor: the cell and palette color type */
 
 typedef struct PtTermCore PtTermCore;
 
@@ -133,6 +134,13 @@ gboolean pt_term_core_hyperlink_is_safe(const char *uri);
 gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
                                    GhosttyMouseButton button, GhosttyMods mods,
                                    double px, double py);
+/* `notches` wheel presses of the same button at the same point, in one write.
+ * A wheel event carries several notches and a touchpad delivers them faster
+ * still; the bytes are exactly what that many pt_term_core_mouse_report()
+ * calls produce, only the syscall count differs. */
+gboolean pt_term_core_wheel_report(PtTermCore *c, GhosttyMouseButton button,
+                                   GhosttyMods mods, double px, double py,
+                                   int notches);
 gboolean pt_term_core_mouse_tracking(PtTermCore *c);
 
 /* ---- focus reporting (mode 1004) ----
@@ -206,52 +214,144 @@ gboolean pt_term_core_paste_is_safe(const char *text, gssize len);
  * Fires the draw callback. */
 void pt_term_core_reset(PtTermCore *c);
 
-/* ---- cursor shape and blink (DECSCUSR, mode 12) ----
+/* ---- flat cell rows ----
  *
- * What the app asked the cursor to look like, so a renderer can draw an insert
- * bar in nvim rather than the same block everywhere. DECSCUSR pairs a shape
- * with a blink: 1/2 block, 3/4 underline, 5/6 bar, odd blinking and even
- * steady, and 0 (or an empty parameter) back to the default, which for a
- * terminal with no user config is a steady block — ghostty's own numbering
- * (src/terminal/stream.zig:1593, tests at :2833) and its VT-only mapping
- * (src/terminal/stream_terminal.zig:154). Mode 12 carries the blink on its own.
+ * The renderer-facing view of one visible row, flattened into plain memory so
+ * a frame iterates arrays instead of making several FFI calls per cell.
+ * Everything here answers as of the last pt_term_core_sync(). */
+#define PT_CELL_TEXT_MAX 64
+typedef struct {
+  char     text[PT_CELL_TEXT_MAX]; /* full UTF-8 cluster, NUL-terminated; "" = blank */
+  guint8   width;                  /* 1 or 2; 0 = spacer tail of a wide cell */
+  guint8   style;                  /* same bits the widget reads today (bold/italic/underline/strike/faint/inverse) */
+  gboolean selected;
+  /* An OSC 8 hyperlink hangs off this cell — any link, openable or not, since
+   * this is what the underline draws from and the underline is the only thing
+   * telling the user the run is a link at all. Whether pt will *open* it is
+   * pt_term_core_link_at_cell's question, not this one's. */
+  gboolean has_link;
+  gboolean has_bg;
+  PtColor  fg;
+  PtColor  bg;                     /* valid only when has_bg */
+} PtCell;
+
+/* PtCell.style bits — the GhosttyStyle properties a renderer draws from.
+ * `underline` collapses the five SGR underline styles into one bit. `inverse`
+ * is reported, not applied: fg/bg hold the cell's own colors and the consumer
+ * swaps them, exactly as the widget's snapshot loop does today. */
+#define PT_CELL_STYLE_BOLD      (1u << 0)
+#define PT_CELL_STYLE_ITALIC    (1u << 1)
+#define PT_CELL_STYLE_UNDERLINE (1u << 2)
+#define PT_CELL_STYLE_STRIKE    (1u << 3)
+#define PT_CELL_STYLE_FAINT     (1u << 4)
+#define PT_CELL_STYLE_INVERSE   (1u << 5)
+
+/* Fills out[0..n) for visible row `row` (0-based). Returns number of cells
+ * filled (min(cols, max)). One libghostty walk per call; caller owns the array.
  *
- * All four read the render state, so they answer as of the last
- * pt_term_core_sync() — the same contract as pt_term_core_render_state() and
- * the row iterators. Sync first, then ask. */
-GhosttyRenderStateCursorVisualStyle pt_term_core_cursor_style(PtTermCore *c);
-gboolean pt_term_core_cursor_blinking(PtTermCore *c);
-/* TRUE while the terminal believes the cursor sits at a password prompt, which
- * is a cue to draw something unmissable and never blink it. Nothing in pt sets
- * this yet: ghostty decides it by polling the pty's termios for canonical mode
- * with echo off (src/termio/Exec.zig:366), and libghostty-vt's C API has no way
- * in, so today it is always FALSE. The renderer handles it anyway, so the day
- * pt grows that poll the drawing is already right. */
-gboolean pt_term_core_cursor_password_input(PtTermCore *c);
-/* TRUE when the cursor sits on the second half of a wide character. The cell
- * it is standing on holds nothing of its own — the glyph belongs to the cell
- * to its left — so a renderer should back up one column and draw two cells
- * wide, as ghostty does (src/renderer/generic.zig:3232). */
-gboolean pt_term_core_cursor_wide_tail(PtTermCore *c);
-/* TRUE when the cursor is standing on the *head* of a wide character — the
- * other half of the same problem, and the one the render state does not
- * answer, so this walks to the cursor's cell and asks it. A renderer covers
- * two cells for this one without backing up. Ghostty tests the same two things
- * in the same order (renderer/generic.zig:3232): tail first, head second.
+ * `fg` is already resolved: a cell with no color of its own reports the
+ * default foreground the render state carries, so a renderer never has to ask
+ * twice. `bg` is not — the default background is painted once for the whole
+ * pane, so `has_bg` says whether this cell diverges from it. A row past the
+ * viewport, or a walk the library refuses, fills nothing and returns 0. */
+int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max);
+
+/* ---- sequential row walk ----
  *
- * Walks with the core's shared row iterator, exactly as pt_term_core_grid_text
- * does, so do not call it from inside a walk of your own. */
-gboolean pt_term_core_cursor_wide(PtTermCore *c);
+ * pt_term_core_row_cells seeks from the top on every call, so reading a whole
+ * frame with it costs O(rows²) iterator steps. A reader walks every visible
+ * row in one pass instead: begin at the top, next() points *out at the next
+ * row's cells (identical to what row_cells reports for that row, every cell,
+ * however wide the row — the reader owns the buffer and grows it, so nothing
+ * is ever truncated) and returns the count, or -1 past the last row. A row
+ * the library refuses to read returns 0 and the walk continues. The cells
+ * behind *out belong to the reader and are valid until the next next() or
+ * end(). begin() returns NULL when the walk cannot start at all. Same sync
+ * contract as row_cells; end() is NULL-safe. */
+typedef struct PtRowReader PtRowReader;
+PtRowReader *pt_term_core_rows_begin(PtTermCore *c);
+int pt_term_core_rows_next(PtRowReader *r, const PtCell **out);
+void pt_term_core_rows_end(PtRowReader *r);
+
+/* Whether any cell of visible row `row` carries an OSC 8 link — the row flag
+ * libghostty maintains (false positives allowed, false negatives never), so a
+ * renderer can skip the per-cell question on rows that answer no. As of the
+ * last sync. */
+gboolean pt_term_core_row_has_link(PtTermCore *c, int row);
+/* The URI at visible cell (row, col), under exactly the rules of
+ * pt_term_core_hyperlink_at — safe schemes only, caller g_free's — just
+ * addressed by cell instead of by pixel. NULL out of range, on no link, and
+ * on a link pt will not open (a cell can have has_link set and still answer
+ * NULL here; the underline is honest, the hand cursor is cautious). */
+char *pt_term_core_link_at_cell(PtTermCore *c, int row, int col);
+
+typedef struct {
+  PtColor bg, fg, cursor;
+  PtColor palette[16];
+} PtTermColors;
+/* Push a theme's terminal colors into libghostty: default bg/fg/cursor plus
+ * the ANSI slots the theme pins. A palette slot with alpha 0 is "not pinned"
+ * and keeps libghostty's stock default for that slot — matching the theme's
+ * palette_set flags — and OSC 4 overrides a program set survive either way. */
+void pt_term_core_set_colors(PtTermCore *c, const PtTermColors *colors);
+
+/* The effective default background and foreground — the theme's, unless a
+ * program moved them with OSC 11/10 — as of the last sync. Written only on a
+ * successful read, so callers seed the out params with their fallbacks. */
+void pt_term_core_default_colors(PtTermCore *c, PtColor *bg, PtColor *fg);
+
+typedef struct {
+  int      x, y;        /* cell coords; y in viewport rows */
+  int      style;       /* GhosttyRenderStateCursorVisualStyle values: DECSCUSR
+                         * pairs 1/2 block, 3/4 underline, 5/6 bar (odd blinking,
+                         * even steady), 0 back to a steady block — ghostty's
+                         * numbering (src/terminal/stream.zig:1593) */
+  gboolean visible;
+  gboolean blinking;
+  /* The terminal believes the cursor sits at a password prompt: draw something
+   * unmissable and never blink it. Nothing in pt can set this yet (ghostty
+   * polls the pty's termios and libghostty-vt's C API has no way in), so today
+   * it is always FALSE; the renderer handles it anyway. */
+  gboolean password;
+  int      width;       /* 1 or 2 (wide glyph under cursor) */
+  PtColor  color;       /* the cursor color a program set, or the default fg */
+} PtCursorInfo;
+/* One call for everything the cursor drawing needs. Answers as of the last
+ * pt_term_core_sync(), like the flat rows — sync first, then ask. FALSE when
+ * the cursor is outside the viewport (scrolled away), and then x/y/width are
+ * meaningless; the other fields are filled either way. On the spacer tail of
+ * a wide character x is already backed up onto the head and width is 2, so
+ * the caller draws at x without asking twice (ghostty tests tail then head,
+ * renderer/generic.zig:3232). */
+gboolean pt_term_core_cursor_info(PtTermCore *c, PtCursorInfo *out); /* one row walk max, no sync */
+
+/* TRUE exactly once after terminal content/viewport changed since the last call. */
+gboolean pt_term_core_take_render_dirty(PtTermCore *c);
+
+/* The counter behind take_render_dirty: bumped on every content, viewport,
+ * color or selection change, never by readers (take included). Two equal
+ * reads mean nothing to re-derive in between; monotonic, wraps at G_MAXUINT. */
+guint pt_term_core_content_serial(PtTermCore *c);
 
 void pt_term_core_sync(PtTermCore *c);              /* render_state_update */
-GhosttyTerminal pt_term_core_terminal(PtTermCore *c);
-GhosttyRenderState pt_term_core_render_state(PtTermCore *c);
-GhosttyRenderStateRowIterator pt_term_core_row_iter(PtTermCore *c);
-GhosttyRenderStateRowCells pt_term_core_row_cells(PtTermCore *c);
 char *pt_term_core_grid_text(PtTermCore *c);        /* visible grid, caller frees */
+/* The UTF-8 text of the last visible row holding a non-blank cell, trailing
+ * blanks stripped, copied into buf (cap bytes, NUL included — text past the
+ * cap is dropped on a codepoint boundary). FALSE, with buf set to "", when
+ * every row is blank. Allocates nothing, so it may be asked per frame; like
+ * pt_term_core_grid_text it answers as of the last pt_term_core_sync(). */
+gboolean pt_term_core_last_nonempty_row(PtTermCore *c, char *buf, gsize cap);
 gboolean pt_term_core_exited(PtTermCore *c, int *status);
 pid_t pt_term_core_shell_pid(PtTermCore *c);
-/* TRUE when a foreground process other than the shell owns the tty. */
+/* Basename of the program this core spawned (argv[0], or the resolved default
+ * shell) — derived from the spawn itself, not read back from /proc, so it
+ * cannot race the child's exec. Set once at spawn, never NULL, owned by the
+ * core; valid until pt_term_core_free. */
+const char *pt_term_core_shell_name(PtTermCore *c);
+/* TRUE when a foreground process other than the shell owns the tty. Answered
+ * from a cached field the 700ms foreground poll maintains (seeded TRUE at
+ * spawn, cleared on child exit), so it is free to ask every frame; the answer
+ * can be up to one poll interval old. */
 gboolean pt_term_core_running(PtTermCore *c);
 /* Last exit code reported via the "pt-exit:<n>;" title marker; -1 before
  * the prompt snippet ever reports. */

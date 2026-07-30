@@ -1,18 +1,19 @@
 #include "pt-tab-strip.h"
 
+#include "pt-rowlist.h"
+
 enum { SIG_SELECTED, SIG_NEW, SIG_CLOSE, SIG_OPEN_EDITOR, SIG_TOGGLE_PANEL,
        N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtTabStrip {
   GtkWidget parent_instance;
-  GtkWidget *box;
-  /* Last-rendered state. Output-driven refreshes fire several times a second,
-   * and a button destroyed between press and release cancels its gesture — the
-   * click is silently swallowed. So re-render only when something changed. */
-  PtTabInfo *last;         /* owned; last[i].title is g_strdup'd */
-  int last_n, last_active, last_accent;
-  gboolean rendered;
+  GtkWidget *box;          /* horizontal: tabs, spacer, +, zed, panel */
+  /* The tabs. The row list owns the last-rendered snapshot and skips a rebuild
+   * when nothing in it moved: output-driven refreshes fire several times a
+   * second, and a button destroyed between press and release cancels its
+   * gesture — the click is silently swallowed. */
+  PtRowList *tabs;
   /* Probed once in init, not per rebuild: the strip rebuilds several times a
    * second and PATH does not move underneath a running window. */
   gboolean has_zed;
@@ -20,6 +21,54 @@ struct _PtTabStrip {
 
 G_DEFINE_FINAL_TYPE(PtTabStrip, pt_tab_strip, GTK_TYPE_WIDGET)
 
+/* ---------- the rendered snapshot ---------- */
+/* Everything one rebuild draws from: the tabs plus the two indices that decide
+ * how they look. `accent` never reaches a row, but a change in it does mean the
+ * strip is showing another project, so it belongs in the comparison. */
+typedef struct {
+  PtTabInfo *tabs;   /* deep copy; title is g_strdup'd */
+  int n, active, accent;
+} TabSnapshot;
+
+static TabSnapshot *snapshot_new(const PtTabInfo *tabs, int n, int active,
+                                 int accent) {
+  TabSnapshot *s = g_new0(TabSnapshot, 1);
+  s->active = active;
+  s->accent = accent;
+  if (n > 0) {
+    s->tabs = g_new0(PtTabInfo, n);
+    s->n = n;
+    for (int i = 0; i < n; i++) {
+      s->tabs[i] = tabs[i];
+      s->tabs[i].title = g_strdup(tabs[i].title);
+    }
+  }
+  return s;
+}
+
+static void snapshot_free(gpointer data) {
+  TabSnapshot *s = data;
+  for (int i = 0; i < s->n; i++) g_free((char *)s->tabs[i].title);
+  g_free(s->tabs);
+  g_free(s);
+}
+
+static gboolean snapshot_equal(gpointer ap, guint na, gpointer bp, guint nb,
+                               gpointer u) {
+  (void)u;
+  const TabSnapshot *a = ap, *b = bp;
+  if (a == NULL || b == NULL || na != nb) return FALSE;
+  if (a->active != b->active || a->accent != b->accent) return FALSE;
+  for (guint i = 0; i < na; i++) {
+    if (a->tabs[i].running != b->tabs[i].running ||
+        a->tabs[i].last_exit != b->tabs[i].last_exit ||
+        g_strcmp0(a->tabs[i].title, b->tabs[i].title) != 0)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+/* ---------- callbacks ---------- */
 /* The tab is a box, not a button: a GtkButton nested in a GtkButton is fragile,
  * so selection rides a click gesture (same shape as the sidebar's project row)
  * and the × stays a real button.
@@ -28,18 +77,21 @@ G_DEFINE_FINAL_TYPE(PtTabStrip, pt_tab_strip, GTK_TYPE_WIDGET)
  * spot, and a button destroyed between press and release never emits "clicked"
  * (the same hazard the rebuild dedupe exists for) — the close would be eaten by
  * the switch. The button does not claim the sequence early enough to stop this
- * gesture, so hit-test the press and stand down when it landed on the ×. */
+ * gesture, so hit-test the press and stand down when it landed on the ×. The
+ * separator that rides in the same slot is not part of the tab either. */
 static void on_tab_pressed(GtkGestureClick *g, int n, double x, double y,
                            gpointer user) {
   (void)n;
-  GtkWidget *tab = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
-  GtkWidget *close = g_object_get_data(G_OBJECT(tab), "pt-close");
-  GtkWidget *hit = gtk_widget_pick(tab, x, y, GTK_PICK_DEFAULT);
-  if (close != NULL && hit != NULL &&
-      (hit == close || gtk_widget_is_ancestor(hit, close)))
+  GtkWidget *slot = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+  GtkWidget *tab = g_object_get_data(G_OBJECT(slot), "pt-tab");
+  GtkWidget *close = g_object_get_data(G_OBJECT(slot), "pt-close");
+  GtkWidget *hit = gtk_widget_pick(slot, x, y, GTK_PICK_DEFAULT);
+  if (hit == NULL || tab == NULL) return;
+  if (hit != tab && !gtk_widget_is_ancestor(hit, tab)) return;
+  if (close != NULL && (hit == close || gtk_widget_is_ancestor(hit, close)))
     return;
-  int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(tab), "pt-index"));
-  g_signal_emit(PT_TAB_STRIP(user), signals[SIG_SELECTED], 0, idx);
+  g_signal_emit(PT_TAB_STRIP(user), signals[SIG_SELECTED], 0,
+                pt_rowlist_row_index(slot));
 }
 
 static void on_tab_close_clicked(GtkButton *btn, gpointer user) {
@@ -62,47 +114,57 @@ static void on_panel_clicked(GtkButton *btn, gpointer user) {
   g_signal_emit(PT_TAB_STRIP(user), signals[SIG_TOGGLE_PANEL], 0);
 }
 
-static void clear_box(GtkWidget *box) {
-  GtkWidget *child;
-  while ((child = gtk_widget_get_first_child(box)) != NULL)
-    gtk_box_remove(GTK_BOX(box), child);
-}
+/* ---------- one tab ---------- */
+/* Two widgets per tab, so they travel as one slot: the tab itself and the
+ * full-height 1px border after it (Zed-style, the active tab included). */
+static GtkWidget *build_tab(gpointer items, guint idx, gpointer u) {
+  const TabSnapshot *snap = items;
+  PtTabStrip *s = u;
+  const PtTabInfo *info = &snap->tabs[idx];
 
-static void free_snapshot(PtTabStrip *s) {
-  for (int i = 0; i < s->last_n; i++)
-    g_free((char *)s->last[i].title);
-  g_clear_pointer(&s->last, g_free);
-  s->last_n = 0;
-}
+  GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
+  gtk_widget_add_css_class(row, "pt-tab");
+  if ((int)idx == snap->active) gtk_widget_add_css_class(row, "active");
 
-static gboolean same_as_rendered(PtTabStrip *s, const PtTabInfo *tabs, int n,
-                                 int active, int accent) {
-  if (!s->rendered || n != s->last_n || active != s->last_active ||
-      accent != s->last_accent)
-    return FALSE;
-  for (int i = 0; i < n; i++) {
-    const PtTabInfo *a = &s->last[i], *b = &tabs[i];
-    if (a->running != b->running || a->last_exit != b->last_exit ||
-        g_strcmp0(a->title, b->title) != 0)
-      return FALSE;
-  }
-  return TRUE;
-}
+  GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class(dot, "pt-dot");
+  gtk_widget_add_css_class(dot, "pt-dot-6");
+  gtk_widget_add_css_class(dot, info->running          ? "running"
+                                : info->last_exit > 0  ? "error"
+                                                       : "idle");
+  gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
+  gtk_box_append(GTK_BOX(row), dot);
 
-static void take_snapshot(PtTabStrip *s, const PtTabInfo *tabs, int n,
-                          int active, int accent) {
-  free_snapshot(s);
-  if (n > 0) {
-    s->last = g_new0(PtTabInfo, n);
-    s->last_n = n;
-    for (int i = 0; i < n; i++) {
-      s->last[i] = tabs[i];
-      s->last[i].title = g_strdup(tabs[i].title);
-    }
-  }
-  s->last_active = active;
-  s->last_accent = accent;
-  s->rendered = TRUE;
+  GtkWidget *lbl = gtk_label_new(info->title != NULL ? info->title : "");
+  gtk_widget_add_css_class(lbl, "pt-tab-label");
+  gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_MIDDLE);
+  gtk_label_set_max_width_chars(GTK_LABEL(lbl), 24);
+  gtk_box_append(GTK_BOX(row), lbl);
+
+  /* Hidden (opacity 0) until the tab is hovered — see .pt-tab-close in
+   * style.css. It closes the whole tab, panes and all. */
+  GtkWidget *close = gtk_button_new_with_label("×");
+  gtk_widget_add_css_class(close, "flat");
+  gtk_widget_add_css_class(close, "pt-tab-close");
+  gtk_widget_set_valign(close, GTK_ALIGN_CENTER);
+  g_object_set_data(G_OBJECT(close), "pt-index", GINT_TO_POINTER((int)idx));
+  g_signal_connect(close, "clicked", G_CALLBACK(on_tab_close_clicked), s);
+  gtk_box_append(GTK_BOX(row), close);
+
+  GtkWidget *slot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_box_append(GTK_BOX(slot), row);
+  GtkWidget *sep = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class(sep, "pt-tab-sep");
+  gtk_box_append(GTK_BOX(slot), sep);
+  g_object_set_data(G_OBJECT(slot), "pt-tab", row);
+  g_object_set_data(G_OBJECT(slot), "pt-close", close);
+
+  /* The gesture goes on the slot, not the tab: the row list carries the tab
+   * index there, and the hit-test above sorts out where the press landed. */
+  GtkGesture *click = gtk_gesture_click_new();
+  g_signal_connect(click, "pressed", G_CALLBACK(on_tab_pressed), s);
+  gtk_widget_add_controller(slot, GTK_EVENT_CONTROLLER(click));
+  return slot;
 }
 
 /* Full rebuild whenever the state moved: at ≤ ~10 tabs that is cheaper than
@@ -110,96 +172,17 @@ static void take_snapshot(PtTabStrip *s, const PtTabInfo *tabs, int n,
  * switch. Identical state is a no-op (see the snapshot rationale above). */
 void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
                            int active, int accent) {
-  if (same_as_rendered(s, tabs, n, active, accent)) return;
-  take_snapshot(s, tabs, n, active, accent);
-
-  clear_box(s->box);
-  for (int i = 0; i < n; i++) {
-    const PtTabInfo *info = &tabs[i];
-    gboolean is_active = (i == active);
-
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
-    gtk_widget_add_css_class(row, "pt-tab");
-    if (is_active) gtk_widget_add_css_class(row, "active");
-    g_object_set_data(G_OBJECT(row), "pt-index", GINT_TO_POINTER(i));
-
-    GtkWidget *dot = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_add_css_class(dot, "pt-dot");
-    gtk_widget_add_css_class(dot, "pt-dot-6");
-    gtk_widget_add_css_class(dot, info->running     ? "running"
-                                  : info->last_exit > 0 ? "error"
-                                                        : "idle");
-    gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(row), dot);
-
-    GtkWidget *lbl = gtk_label_new(info->title != NULL ? info->title : "");
-    gtk_widget_add_css_class(lbl, "pt-tab-label");
-    gtk_label_set_ellipsize(GTK_LABEL(lbl), PANGO_ELLIPSIZE_MIDDLE);
-    gtk_label_set_max_width_chars(GTK_LABEL(lbl), 24);
-    gtk_box_append(GTK_BOX(row), lbl);
-
-    /* Hidden (opacity 0) until the tab is hovered — see .pt-tab-close in
-     * style.css. It closes the whole tab, panes and all. */
-    GtkWidget *close = gtk_button_new_with_label("×");
-    gtk_widget_add_css_class(close, "flat");
-    gtk_widget_add_css_class(close, "pt-tab-close");
-    gtk_widget_set_valign(close, GTK_ALIGN_CENTER);
-    g_object_set_data(G_OBJECT(close), "pt-index", GINT_TO_POINTER(i));
-    g_signal_connect(close, "clicked", G_CALLBACK(on_tab_close_clicked), s);
-    gtk_box_append(GTK_BOX(row), close);
-    g_object_set_data(G_OBJECT(row), "pt-close", close);
-
-    GtkGesture *click = gtk_gesture_click_new();
-    g_signal_connect(click, "pressed", G_CALLBACK(on_tab_pressed), s);
-    gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(click));
-    gtk_box_append(GTK_BOX(s->box), row);
-
-    /* Zed-style tab bar: a full-height 1px border after every tab, the
-     * active one included (see .pt-tab-sep). */
-    GtkWidget *sep = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_add_css_class(sep, "pt-tab-sep");
-    gtk_box_append(GTK_BOX(s->box), sep);
-  }
-
-  /* Empty expanding box so the + sits at the strip's right edge, like Zed. */
-  GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_hexpand(spacer, TRUE);
-  gtk_box_append(GTK_BOX(s->box), spacer);
-
-  GtkWidget *plus = gtk_button_new_with_label("+");
-  gtk_widget_add_css_class(plus, "flat");
-  gtk_widget_add_css_class(plus, "pt-tab-new");
-  gtk_widget_set_valign(plus, GTK_ALIGN_CENTER);
-  g_signal_connect(plus, "clicked", G_CALLBACK(on_new_clicked), s);
-  gtk_box_append(GTK_BOX(s->box), plus);
-
-  /* Opens the active project in Zed. Omitted entirely when zed is not on
-   * PATH — a button that cannot do anything is worse than no button. */
-  if (s->has_zed) {
-    GtkWidget *zed = gtk_button_new_from_icon_name("pt-zed-symbolic");
-    gtk_widget_add_css_class(zed, "flat");
-    gtk_widget_add_css_class(zed, "pt-tab-zed");
-    gtk_widget_set_valign(zed, GTK_ALIGN_CENTER);
-    gtk_widget_set_tooltip_text(zed, "Open in Zed");
-    g_signal_connect(zed, "clicked", G_CALLBACK(on_zed_clicked), s);
-    gtk_box_append(GTK_BOX(s->box), zed);
-  }
-
-  /* Last in the cluster: toggles the info panel, same as ⌃I. Unlike the Zed
-   * button this is never gated — the panel is always there to show. */
-  GtkWidget *panel = gtk_button_new_from_icon_name("pt-panel-right-symbolic");
-  gtk_widget_add_css_class(panel, "flat");
-  gtk_widget_add_css_class(panel, "pt-tab-panel");
-  gtk_widget_set_valign(panel, GTK_ALIGN_CENTER);
-  gtk_widget_set_tooltip_text(panel, "Toggle info panel  ^I");
-  g_signal_connect(panel, "clicked", G_CALLBACK(on_panel_clicked), s);
-  gtk_box_append(GTK_BOX(s->box), panel);
+  pt_rowlist_set(s->tabs, snapshot_new(tabs, n, active, accent),
+                 n > 0 ? (guint)n : 0, build_tab, snapshot_equal, s,
+                 snapshot_free);
 }
 
 static void pt_tab_strip_dispose(GObject *obj) {
   PtTabStrip *s = PT_TAB_STRIP(obj);
-  free_snapshot(s);
+  /* Rows before the row list: a tab must never outlive the list its gesture
+   * points at. */
   g_clear_pointer(&s->box, gtk_widget_unparent);
+  g_clear_object(&s->tabs);
   G_OBJECT_CLASS(pt_tab_strip_parent_class)->dispose(obj);
 }
 
@@ -227,6 +210,47 @@ static void pt_tab_strip_init(PtTabStrip *s) {
   s->box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_valign(s->box, GTK_ALIGN_CENTER);
   gtk_widget_set_parent(s->box, GTK_WIDGET(s));
+
+  /* The tabs get a box of their own: the cluster on the right is built once
+   * here, and a rebuild that cleared it would destroy those buttons several
+   * times a second — mid-click, given the chance. */
+  GtkWidget *tabs = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_box_append(GTK_BOX(s->box), tabs);
+  s->tabs = pt_rowlist_new(GTK_BOX(tabs));
+
+  /* Empty expanding box so the + sits at the strip's right edge, like Zed. */
+  GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand(spacer, TRUE);
+  gtk_box_append(GTK_BOX(s->box), spacer);
+
+  GtkWidget *plus = gtk_button_new_with_label("+");
+  gtk_widget_add_css_class(plus, "flat");
+  gtk_widget_add_css_class(plus, "pt-tab-new");
+  gtk_widget_set_valign(plus, GTK_ALIGN_CENTER);
+  g_signal_connect(plus, "clicked", G_CALLBACK(on_new_clicked), s);
+  gtk_box_append(GTK_BOX(s->box), plus);
+
+  /* Opens the active project in Zed. Omitted entirely when zed is not on
+   * PATH — a button that cannot do anything is worse than no button. */
+  if (s->has_zed) {
+    GtkWidget *zed_btn = gtk_button_new_from_icon_name("pt-zed-symbolic");
+    gtk_widget_add_css_class(zed_btn, "flat");
+    gtk_widget_add_css_class(zed_btn, "pt-tab-zed");
+    gtk_widget_set_valign(zed_btn, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(zed_btn, "Open in Zed");
+    g_signal_connect(zed_btn, "clicked", G_CALLBACK(on_zed_clicked), s);
+    gtk_box_append(GTK_BOX(s->box), zed_btn);
+  }
+
+  /* Last in the cluster: toggles the info panel, same as ⌃I. Unlike the Zed
+   * button this is never gated — the panel is always there to show. */
+  GtkWidget *panel = gtk_button_new_from_icon_name("pt-panel-right-symbolic");
+  gtk_widget_add_css_class(panel, "flat");
+  gtk_widget_add_css_class(panel, "pt-tab-panel");
+  gtk_widget_set_valign(panel, GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text(panel, "Toggle info panel  ^I");
+  g_signal_connect(panel, "clicked", G_CALLBACK(on_panel_clicked), s);
+  gtk_box_append(GTK_BOX(s->box), panel);
 }
 
 GtkWidget *pt_tab_strip_new(void) {

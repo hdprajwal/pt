@@ -1,5 +1,7 @@
 #include "pt-session.h"
 
+#include <json-glib/json-glib.h>
+
 static PtSessionState *sample_state(void) {
   PtSessionState *s = pt_session_state_new();
   PtProjectState *p = pt_project_state_new("proj", "/tmp/proj");
@@ -42,6 +44,44 @@ static void test_roundtrip(void) {
   pt_session_state_free(legacy);
 }
 
+/* A project can be tabless at capture time (its last shell exited, or its
+ * directory is missing): the window writes active_tab -1 for it, the value the
+ * old int bookkeeping's clamp left behind — and serialization must carry the
+ * -1 through untouched, not clamp or default it, so the file keeps its old
+ * shape. Pinned at the serializer, the deepest testable layer: capture_state
+ * itself lives in the window. The written JSON is parsed back structurally and
+ * the project object's "active_tab" member checked for exactly -1 — a
+ * substring scan could be satisfied by any stray "-1" in the text. */
+static void test_tabless_project_active_tab_minus_one(void) {
+  PtSessionState *s = pt_session_state_new();
+  PtProjectState *p = pt_project_state_new("empty", "/tmp/empty");
+  p->active_tab = -1;   /* what capture_state writes for zero tabs */
+  g_ptr_array_add(s->projects, p);
+  char *text = pt_session_to_json_text(s);
+
+  /* Structural check on the emitted JSON itself. */
+  JsonParser *parser = json_parser_new();
+  g_assert_true(json_parser_load_from_data(parser, text, -1, NULL));
+  JsonObject *root = json_node_get_object(json_parser_get_root(parser));
+  JsonArray *projects = json_object_get_array_member(root, "projects");
+  g_assert_cmpuint(json_array_get_length(projects), ==, 1);
+  JsonObject *po = json_array_get_object_element(projects, 0);
+  g_assert_true(json_object_has_member(po, "active_tab"));
+  g_assert_cmpint(json_object_get_int_member(po, "active_tab"), ==, -1);
+  g_object_unref(parser);
+
+  /* And the round trip hands the unclamped -1 back. */
+  PtSessionState *back = pt_session_from_json_text(text);
+  g_free(text);
+  g_assert_nonnull(back);
+  g_assert_cmpuint(back->projects->len, ==, 1);
+  PtProjectState *bp = g_ptr_array_index(back->projects, 0);
+  g_assert_cmpuint(bp->tabs->len, ==, 0);
+  g_assert_cmpint(bp->active_tab, ==, -1);
+  pt_session_state_free(s);
+  pt_session_state_free(back);
+}
+
 static void test_save_load(void) {
   char *dir = g_dir_make_tmp("pt-test-XXXXXX", NULL);
   char *path = g_build_filename(dir, "state.json", NULL);
@@ -67,6 +107,47 @@ static void test_corrupt_becomes_bak(void) {
   g_assert_true(g_file_test(bak, G_FILE_TEST_EXISTS));
   g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
   g_free(bak); g_free(path); g_free(dir);
+}
+
+/* A state file from a newer pt is not something this build can read: treat it
+ * like any other unreadable file — move it aside and start from defaults —
+ * rather than half-restoring a shape we do not understand. */
+static void test_future_version_becomes_bak(void) {
+  g_assert_null(pt_session_from_json_text(
+      "{\"version\":2,\"active_project\":0,\"projects\":[]}"));
+
+  char *dir = g_dir_make_tmp("pt-test-XXXXXX", NULL);
+  char *path = g_build_filename(dir, "state.json", NULL);
+  g_file_set_contents(path,
+      "{\"version\":2,\"active_project\":0,\"projects\":[]}", -1, NULL);
+  g_assert_null(pt_session_load(path));
+  char *bak = g_strconcat(path, ".bak", NULL);
+  g_assert_true(g_file_test(bak, G_FILE_TEST_EXISTS));
+  g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+  g_free(bak); g_free(path); g_free(dir);
+}
+
+/* The first rescued file is the one worth keeping: a later corruption must not
+ * overwrite it. */
+static void test_existing_bak_is_preserved(void) {
+  char *dir = g_dir_make_tmp("pt-test-XXXXXX", NULL);
+  char *path = g_build_filename(dir, "state.json", NULL);
+  char *bak = g_strconcat(path, ".bak", NULL);
+  char *bak1 = g_strconcat(path, ".bak.1", NULL);
+  g_file_set_contents(bak, "first rescue", -1, NULL);
+  g_file_set_contents(path, "{still not json", -1, NULL);
+
+  g_assert_null(pt_session_load(path));
+  char *kept = NULL;
+  g_assert_true(g_file_get_contents(bak, &kept, NULL, NULL));
+  g_assert_cmpstr(kept, ==, "first rescue");
+  char *moved = NULL;
+  g_assert_true(g_file_get_contents(bak1, &moved, NULL, NULL));
+  g_assert_cmpstr(moved, ==, "{still not json");
+  g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+
+  g_free(kept); g_free(moved);
+  g_free(bak1); g_free(bak); g_free(path); g_free(dir);
 }
 
 static void test_load_missing_returns_null(void) {
@@ -135,67 +216,25 @@ static void test_accent_out_of_range_is_clamped(void) {
   pt_session_state_free(s);
 }
 
-/* Reordering the sidebar moves a project, and active_project is a position:
- * every case below is a way for the app to silently switch projects. */
-static void test_index_after_move(void) {
-  /* The moved project itself follows the drop. */
-  g_assert_cmpint(pt_session_index_after_move(0, 0, 3), ==, 3);
-  g_assert_cmpint(pt_session_index_after_move(3, 3, 0), ==, 0);
-
-  /* Dragged down past the active one: active slides up a slot. */
-  g_assert_cmpint(pt_session_index_after_move(2, 0, 3), ==, 1);
-  g_assert_cmpint(pt_session_index_after_move(3, 0, 3), ==, 2);
-
-  /* Dragged up past it: active slides down a slot. */
-  g_assert_cmpint(pt_session_index_after_move(1, 3, 1), ==, 2);
-  g_assert_cmpint(pt_session_index_after_move(2, 3, 1), ==, 3);
-
-  /* Moves that step over neither side leave it alone. */
-  g_assert_cmpint(pt_session_index_after_move(0, 1, 3), ==, 0);
-  g_assert_cmpint(pt_session_index_after_move(4, 1, 3), ==, 4);
-  g_assert_cmpint(pt_session_index_after_move(0, 3, 1), ==, 0);
-  g_assert_cmpint(pt_session_index_after_move(4, 3, 1), ==, 4);
-
-  /* Neighbour swap, both directions. */
-  g_assert_cmpint(pt_session_index_after_move(1, 2, 1), ==, 2);
-  g_assert_cmpint(pt_session_index_after_move(2, 1, 2), ==, 1);
-
-  /* A dropped-on-itself move and the empty window's -1 change nothing. */
-  g_assert_cmpint(pt_session_index_after_move(2, 2, 2), ==, 2);
-  g_assert_cmpint(pt_session_index_after_move(-1, 0, 2), ==, -1);
-}
-
-/* The remap has to agree with the array move it describes, for every pair. */
-static void test_index_after_move_matches_array(void) {
-  const int n = 6;
-  for (int from = 0; from < n; from++) {
-    for (int to = 0; to < n; to++) {
-      GPtrArray *a = g_ptr_array_new();
-      for (int i = 0; i < n; i++) g_ptr_array_add(a, GINT_TO_POINTER(i));
-      gpointer moved = g_ptr_array_steal_index(a, from);
-      g_ptr_array_insert(a, to, moved);
-      for (int i = 0; i < n; i++) {
-        int after = pt_session_index_after_move(i, from, to);
-        g_assert_cmpint(GPOINTER_TO_INT(g_ptr_array_index(a, after)), ==, i);
-      }
-      g_ptr_array_free(a, TRUE);
-    }
-  }
-}
+/* Reorder-survival used to live here as pt_session_index_after_move; the
+ * workspace's stable ids replaced it, and its semantics are pinned by
+ * tests/test-workspace.c (/workspace/move-spot-checks and
+ * /workspace/move-matches-array). */
 
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/session/roundtrip", test_roundtrip);
+  g_test_add_func("/session/tabless-active-tab",
+                  test_tabless_project_active_tab_minus_one);
   g_test_add_func("/session/save-load", test_save_load);
   g_test_add_func("/session/corrupt", test_corrupt_becomes_bak);
+  g_test_add_func("/session/future-version", test_future_version_becomes_bak);
+  g_test_add_func("/session/bak-preserved", test_existing_bak_is_preserved);
   g_test_add_func("/session/missing", test_load_missing_returns_null);
   g_test_add_func("/session/accent-roundtrip", test_accent_roundtrip);
   g_test_add_func("/session/accent-default", test_accent_default_when_absent);
   g_test_add_func("/session/accent-explicit-zero",
                   test_accent_explicit_zero_beats_index_default);
   g_test_add_func("/session/accent-clamp", test_accent_out_of_range_is_clamped);
-  g_test_add_func("/session/index-after-move", test_index_after_move);
-  g_test_add_func("/session/index-after-move-matches-array",
-                  test_index_after_move_matches_array);
   return g_test_run();
 }
