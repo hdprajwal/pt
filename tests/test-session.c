@@ -1,5 +1,7 @@
 #include "pt-session.h"
 
+#include <string.h>   /* strstr */
+
 static PtSessionState *sample_state(void) {
   PtSessionState *s = pt_session_state_new();
   PtProjectState *p = pt_project_state_new("proj", "/tmp/proj");
@@ -40,6 +42,29 @@ static void test_roundtrip(void) {
   g_assert_nonnull(legacy);
   g_assert_cmpint(legacy->font_size, ==, PT_FONT_SIZE_DEFAULT);
   pt_session_state_free(legacy);
+}
+
+/* A project can be tabless at capture time (its last shell exited, or its
+ * directory is missing): the window writes active_tab -1 for it, the value the
+ * old int bookkeeping's clamp left behind — and serialization must carry the
+ * -1 through untouched, not clamp or default it, so the file keeps its old
+ * shape. */
+static void test_tabless_project_active_tab_minus_one(void) {
+  PtSessionState *s = pt_session_state_new();
+  PtProjectState *p = pt_project_state_new("empty", "/tmp/empty");
+  p->active_tab = -1;
+  g_ptr_array_add(s->projects, p);
+  char *text = pt_session_to_json_text(s);
+  g_assert_nonnull(strstr(text, "-1"));
+  PtSessionState *back = pt_session_from_json_text(text);
+  g_free(text);
+  g_assert_nonnull(back);
+  g_assert_cmpuint(back->projects->len, ==, 1);
+  PtProjectState *bp = g_ptr_array_index(back->projects, 0);
+  g_assert_cmpuint(bp->tabs->len, ==, 0);
+  g_assert_cmpint(bp->active_tab, ==, -1);
+  pt_session_state_free(s);
+  pt_session_state_free(back);
 }
 
 static void test_save_load(void) {
@@ -184,6 +209,8 @@ static void test_accent_out_of_range_is_clamped(void) {
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/session/roundtrip", test_roundtrip);
+  g_test_add_func("/session/tabless-active-tab",
+                  test_tabless_project_active_tab_minus_one);
   g_test_add_func("/session/save-load", test_save_load);
   g_test_add_func("/session/corrupt", test_corrupt_becomes_bak);
   g_test_add_func("/session/future-version", test_future_version_becomes_bak);

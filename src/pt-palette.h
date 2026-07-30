@@ -10,8 +10,14 @@ typedef struct {
   int accent;
   gboolean is_shell;
   gboolean is_command;  /* a window command, not somewhere to switch to */
-  int project_idx;      /* -1 on commands; tab_idx then carries the command id */
-  int tab_idx;          /* -1 for project items */
+  /* Switch targets are workspace ids, not positions: the palette stays open
+   * across an async gap (a background shell can exit and drop its tab while
+   * the user types), and an index captured at open time would then name
+   * whatever slid into the slot. A dead id activates as a no-op instead.
+   * 0 = none: commands carry neither, project rows carry no tab. */
+  guint project_id;
+  guint tab_id;
+  int command;          /* which command, when is_command; else -1 */
 } PtPaletteItem;
 
 #define PT_TYPE_PALETTE (pt_palette_get_type())
@@ -26,5 +32,5 @@ void pt_palette_open(PtPalette *p, PtPaletteItem *items, int n_items);
 void pt_palette_close(PtPalette *p);
 gboolean pt_palette_is_open(PtPalette *p);
 
-/* Signals: "activated" (int project_idx, int tab_idx),
+/* Signals: "activated" (guint project_id, guint tab_id, int command),
  *          "closed" (void) — emitted on any dismissal. */

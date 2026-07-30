@@ -132,9 +132,10 @@ static void activate_selected(PtPalette *p) {
   /* Copy before emitting: the handler switches projects, and close() below
    * frees the array the item lives in. */
   const PtPaletteItem *it = &p->items[p->shown[p->selected]];
-  int project_idx = it->project_idx;
-  int tab_idx = it->tab_idx;
-  g_signal_emit(p, signals[SIG_ACTIVATED], 0, project_idx, tab_idx);
+  guint project_id = it->project_id;
+  guint tab_id = it->tab_id;
+  int command = it->is_command ? it->command : -1;
+  g_signal_emit(p, signals[SIG_ACTIVATED], 0, project_id, tab_id, command);
   pt_palette_close(p);
 }
 
@@ -269,8 +270,8 @@ static void pt_palette_class_init(PtPaletteClass *klass) {
   gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(klass),
                                            GTK_TYPE_BIN_LAYOUT);
   signals[SIG_ACTIVATED] = g_signal_new("activated", PT_TYPE_PALETTE,
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
-      G_TYPE_INT, G_TYPE_INT);
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+      G_TYPE_UINT, G_TYPE_UINT, G_TYPE_INT);
   signals[SIG_CLOSED] = g_signal_new("closed", PT_TYPE_PALETTE,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }

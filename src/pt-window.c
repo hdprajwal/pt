@@ -1454,13 +1454,14 @@ static void on_info_refresh(PtInfoPanel *ip, gpointer user) {
 }
 
 /* ---------- command palette ---------- */
-/* Commands ride the same list as projects and shells, marked by a project_idx
- * of -1; tab_idx then carries which command it is. */
+/* Commands ride the same list as projects and shells, marked is_command with
+ * `command` saying which one. */
 enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL };
 
 /* Every project, each followed by its shells, then the commands. The palette
- * ranks this flat list and hands back the (project, tab) pair the user
- * picked. */
+ * ranks this flat list and hands back the workspace ids the user picked —
+ * ids, not positions, because the palette sits open across an async gap
+ * (see PtPaletteItem). */
 static void action_open_palette(PtWindow *w) {
   GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtPaletteItem));
   for (guint i = 0; i < pt_workspace_project_count(w->ws); i++) {
@@ -1480,17 +1481,17 @@ static void action_open_palette(PtWindow *w) {
           : g_strdup(shown_path),
       .shortcut = i < 9 ? g_strdup_printf("^%u", i + 1) : NULL,
       .accent = accent, .is_shell = FALSE,
-      .project_idx = (int)i, .tab_idx = -1,
+      .project_id = id, .tab_id = PT_WS_ID_NONE, .command = -1,
     };
     g_array_append_val(arr, it);
     for (guint j = 0; j < pt_workspace_tab_count(w->ws, id); j++) {
-      PtTabUI *t = pt_workspace_get_data(
-          w->ws, pt_workspace_tab_at(w->ws, id, j));
+      PtWsId tab = pt_workspace_tab_at(w->ws, id, j);
+      PtTabUI *t = pt_workspace_get_data(w->ws, tab);
       PtPaletteItem sh = {
         .name = g_strdup(t->title),
         .detail = g_strdup(name),
         .shortcut = NULL, .accent = accent, .is_shell = TRUE,
-        .project_idx = (int)i, .tab_idx = (int)j,
+        .project_id = id, .tab_id = tab, .command = -1,
       };
       g_array_append_val(arr, sh);
     }
@@ -1503,7 +1504,8 @@ static void action_open_palette(PtWindow *w) {
         ? "on · apps own the mouse, shift+drag selects"
         : "off · click and drag selects"),
     .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
-    .project_idx = -1, .tab_idx = PT_CMD_TOGGLE_MOUSE_REPORTING,
+    .project_id = PT_WS_ID_NONE, .tab_id = PT_WS_ID_NONE,
+    .command = PT_CMD_TOGGLE_MOUSE_REPORTING,
   };
   g_array_append_val(arr, mr);
 
@@ -1514,7 +1516,8 @@ static void action_open_palette(PtWindow *w) {
     .detail = g_strdup("clears the screen, scrollback and modes · "
                        "the shell keeps running"),
     .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
-    .project_idx = -1, .tab_idx = PT_CMD_RESET_TERMINAL,
+    .project_id = PT_WS_ID_NONE, .tab_id = PT_WS_ID_NONE,
+    .command = PT_CMD_RESET_TERMINAL,
   };
   g_array_append_val(arr, rst);
 
@@ -1523,20 +1526,25 @@ static void action_open_palette(PtWindow *w) {
                   (PtPaletteItem *)g_array_free(arr, FALSE), n);
 }
 
-static void on_palette_activated(PtPalette *pal, int project_idx, int tab_idx,
-                                 gpointer user) {
+/* Ids resolve at activation time: a project or tab that died while the
+ * palette was open (a background shell exiting takes its tab with it) is a
+ * dead id and a no-op — never the row that slid into its old position. A live
+ * project whose picked tab died still switches to the project, landing on its
+ * current active tab. */
+static void on_palette_activated(PtPalette *pal, guint project_id,
+                                 guint tab_id, int command, gpointer user) {
   (void)pal;
   PtWindow *w = PT_WINDOW(user);
-  if (project_idx < 0) {
-    switch (tab_idx) {
+  if (command >= 0) {
+    switch (command) {
     case PT_CMD_TOGGLE_MOUSE_REPORTING: action_toggle_mouse_reporting(w); break;
     case PT_CMD_RESET_TERMINAL: action_reset_terminal(w); break;
     default: break;
     }
     return;
   }
-  action_switch_project(w, project_idx);
-  if (tab_idx >= 0) action_switch_tab(w, tab_idx);
+  switch_project_id(w, project_id);
+  if (tab_id != PT_WS_ID_NONE) switch_tab_id(w, tab_id);
 }
 
 static void on_palette_closed(PtPalette *pal, gpointer user) {
@@ -1849,9 +1857,10 @@ static PtSessionState *capture_state(PtWindow *w) {
                              pt_workspace_project_path(w->ws, id));
     guint at = pt_workspace_tab_index(w->ws,
                                       pt_workspace_active_tab(w->ws, id));
-    /* 0, not -1, for a project with no tabs (missing dir): the old int
-     * bookkeeping never left its default slot, and restore clamps anyway. */
-    ps->active_tab = at == PT_WS_INDEX_NONE ? 0 : (int)at;
+    /* -1 for a project with no tabs, byte-compatible with the old int
+     * bookkeeping (whose clamp left -1 when the last tab closed); restore
+     * clamps it back into range once tabs exist again. */
+    ps->active_tab = at == PT_WS_INDEX_NONE ? -1 : (int)at;
     ps->accent = pt_workspace_project_accent(w->ws, id);
     for (guint j = 0; j < pt_workspace_tab_count(w->ws, id); j++) {
       PtTabUI *t = pt_workspace_get_data(
