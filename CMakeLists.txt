@@ -65,7 +65,8 @@ add_library(ptcore STATIC
   src/pt-split-tree.c
   src/pt-theme.c
   src/pt-session.c
-  src/pt-term-core.c)
+  src/pt-term-core.c
+  src/pt-workspace.c)
 target_include_directories(ptcore PUBLIC src)
 # Static: the shared imported target leaves the binary with a RUNPATH into
 # the build tree and a runtime dependency no user machine can satisfy.
@@ -128,6 +129,10 @@ add_test(NAME block COMMAND test-block)
 add_executable(test-osc-scan tests/test-osc-scan.c)
 target_link_libraries(test-osc-scan PRIVATE ptcore)
 add_test(NAME osc-scan COMMAND test-osc-scan)
+
+add_executable(test-workspace tests/test-workspace.c)
+target_link_libraries(test-workspace PRIVATE ptcore)
+add_test(NAME workspace COMMAND test-workspace)
 
 add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
 target_include_directories(test-keymap PRIVATE src)
