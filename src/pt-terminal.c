@@ -551,12 +551,34 @@ static void apply_palette(PtTermCore *core) {
   pt_term_core_set_colors(core, &colors);
 }
 
+/* The grid an allocation of `width` x `height` pixels holds, at the current
+ * cell metrics. Two is the floor: a one-column terminal is not a terminal. */
+static void grid_for_size(PtTerminal *t, int width, int height,
+                          int *cols, int *rows) {
+  *cols = (width - 2 * PT_PAD_X) / t->cell_w;
+  *rows = (height - 2 * PT_PAD_Y) / t->cell_h;
+  if (*cols < 2) *cols = 2;
+  if (*rows < 2) *rows = 2;
+}
+
 static void ensure_core(PtTerminal *t) {
   if (t->core != NULL) return;
   measure_font(t);
+  /* Spawn at the size the pane already has, so the child's very first winsize
+   * is the real one: a shell that prints a prompt or an app that draws before
+   * pt's first resize lands would otherwise lay itself out for 80x24 and wrap
+   * against a grid that was never there. A widget with no allocation yet (the
+   * core built from the reset path, ahead of the queued allocate) has no size
+   * to use and keeps the 80x24 default; the size-allocate resize below still
+   * corrects it, SIGWINCH and all. */
+  int width = gtk_widget_get_width(GTK_WIDGET(t));
+  int height = gtk_widget_get_height(GTK_WIDGET(t));
+  int cols = 80, rows = 24;
+  if (width > 0 && height > 0) grid_for_size(t, width, height, &cols, &rows);
   GError *err = NULL;
   t->core = pt_term_core_new(t->start_cwd, NULL,
-                             (const char *const *)t->env, 80, 24,
+                             (const char *const *)t->env,
+                             (guint16)cols, (guint16)rows,
                              t->cell_w, t->cell_h, &err);
   if (t->core == NULL) {
     g_warning("pt: terminal spawn failed: %s",
@@ -595,10 +617,8 @@ static void pt_terminal_size_allocate(GtkWidget *widget, int width, int height,
   PtTerminal *t = PT_TERMINAL(widget);
   ensure_core(t);
   if (t->core == NULL) return;
-  int cols = (width - 2 * PT_PAD_X) / t->cell_w;
-  int rows = (height - 2 * PT_PAD_Y) / t->cell_h;
-  if (cols < 2) cols = 2;
-  if (rows < 2) rows = 2;
+  int cols, rows;
+  grid_for_size(t, width, height, &cols, &rows);
   pt_term_core_resize(t->core, (guint16)cols, (guint16)rows,
                       t->cell_w, t->cell_h);
   /* Reflow can carry a link away from a pointer that never moved, and a pane
@@ -1353,16 +1373,15 @@ static gboolean on_scroll(GtkEventControllerScroll *ctl, double dx, double dy,
   if (wheel_reports(t, state)) {
     if (notches == 0) return TRUE;
     /* One button-4/5 press per notch, reported at the pointer: GTK scroll
-     * events carry no coordinates of their own. Nothing local changed —
-     * selection_clear fires the draw callback itself, and whatever the app
-     * does with the reports comes back through the pty read path. */
+     * events carry no coordinates of their own. The core encodes the whole
+     * burst into a single write. Nothing local changed — selection_clear
+     * fires the draw callback itself, and whatever the app does with the
+     * reports comes back through the pty read path. */
     pt_term_core_selection_clear(t->core);
-    GhosttyMods mods = pt_keymap_mods(state);
     GhosttyMouseButton btn = notches < 0 ? GHOSTTY_MOUSE_BUTTON_FOUR
                                          : GHOSTTY_MOUSE_BUTTON_FIVE;
-    for (int i = 0; i < ABS(notches); i++)
-      pt_term_core_mouse_report(t->core, GHOSTTY_MOUSE_ACTION_PRESS, btn, mods,
-                                t->mouse_x, t->mouse_y);
+    pt_term_core_wheel_report(t->core, btn, pt_keymap_mods(state),
+                              t->mouse_x, t->mouse_y, ABS(notches));
     return TRUE;
   }
 

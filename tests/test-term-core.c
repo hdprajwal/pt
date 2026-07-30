@@ -570,6 +570,45 @@ static void test_mouse_report_sgr(void) {
   pt_term_core_free(core);
 }
 
+static void test_wheel_report_batches_notches(void) {
+  /* A wheel event can carry several notches; the widget hands all of them to
+     the core at once and the core makes one write of it. The bytes have to be
+     exactly what one report per notch produced — three identical button-4
+     presses, back to back, nothing merged and nothing dropped. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(tracking_on, core));
+
+  g_assert_true(pt_term_core_wheel_report(core, GHOSTTY_MOUSE_BUTTON_FOUR, 0,
+                                          21.0, 20.0, 3));
+  g_assert_true(wait_for_text(core, "^[[<64;1;1M^[[<64;1;1M^[[<64;1;1M"));
+
+  /* Nothing to report is not an error, and must not write a stray byte. */
+  g_assert_false(pt_term_core_wheel_report(core, GHOSTTY_MOUSE_BUTTON_FIVE, 0,
+                                           21.0, 20.0, 0));
+
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "^[[<65;"));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
+static void test_wheel_report_needs_tracking(void) {
+  /* Same rule as a click: with no mouse mode set the wheel writes nothing. */
+  const char *argv[] = {"/bin/cat", NULL};
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  g_assert_nonnull(core);
+  g_assert_false(pt_term_core_wheel_report(core, GHOSTTY_MOUSE_BUTTON_FOUR, 0,
+                                           21.0, 20.0, 3));
+  pt_term_core_free(core);
+}
+
 static void test_mouse_report_needs_tracking(void) {
   /* No mouse mode set: the encoder must produce nothing at all, so a click in
      a plain shell can never leak escape bytes into the command line. */
@@ -2572,6 +2611,10 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/exit-marker", test_exit_marker_from_title);
   g_test_add_func("/termcore/title-dedupe", test_title_dedupes);
   g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
+  g_test_add_func("/termcore/wheel-report-batch",
+                  test_wheel_report_batches_notches);
+  g_test_add_func("/termcore/wheel-report-off",
+                  test_wheel_report_needs_tracking);
   g_test_add_func("/termcore/mouse-report-off", test_mouse_report_needs_tracking);
   g_test_add_func("/termcore/focus-report", test_focus_report);
   g_test_add_func("/termcore/focus-report-off", test_focus_report_needs_mode);

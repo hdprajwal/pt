@@ -134,6 +134,13 @@ gboolean pt_term_core_hyperlink_is_safe(const char *uri);
 gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
                                    GhosttyMouseButton button, GhosttyMods mods,
                                    double px, double py);
+/* `notches` wheel presses of the same button at the same point, in one write.
+ * A wheel event carries several notches and a touchpad delivers them faster
+ * still; the bytes are exactly what that many pt_term_core_mouse_report()
+ * calls produce, only the syscall count differs. */
+gboolean pt_term_core_wheel_report(PtTermCore *c, GhosttyMouseButton button,
+                                   GhosttyMods mods, double px, double py,
+                                   int notches);
 gboolean pt_term_core_mouse_tracking(PtTermCore *c);
 
 /* ---- focus reporting (mode 1004) ----

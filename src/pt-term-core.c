@@ -1317,6 +1317,24 @@ static void mouse_encoder_sync(PtTermCore *c, gboolean any_button_pressed) {
       &track_last_cell);
 }
 
+/* Room for one encoded report. SGR, the longest of the formats, spends about
+ * sixteen bytes on a four-digit cell; the slack is free, it is a stack byte. */
+#define PT_MOUSE_REPORT_MAX 128
+
+static void mouse_event_fill(PtTermCore *c, GhosttyMouseAction action,
+                             GhosttyMouseButton button, GhosttyMods mods,
+                             double px, double py) {
+  ghostty_mouse_event_set_action(c->mouse_event, action);
+  if (button != GHOSTTY_MOUSE_BUTTON_UNKNOWN)
+    ghostty_mouse_event_set_button(c->mouse_event, button);
+  else
+    ghostty_mouse_event_clear_button(c->mouse_event);
+  ghostty_mouse_event_set_mods(c->mouse_event, mods);
+  ghostty_mouse_event_set_position(c->mouse_event,
+                                   (GhosttyMousePosition){ .x = (float)px,
+                                                           .y = (float)py });
+}
+
 gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
                                    GhosttyMouseButton button, GhosttyMods mods,
                                    double px, double py) {
@@ -1331,18 +1349,9 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
       c->buttons_down &= ~(1u << button);
   }
   mouse_encoder_sync(c, c->buttons_down != 0);
+  mouse_event_fill(c, action, button, mods, px, py);
 
-  ghostty_mouse_event_set_action(c->mouse_event, action);
-  if (button != GHOSTTY_MOUSE_BUTTON_UNKNOWN)
-    ghostty_mouse_event_set_button(c->mouse_event, button);
-  else
-    ghostty_mouse_event_clear_button(c->mouse_event);
-  ghostty_mouse_event_set_mods(c->mouse_event, mods);
-  ghostty_mouse_event_set_position(c->mouse_event,
-                                   (GhosttyMousePosition){ .x = (float)px,
-                                                           .y = (float)py });
-
-  char buf[128];
+  char buf[PT_MOUSE_REPORT_MAX];
   size_t written = 0;
   if (ghostty_mouse_encoder_encode(c->mouse_encoder, c->mouse_event, buf,
                                    sizeof(buf), &written) != GHOSTTY_SUCCESS ||
@@ -1350,6 +1359,48 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
     return FALSE;
   pty_write_raw(c->pty_fd, buf, written);
   return TRUE;
+}
+
+gboolean pt_term_core_wheel_report(PtTermCore *c, GhosttyMouseButton button,
+                                   GhosttyMods mods, double px, double py,
+                                   int notches) {
+  if (c->child_exited || c->pty_fd < 0 || notches <= 0) return FALSE;
+
+  /* Synced once for the whole burst. Nothing the encoder reads can move while
+   * this runs — no pty bytes are parsed between the notches — so the reports
+   * come out byte-identical to the old sync-and-write-per-notch loop. The
+   * wheel is a press, and the encoder's cell dedupe only ever suppresses
+   * motion (input/mouse_encode.zig:108), so repeats are not swallowed.
+   *
+   * The wheel is deliberately *not* recorded in buttons_down. Ghostty reports
+   * a scroll as a button-four/five press without touching its click state
+   * (Surface.zig:3565 reports, 3763 is the only writer of click_state), so
+   * any-button-pressed stays false. Routing this through the plain
+   * mouse_report path used to set the bit and never clear it — no wheel
+   * release exists — which left every later out-of-viewport motion looking
+   * like a drag. */
+  mouse_encoder_sync(c, c->buttons_down != 0);
+  mouse_event_fill(c, GHOSTTY_MOUSE_ACTION_PRESS, button, mods, px, py);
+
+  /* One write for the burst instead of one syscall per notch. Four notches
+   * cover any wheel event; a touchpad flick can ask for more. */
+  char stack[4 * PT_MOUSE_REPORT_MAX];
+  gsize cap = (gsize)notches * PT_MOUSE_REPORT_MAX;
+  char *heap = cap > sizeof(stack) ? g_malloc(cap) : NULL;
+  char *buf = heap != NULL ? heap : stack;
+
+  gsize len = 0;
+  for (int i = 0; i < notches; i++) {
+    size_t written = 0;
+    if (ghostty_mouse_encoder_encode(c->mouse_encoder, c->mouse_event,
+                                     buf + len, PT_MOUSE_REPORT_MAX,
+                                     &written) != GHOSTTY_SUCCESS)
+      break;
+    len += written;
+  }
+  if (len > 0) pty_write_raw(c->pty_fd, buf, len);
+  g_free(heap);
+  return len > 0;
 }
 
 gboolean pt_term_core_focus_report(PtTermCore *c, gboolean focused,
@@ -1413,26 +1464,47 @@ gboolean pt_term_core_bracketed_paste(PtTermCore *c) {
   return on;
 }
 
+/* Pastes up to this many bytes are encoded without touching the heap. A line
+ * or two of shell — what nearly every paste is — stays on the stack. */
+#define PT_PASTE_STACK_MAX 4096
+/* "\x1b[200~" + "\x1b[201~", the only bytes bracketed mode adds
+ * (input/paste.zig:95-99). Nothing else changes the length. */
+#define PT_PASTE_MARKERS 12
+
 void pt_term_core_paste(PtTermCore *c, const char *text, gssize len) {
   if (c->pty_fd < 0 || c->child_exited || text == NULL) return;
   size_t n = len < 0 ? strlen(text) : (size_t)len;
   if (n == 0) return;
 
-  /* ghostty_paste_encode rewrites the unsafe bytes in place, so it gets a
-   * copy — the caller's string comes from the clipboard and is not ours. */
-  char *data = g_memdup2(text, n);
   bool bracketed = pt_term_core_bracketed_paste(c);
-  /* A NULL buffer only asks for the size (markers included). The in-place
-   * pass is idempotent, so encoding twice over the same copy is safe. */
-  size_t need = 0;
-  ghostty_paste_encode(data, n, bracketed, NULL, 0, &need);
-  char *out = g_malloc(need);
+  /* Two regions: ghostty_paste_encode rewrites the unsafe bytes in place, so
+   * it needs a copy of the clipboard string (which is not ours to touch), and
+   * then memcpys the segments into a separate output buffer. The encoded size
+   * is known up front — the input length plus the markers — so one pass does
+   * it; the old size-then-fill pair walked the same bytes twice. */
+  size_t need = n + (bracketed ? PT_PASTE_MARKERS : 0);
+  char stack[2 * PT_PASTE_STACK_MAX + PT_PASTE_MARKERS];
+  char *heap = n > PT_PASTE_STACK_MAX ? g_malloc(n + need) : NULL;
+  char *data = heap != NULL ? heap : stack;
+  char *out = data + n;
+  memcpy(data, text, n);
+
   size_t written = 0;
-  if (ghostty_paste_encode(data, n, bracketed, out, need,
-                           &written) == GHOSTTY_SUCCESS)
+  GhosttyResult r = ghostty_paste_encode(data, n, bracketed, out, need,
+                                         &written);
+  if (r != GHOSTTY_SUCCESS) {
+    /* Only reachable if the library ever grows an encoding that is longer
+     * than the input plus the markers; it hands back the size it wants. The
+     * in-place strip already ran and is idempotent, so the retry re-encodes
+     * the same copy safely. */
+    char *big = g_malloc(written);
+    r = ghostty_paste_encode(data, n, bracketed, big, written, &written);
+    if (r == GHOSTTY_SUCCESS) pty_write_raw(c->pty_fd, big, written);
+    g_free(big);
+  } else {
     pty_write_raw(c->pty_fd, out, written);
-  g_free(out);
-  g_free(data);
+  }
+  g_free(heap);
 }
 
 gboolean pt_term_core_paste_is_safe(const char *text, gssize len) {
