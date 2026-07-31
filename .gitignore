@@ -2,3 +2,4 @@ docs/
 .superpowers/
 build/
 build-release/
+release-local.sh
