@@ -2,6 +2,7 @@
 #include "pt-block.h"
 #include "pt-config.h"       /* mouse-reporting and osc52 defaults */
 #include "pt-keymap.h"
+#include "pt-link.h"         /* bare URLs in plain output, matched on hover */
 #include "pt-session.h"      /* PT_FONT_SIZE_DEFAULT, shared with persistence */
 #include <adwaita.h>         /* paste confirmation dialog */
 #include <math.h>
@@ -125,6 +126,15 @@ struct _PtTerminal {
   int link_col, link_row;
   guint link_serial;
 
+  /* The bare URL under the pointer, if any: the address, and the cells it
+   * covers as a range in reading order — (url_r0, url_c0) through
+   * (url_r1, url_c1) inclusive, which is what a match over a wrapped line
+   * looks like on screen. Resolved by the same hover pass that answers the
+   * hand cursor, so the draw and the click both read it instead of matching
+   * again. url_uri NULL means there is none. */
+  char *url_uri;
+  int url_r0, url_c0, url_r1, url_c1;
+
   /* overlay scrollbar: when the viewport last moved (monotonic µs, 0 = never
    * or already faded out), the timer waiting the hold out, and the tick
    * callback driving the fade after it. Only one of the last two is ever set. */
@@ -150,6 +160,7 @@ G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
  * mouse code they belong with. */
 static void update_link_cursor(PtTerminal *t);
 static void link_cache_reset(PtTerminal *t);
+static void url_clear(PtTerminal *t);
 
 /* ---- cursor blink ----
  *
@@ -490,25 +501,33 @@ static void flush_run(GtkSnapshot *snapshot, PangoFont *font,
   run->num_glyphs = 0;
 }
 
-/* ---- OSC 8 hyperlinks ----
+/* ---- link underlines ----
  *
  * Linked cells get an underline, which is the only thing that tells a user a
  * run of text is clickable at all. Drawn as a pass over the row's flat cells
  * after its backgrounds went down (a background painted later would cover the
- * line), and only for rows where the cell fill saw a link at all. The colour
- * is resolved the same way the glyph's is, inverse included — under inverse
- * video the cell's foreground is what got painted *behind* the text, so an
- * underline in it is a line the same colour as the block it sits on.
- * Selection only replaces the background, so it leaves this alone, exactly as
- * it leaves the glyph colour alone. */
+ * line), and only for rows carrying a link at all. The colour is resolved the
+ * same way the glyph's is, inverse included — under inverse video the cell's
+ * foreground is what got painted *behind* the text, so an underline in it is a
+ * line the same colour as the block it sits on. Selection only replaces the
+ * background, so it leaves this alone, exactly as it leaves the glyph colour
+ * alone.
+ *
+ * Two kinds of link land here. An OSC 8 cell is underlined whenever it is on
+ * screen, because the program declared it and the underline is what says so.
+ * A bare URL is underlined only over the columns [span_a, span_b] of this row,
+ * and only while it is the one under the pointer with the modifier down —
+ * ghostty highlights its regex links on hover too, for the same reason:
+ * every address in a build log underlined at once is noise, not information.
+ * span_a > span_b means this row has no such span. */
 static void draw_row_underlines(PtTerminal *t, GtkSnapshot *snapshot,
                                 const PtCell *cells, int n, int y,
-                                PtColor bg_default) {
+                                PtColor bg_default, int span_a, int span_b) {
   int uy = MIN(y + t->baseline + 2, y + t->cell_h - 1);
   int x = PT_PAD_X;
   for (int i = 0; i < n; i++, x += t->cell_w) {
     const PtCell *cl = &cells[i];
-    if (!cl->has_link) continue;
+    if (!cl->has_link && !(i >= span_a && i <= span_b)) continue;
     PtColor fg = cl->fg;
     if (cl->style & PT_CELL_STYLE_INVERSE)
       fg = cl->has_bg ? cl->bg : bg_default;
@@ -806,8 +825,10 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   int y = PT_PAD_Y;
   PtRowReader *rows = pt_term_core_rows_begin(t->core);
   int ncells;
+  int row_i = -1;               /* the visible row the walk stands on */
   while (rows != NULL &&
          (ncells = pt_term_core_rows_next(rows, &cells)) >= 0) {
+    row_i++;
     /* Backgrounds first, merged: adjacent cells with the same effective
      * background (selection included) become one rect, the way adjacent
      * glyphs already share one text node. Laying the whole row's backgrounds
@@ -911,8 +932,16 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
         run->log_clusters[at + g] = at + g;
     }
     flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
-    if (row_linked)
-      draw_row_underlines(t, snapshot, cells, ncells, y, bg_default);
+    /* The highlighted bare URL's columns on this row, if it reaches it: the
+     * whole row between its first and last, and the head or tail on those. */
+    int span_a = 0, span_b = -1;
+    if (t->url_uri != NULL && row_i >= t->url_r0 && row_i <= t->url_r1) {
+      span_a = row_i == t->url_r0 ? t->url_c0 : 0;
+      span_b = row_i == t->url_r1 ? t->url_c1 : ncells - 1;
+    }
+    if (row_linked || span_a <= span_b)
+      draw_row_underlines(t, snapshot, cells, ncells, y, bg_default,
+                          span_a, span_b);
     y += t->cell_h;
   }
   pt_term_core_rows_end(rows);
@@ -1049,6 +1078,7 @@ static void restart_shell(PtTerminal *t) {
   g_free(t->start_cwd);
   t->start_cwd = cwd != NULL ? cwd : g_strdup(g_get_home_dir());
   link_cache_reset(t);       /* the new core's serial starts over */
+  url_clear(t);              /* and its grid holds none of the old text */
   ensure_core(t);
   gtk_widget_queue_allocate(GTK_WIDGET(t)); /* re-sizes the new core */
   gtk_widget_queue_draw(GTK_WIDGET(t));
@@ -1218,6 +1248,63 @@ static void link_cache_reset(PtTerminal *t) {
   t->link_row = -2;
 }
 
+/* Drops the highlighted bare URL and repaints if one was up, since the
+ * underline is drawn from it. */
+static void url_clear(PtTerminal *t) {
+  if (t->url_uri == NULL) return;
+  g_clear_pointer(&t->url_uri, g_free);
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
+/* The bare URL covering cell (row, col), stored with the cells it covers.
+ * Nothing here is OSC 8: this is an address a program merely printed, found by
+ * matching the logical line the way ghostty does (Surface.zig linkAtPin), and
+ * it is only looked for while the link modifier is down — ghostty's default
+ * link carries `hover_mods = ctrl`, and highlighting every URL on screen all
+ * the time would underline half of a build log. */
+static void url_update(PtTerminal *t, int row, int col) {
+  PtLine line;
+  if (!pt_term_core_line_at(t->core, row, &line)) { url_clear(t); return; }
+
+  /* Cell -> byte: the first byte the hovered cell drew. A cell that drew
+   * nothing (the spacer half of a wide character) is not on any address. */
+  gsize at = 0;
+  gboolean have = FALSE;
+  for (gsize i = 0; i < line.len; i++)
+    if (line.at[i].row == row && line.at[i].col == col) { at = i; have = TRUE; break; }
+
+  PtLinkSpan span;
+  if (!have || !pt_link_find_at(line.text, at, &span) ||
+      span.end <= span.start || span.end > line.len) {
+    pt_term_core_line_clear(&line);
+    url_clear(t);
+    return;
+  }
+
+  char *uri = g_strndup(line.text + span.start, span.end - span.start);
+  /* The pattern only offers schemes pt opens, so this is belt and braces —
+   * but the text came off the pty, and nothing unopenable may be underlined. */
+  if (!pt_term_core_hyperlink_is_safe(uri)) {
+    g_free(uri);
+    pt_term_core_line_clear(&line);
+    url_clear(t);
+    return;
+  }
+
+  PtCellPos a = line.at[span.start], b = line.at[span.end - 1];
+  gboolean same = t->url_uri != NULL && g_strcmp0(t->url_uri, uri) == 0 &&
+                  t->url_r0 == a.row && t->url_c0 == a.col &&
+                  t->url_r1 == b.row && t->url_c1 == b.col;
+  g_free(t->url_uri);
+  t->url_uri = uri;
+  t->url_r0 = a.row; t->url_c0 = a.col;
+  t->url_r1 = b.row; t->url_c1 = b.col;
+  pt_term_core_line_clear(&line);
+  /* Only a *different* answer changes the frame; hovering along one URL
+   * must not queue a repaint per cell. */
+  if (!same) gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
 /* Asks again what is under the pointer where it already is. The pointer is not
  * the only thing that moves: output scrolls the grid out from under it and a
  * resize reflows it, either of which can take the link away or bring one in
@@ -1239,12 +1326,28 @@ static void update_link_cursor(PtTerminal *t) {
   t->link_row = row;
   t->link_col = col;
   t->link_serial = serial;
+  GdkModifierType mods = live_mods();
   /* The app owns the pointer, links included: ⌃click goes to it, so the
    * cursor must not promise otherwise. */
-  if (pointer_reports(t, live_mods())) { set_link_cursor(t, FALSE); return; }
+  if (pointer_reports(t, mods)) {
+    url_clear(t);
+    set_link_cursor(t, FALSE);
+    return;
+  }
+  /* OSC 8 first, exactly as ghostty orders it: a program that declared a link
+   * on this cell has said more about it than any pattern can infer. */
   char *uri = row >= 0 ? pt_term_core_link_at_cell(t->core, row, col) : NULL;
-  set_link_cursor(t, uri != NULL);
-  g_free(uri);
+  if (uri != NULL) {
+    url_clear(t);
+    set_link_cursor(t, TRUE);
+    g_free(uri);
+    return;
+  }
+  if (row >= 0 && (mods & GDK_CONTROL_MASK) != 0)
+    url_update(t, row, col);
+  else
+    url_clear(t);
+  set_link_cursor(t, t->url_uri != NULL);
 }
 
 static void on_motion(GtkEventControllerMotion *ctl, double x, double y,
@@ -1282,6 +1385,8 @@ static void on_motion_leave(GtkEventControllerMotion *ctl, gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
   t->pointer_in = FALSE;
   set_link_cursor(t, FALSE);
+  /* A bare URL is highlighted because the pointer is on it; it is not. */
+  url_clear(t);
   /* The cursor was just forced off; re-entering the same cell has to be able
    * to bring it back even if nothing else moved. */
   link_cache_reset(t);
@@ -1313,12 +1418,32 @@ static void on_uri_launched(GObject *src, GAsyncResult *res, gpointer user) {
   g_clear_error(&err);
 }
 
+/* Whether cell (row, col) is inside the highlighted bare URL. The match runs
+ * along a logical line, so on screen it is a range in reading order: the tail
+ * of its first row, whole rows after that, and the head of its last. */
+static gboolean url_covers(PtTerminal *t, int row, int col) {
+  if (t->url_uri == NULL) return FALSE;
+  if (row < t->url_r0 || row > t->url_r1) return FALSE;
+  if (row == t->url_r0 && col < t->url_c0) return FALSE;
+  if (row == t->url_r1 && col > t->url_c1) return FALSE;
+  return TRUE;
+}
+
 /* TRUE when there was a link under the pointer and it was handed to the
- * desktop. The core only returns URIs with a scheme pt is willing to open, so
- * this is the whole of the check. */
+ * desktop. Both kinds are only ever URIs with a scheme pt is willing to open —
+ * the core filters OSC 8, and the hover pass filters what it matched — so this
+ * is the whole of the check. */
 static gboolean open_link_at(PtTerminal *t, double x, double y) {
   char *uri = pt_term_core_hyperlink_at(t->core, x, y);
-  if (uri == NULL) return FALSE;
+  if (uri == NULL) {
+    /* The bare URL the hover already resolved for this cell. Re-checked
+     * against the click's own position rather than trusted: the pointer can
+     * reach a cell the hover pass never answered for. */
+    int col = (int)((x - PT_PAD_X) / (double)t->cell_w);
+    int row = (int)((y - PT_PAD_Y) / (double)t->cell_h);
+    if (x < PT_PAD_X || y < PT_PAD_Y || !url_covers(t, row, col)) return FALSE;
+    uri = g_strdup(t->url_uri);
+  }
   GtkRoot *root = gtk_widget_get_root(GTK_WIDGET(t));
   GtkUriLauncher *launcher = gtk_uri_launcher_new(uri);
   gtk_uri_launcher_launch(launcher,
@@ -1754,6 +1879,7 @@ static void pt_terminal_dispose(GObject *obj) {
   g_clear_pointer(&t->start_cwd, g_free);
   g_clear_pointer(&t->env, g_strfreev);
   g_clear_pointer(&t->last_command, g_free);
+  g_clear_pointer(&t->url_uri, g_free);
   G_OBJECT_CLASS(pt_terminal_parent_class)->dispose(obj);
 }
 

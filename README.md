@@ -171,10 +171,24 @@ under it. Only `http`, `https`, `file` and `mailto` links open — anything else
 is left alone, because the link text and the address behind it are both written
 by whatever is running in the pane.
 
-A URL printed as ordinary text is not a link. The program has to say it is.
+A URL printed as ordinary text is a link too — the `http://localhost:5173/` a
+dev server prints, an address in a stack trace. Hold <kbd>Ctrl</kbd> and the
+one under the pointer underlines; click it and it opens. Only the address under
+the pointer is underlined, not every URL on screen, because a build log full of
+underlines tells you nothing.
+
+Bare addresses are found by pattern, and the pattern is careful about where
+prose ends and an address begins: a trailing full stop or comma is not part of
+it, `(https://example.com)` does not take the closing paren, but
+`https://en.wikipedia.org/wiki/Rust_(video_game)` keeps its own. An address
+that ran off the right edge is still one address — the rows it wrapped across
+are matched as one line. Only the four schemes above are looked for at all, so
+nothing is ever underlined that pt would then refuse to open.
 
 Inside an app that has the mouse, <kbd>Ctrl</kbd>+click goes to the app instead,
-and holding <kbd>Shift</kbd> takes it back, exactly as with selection.
+and holding <kbd>Shift</kbd> takes it back, exactly as with selection. That is
+also how ghostty behaves, and how you reach a link inside Claude Code or a
+pager: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+click.
 
 ## When a program wants your attention
 

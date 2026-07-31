@@ -285,6 +285,41 @@ gboolean pt_term_core_row_has_link(PtTermCore *c, int row);
  * NULL here; the underline is honest, the hand cursor is cautious). */
 char *pt_term_core_link_at_cell(PtTermCore *c, int row, int col);
 
+/* ---- logical lines ----
+ *
+ * What a bare-URL match runs against. OSC 8 needs none of this — the program
+ * said where its link starts and ends — but an address a program merely
+ * printed is just cells, so the matcher needs the row back as a string, and
+ * the string's bytes back as cells once it has a match.
+ *
+ * A row a program wrapped is not a line: a URL that ran off the right edge
+ * continues on the next row, and matching row by row would cut it in half. So
+ * the rows libghostty marks as wrapped are joined here, and every row of the
+ * group answers with the same line — ghostty does the same by matching against
+ * a selected logical line (Surface.zig linkAtPin). */
+typedef struct {
+  gint16 row;                 /* visible row, 0-based */
+  gint16 col;                 /* column within that row */
+} PtCellPos;
+
+typedef struct {
+  char      *text;   /* the line as UTF-8, NUL-terminated; blanks are spaces */
+  PtCellPos *at;     /* `len` entries: at[i] is the cell byte i was drawn by */
+  gsize      len;    /* bytes in text, not counting the NUL */
+} PtLine;
+
+/* The logical line containing visible row `row`, as of the last sync. FALSE
+ * (leaving *out untouched) for a row outside the viewport or a walk the
+ * library refuses. Caller clears it with pt_term_core_line_clear.
+ *
+ * Blank cells become spaces rather than being trimmed, so on a line of plain
+ * ASCII a byte offset and a column are the same number. Anything wider breaks
+ * that — a multi-byte cluster is several bytes of one cell, and the spacer
+ * half of a wide character contributes none — which is what `at` is for: it
+ * is the general answer, and the arithmetic is not. */
+gboolean pt_term_core_line_at(PtTermCore *c, int row, PtLine *out);
+void pt_term_core_line_clear(PtLine *l);
+
 typedef struct {
   PtColor bg, fg, cursor;
   PtColor palette[16];

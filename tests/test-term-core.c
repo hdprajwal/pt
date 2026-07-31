@@ -2249,6 +2249,77 @@ static void test_row_link_helpers(void) {
   pt_term_core_free(core);
 }
 
+/* ---- logical lines ----
+
+   What the bare-URL matcher runs against: a row as one string, plus the cell
+   each byte came from. Rows a program wrapped are one line here, because a URL
+   that ran off the right edge is still one URL. */
+
+/* The byte offset of `needle` in the line, asserted to exist. */
+static gsize line_off(const PtLine *l, const char *needle) {
+  const char *at = strstr(l->text, needle);
+  g_assert_nonnull(at);
+  return (gsize)(at - l->text);
+}
+
+static void test_line_at_plain(void) {
+  PtTermCore *core = cursor_core_new();
+  /* Column 5 of row 1, so the map has a non-zero column to report. */
+  pt_term_core_write(core, "\033[2;6Hgo http://localhost:5173/ now", -1);
+  g_assert_true(wait_for_text(core, "5173"));
+  pt_term_core_sync(core);
+
+  PtLine line;
+  g_assert_true(pt_term_core_line_at(core, 1, &line));
+  /* The row is rendered whole: blanks are spaces, so offsets are columns. */
+  g_assert_cmpuint(line.len, ==, 80);
+  gsize off = line_off(&line, "http://localhost:5173/");
+  g_assert_cmpuint(off, ==, 8);              /* 5 blank + "go " */
+  g_assert_cmpint(line.at[off].row, ==, 1);
+  g_assert_cmpint(line.at[off].col, ==, 8);
+  /* Every byte maps to the cell that drew it, so a span maps back to cells. */
+  g_assert_cmpint(line.at[off + 4].col, ==, 12);
+  g_assert_cmpint(line.at[line.len - 1].col, ==, 79);
+  pt_term_core_line_clear(&line);
+
+  /* A row outside the viewport has no line. */
+  g_assert_false(pt_term_core_line_at(core, 24, &line));
+  g_assert_false(pt_term_core_line_at(core, -1, &line));
+  pt_term_core_free(core);
+}
+
+/* A URL that ran off the right edge is one link, so the two rows the program
+   wrapped are one line — and either row answers with it. */
+static void test_line_at_wrapped(void) {
+  PtTermCore *core = cursor_core_new();
+  /* 70 columns of padding, then a URL long enough to cross the edge at 80. */
+  pt_term_core_write(core,
+      "\033[2;1H" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "aaaaaaaaaaaaaaaaaaaa" "https://example.com/wrapped/path", -1);
+  g_assert_true(wait_for_text(core, "wrapped"));
+  pt_term_core_sync(core);
+
+  PtLine line;
+  g_assert_true(pt_term_core_line_at(core, 1, &line));
+  g_assert_cmpuint(line.len, ==, 160);       /* two rows joined, no seam */
+  gsize off = line_off(&line, "https://example.com/wrapped/path");
+  g_assert_cmpuint(off, ==, 70);
+  g_assert_cmpint(line.at[off].row, ==, 1);
+  g_assert_cmpint(line.at[off].col, ==, 70);
+  /* Past the wrap the map moves to the next row, column 0. */
+  g_assert_cmpint(line.at[80].row, ==, 2);
+  g_assert_cmpint(line.at[80].col, ==, 0);
+  pt_term_core_line_clear(&line);
+
+  /* The continuation row answers with the same line, not with its half. */
+  PtLine tail;
+  g_assert_true(pt_term_core_line_at(core, 2, &tail));
+  g_assert_cmpuint(tail.len, ==, 160);
+  g_assert_cmpuint(line_off(&tail, "https://example.com/wrapped/path"), ==, 70);
+  pt_term_core_line_clear(&tail);
+  pt_term_core_free(core);
+}
+
 /* ---- cursor info ---- */
 
 static void test_cursor_info(void) {
@@ -2704,6 +2775,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/rows-walk", test_rows_walk_matches_row_cells);
   g_test_add_func("/termcore/rows-walk-wide", test_rows_walk_wide_pane);
   g_test_add_func("/termcore/row-link-helpers", test_row_link_helpers);
+  g_test_add_func("/termcore/line-at-plain", test_line_at_plain);
+  g_test_add_func("/termcore/line-at-wrapped", test_line_at_wrapped);
   g_test_add_func("/termcore/set-colors", test_set_colors_reach_cells);
   g_test_add_func("/termcore/cursor-info", test_cursor_info);
   g_test_add_func("/termcore/render-dirty", test_take_render_dirty);

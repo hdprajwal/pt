@@ -2034,6 +2034,77 @@ gboolean pt_term_core_row_has_link(PtTermCore *c, int row) {
   return linked;
 }
 
+/* ---- logical lines ----
+ *
+ * Two walks rather than one: the wrap flags decide which rows belong to the
+ * line, and the iterator only moves forward, so the group has to be known
+ * before any of it can be rendered. This runs when the pointer changes cell
+ * with the link modifier down — hover rate, not frame rate — which is the
+ * same budget ghostty spends selecting a line per hover. */
+gboolean pt_term_core_line_at(PtTermCore *c, int row, PtLine *out) {
+  if (out == NULL || row < 0 || row >= c->rows || c->cols <= 0) return FALSE;
+
+  /* Pass 1: which rows a program wrapped into which. The flag means "this row
+   * continues onto the next", so the group runs back while the row above says
+   * yes and forward while this one does. */
+  gboolean *wrap = g_new0(gboolean, c->rows);
+  PtRowWalk w;
+  if (!row_walk_begin(&w, c->render_state)) {
+    g_free(wrap);
+    return FALSE;
+  }
+  for (int r = 0; r < c->rows; r++) {
+    if (!ghostty_render_state_row_iterator_next(w.iter)) break;
+    GhosttyRow raw = 0;
+    if (ghostty_render_state_row_get(w.iter, GHOSTTY_RENDER_STATE_ROW_DATA_RAW,
+                                     &raw) != GHOSTTY_SUCCESS)
+      continue;
+    bool v = false;
+    ghostty_row_get(raw, GHOSTTY_ROW_DATA_WRAP, &v);
+    wrap[r] = v;
+  }
+  row_walk_end(&w);
+
+  int first = row, last = row;
+  while (first > 0 && wrap[first - 1]) first--;
+  while (last < c->rows - 1 && wrap[last]) last++;
+  g_free(wrap);
+
+  /* Pass 2: the group as one string, every byte tagged with the cell it came
+   * from. Blank cells become spaces instead of being trimmed — a URL is found
+   * by what surrounds it, and a run of nothing is as good a boundary as a
+   * space is. */
+  GString *text = g_string_sized_new((gsize)(last - first + 1) * c->cols + 1);
+  GArray *at = g_array_sized_new(FALSE, FALSE, sizeof(PtCellPos),
+                                 (guint)((last - first + 1) * c->cols));
+  PtCell *cells = g_new(PtCell, c->cols);
+  for (int r = first; r <= last; r++) {
+    int n = pt_term_core_row_cells(c, r, cells, c->cols);
+    for (int col = 0; col < n; col++) {
+      /* The spacer half of a wide character drew nothing, so it contributes
+       * no byte: its head cell already carries the whole cluster. */
+      if (cells[col].width == 0) continue;
+      const char *s = cells[col].text[0] != '\0' ? cells[col].text : " ";
+      PtCellPos pos = { (gint16)r, (gint16)col };
+      for (const char *p = s; *p != '\0'; p++) g_array_append_val(at, pos);
+      g_string_append(text, s);
+    }
+  }
+  g_free(cells);
+
+  out->len = text->len;
+  out->text = g_string_free(text, FALSE);
+  out->at = (PtCellPos *)g_array_free(at, FALSE);
+  return TRUE;
+}
+
+void pt_term_core_line_clear(PtLine *l) {
+  if (l == NULL) return;
+  g_clear_pointer(&l->text, g_free);
+  g_clear_pointer(&l->at, g_free);
+  l->len = 0;
+}
+
 gboolean pt_term_core_last_nonempty_row(PtTermCore *c, char *buf, gsize cap) {
   if (cap == 0) return FALSE;
   buf[0] = '\0';
