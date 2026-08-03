@@ -959,7 +959,9 @@ static void action_switch_tab(PtWindow *w, int idx) {
 }
 
 /* Cycle within the active project. delta is ±1; the workspace guarantees the
- * active tab is live whenever the project has any, so the index math is safe. */
+ * active tab is live whenever the project has any, so the index math is safe.
+ * Goes through switch_tab_id so a step lands on exactly the state an ⌥1…9 jump
+ * would — the info panel included. */
 static void step_tab(PtWindow *w, int delta) {
   PtProjectUI *p = active_project(w);
   if (p == NULL) return;
@@ -968,10 +970,7 @@ static void step_tab(PtWindow *w, int delta) {
   guint cur = pt_workspace_tab_index(
       w->ws, pt_workspace_active_tab(w->ws, p->id));
   guint next = (cur + (guint)((int)len + delta)) % len;
-  pt_workspace_set_active_tab(w->ws,
-                              pt_workspace_tab_at(w->ws, p->id, next));
-  show_active_grid(w);
-  mark_dirty(w);
+  switch_tab_id(w, pt_workspace_tab_at(w->ws, p->id, next));
 }
 
 static void action_next_tab(PtWindow *w) { step_tab(w, +1); }
@@ -1762,6 +1761,10 @@ static const struct {
   { .accel = "<Alt><Shift>Tab", .id = PT_ACTION_PREV_TAB },
   { .keyval = GDK_KEY_ISO_Left_Tab, .mods = GDK_ALT_MASK,
     .id = PT_ACTION_PREV_TAB },
+  /* ⌃PgDn / ⌃PgUp cycle tabs too: no compositor claims those, so shells stay
+   * reachable as a "next" on desktops that own ⌥⇥. */
+  { .accel = "<Control>Page_Down", .id = PT_ACTION_NEXT_TAB },
+  { .accel = "<Control>Page_Up", .id = PT_ACTION_PREV_TAB },
   { .accel = "<Control><Shift>d", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_H },
   { .accel = "<Control><Shift>s", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_V },
   { .accel = "<Control><Shift>w", .id = PT_ACTION_CLOSE_PANE },
