@@ -924,6 +924,23 @@ static void action_switch_project(PtWindow *w, int idx) {
   if (id != PT_WS_ID_NONE) switch_project_id(w, id);
 }
 
+/* Cycle the active project. delta is ±1; wraps. Goes through switch_project_id
+ * so a step lands on exactly the state a ⌃1…9 jump would. */
+static void step_project(PtWindow *w, int delta) {
+  if (w->ws == NULL) return;
+  guint len = pt_workspace_project_count(w->ws);
+  if (len <= 1) return;
+  guint cur = pt_workspace_project_index(w->ws,
+                                         pt_workspace_active_project(w->ws));
+  if (cur == PT_WS_INDEX_NONE) return;
+  guint next = (cur + (guint)((int)len + delta)) % len;
+  switch_project_id(w, pt_workspace_project_at(w->ws, next));
+}
+
+static void action_next_project(PtWindow *w) { step_project(w, +1); }
+
+static void action_prev_project(PtWindow *w) { step_project(w, -1); }
+
 static void switch_tab_id(PtWindow *w, PtWsId tab) {
   if (w->ws == NULL ||
       pt_workspace_tab_project(w->ws, tab) == PT_WS_ID_NONE)
@@ -942,7 +959,9 @@ static void action_switch_tab(PtWindow *w, int idx) {
 }
 
 /* Cycle within the active project. delta is ±1; the workspace guarantees the
- * active tab is live whenever the project has any, so the index math is safe. */
+ * active tab is live whenever the project has any, so the index math is safe.
+ * Goes through switch_tab_id so a step lands on exactly the state an ⌥1…9 jump
+ * would — the info panel included. */
 static void step_tab(PtWindow *w, int delta) {
   PtProjectUI *p = active_project(w);
   if (p == NULL) return;
@@ -951,10 +970,7 @@ static void step_tab(PtWindow *w, int delta) {
   guint cur = pt_workspace_tab_index(
       w->ws, pt_workspace_active_tab(w->ws, p->id));
   guint next = (cur + (guint)((int)len + delta)) % len;
-  pt_workspace_set_active_tab(w->ws,
-                              pt_workspace_tab_at(w->ws, p->id, next));
-  show_active_grid(w);
-  mark_dirty(w);
+  switch_tab_id(w, pt_workspace_tab_at(w->ws, p->id, next));
 }
 
 static void action_next_tab(PtWindow *w) { step_tab(w, +1); }
@@ -1685,6 +1701,8 @@ typedef enum {
   PT_ACTION_TOGGLE_INFOPANEL,
   PT_ACTION_NEXT_TAB,
   PT_ACTION_PREV_TAB,
+  PT_ACTION_NEXT_PROJECT,
+  PT_ACTION_PREV_PROJECT,
   PT_ACTION_SPLIT,
   PT_ACTION_CLOSE_PANE,
   PT_ACTION_FOCUS_NEXT,
@@ -1732,16 +1750,21 @@ static const struct {
   { .accel = "<Control>i", .id = PT_ACTION_TOGGLE_INFOPANEL },
   { .accel = "<Control>t", .id = PT_ACTION_NEW_TAB },
   { .accel = "<Control><Shift>t", .id = PT_ACTION_NEW_TAB },
-  { .accel = "<Control>Tab", .id = PT_ACTION_NEXT_TAB },
-  { .accel = "<Control><Shift>Tab", .id = PT_ACTION_PREV_TAB },
+  /* ⌃⇥ / ⌃⇧⇥ cycle projects — the same axis as ⌃1…9. */
+  { .accel = "<Control>Tab", .id = PT_ACTION_NEXT_PROJECT },
+  { .accel = "<Control><Shift>Tab", .id = PT_ACTION_PREV_PROJECT },
   { .keyval = GDK_KEY_ISO_Left_Tab, .mods = GDK_CONTROL_MASK,
-    .id = PT_ACTION_PREV_TAB },
-  /* ⌥⇥ / ⌥⇧⇥ cycle tabs when the compositor does not claim them first; ⌃⇥
-   * stays the reliable fallback. No grab is attempted. */
+    .id = PT_ACTION_PREV_PROJECT },
+  /* ⌥⇥ / ⌥⇧⇥ cycle tabs within the active project — the same axis as ⌥1…9 —
+   * when the compositor does not claim them first. No grab is attempted. */
   { .accel = "<Alt>Tab", .id = PT_ACTION_NEXT_TAB },
   { .accel = "<Alt><Shift>Tab", .id = PT_ACTION_PREV_TAB },
   { .keyval = GDK_KEY_ISO_Left_Tab, .mods = GDK_ALT_MASK,
     .id = PT_ACTION_PREV_TAB },
+  /* ⌃PgDn / ⌃PgUp cycle tabs too: no compositor claims those, so shells stay
+   * reachable as a "next" on desktops that own ⌥⇥. */
+  { .accel = "<Control>Page_Down", .id = PT_ACTION_NEXT_TAB },
+  { .accel = "<Control>Page_Up", .id = PT_ACTION_PREV_TAB },
   { .accel = "<Control><Shift>d", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_H },
   { .accel = "<Control><Shift>s", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_V },
   { .accel = "<Control><Shift>w", .id = PT_ACTION_CLOSE_PANE },
@@ -1790,6 +1813,8 @@ static gboolean shortcut_dispatch(GtkWidget *wg, GVariant *a, gpointer u) {
     case PT_ACTION_TOGGLE_INFOPANEL: action_toggle_infopanel(w); break;
     case PT_ACTION_NEXT_TAB:         action_next_tab(w); break;
     case PT_ACTION_PREV_TAB:         action_prev_tab(w); break;
+    case PT_ACTION_NEXT_PROJECT:     action_next_project(w); break;
+    case PT_ACTION_PREV_PROJECT:     action_prev_project(w); break;
     case PT_ACTION_SPLIT:            action_split(w, (PtSplitKind)c->arg); break;
     case PT_ACTION_CLOSE_PANE:       action_close_pane(w); break;
     case PT_ACTION_FOCUS_NEXT:       action_focus_next(w); break;
