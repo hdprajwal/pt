@@ -6,6 +6,7 @@ static PtSessionState *sample_state(void) {
   PtSessionState *s = pt_session_state_new();
   PtProjectState *p = pt_project_state_new("proj", "/tmp/proj");
   PtSplitNode *tree = pt_split_leaf_new("/tmp/proj");
+  pt_split_leaf_set_agent(tree, "claude", "abc-123");
   pt_split_split(&tree, tree, PT_SPLIT_H);
   g_ptr_array_add(p->tabs, pt_tab_state_new("build", tree));
   g_ptr_array_add(p->tabs, pt_tab_state_new("agent",
@@ -32,6 +33,13 @@ static void test_roundtrip(void) {
   PtTabState *t0 = g_ptr_array_index(p->tabs, 0);
   g_assert_cmpstr(t0->title, ==, "build");
   g_assert_cmpint(pt_split_count_leaves(t0->tree), ==, 2);
+  /* The agent session id is the one thing resume cannot re-derive after a
+     restart, so it has to survive the file; the pane split off beside it was
+     never an agent and must come back without one. */
+  PtSplitNode *first = pt_split_first_leaf(t0->tree);
+  g_assert_cmpstr(first->agent, ==, "claude");
+  g_assert_cmpstr(first->agent_session, ==, "abc-123");
+  g_assert_null(pt_split_next_leaf(t0->tree, first)->agent);
   g_assert_cmpint(back->font_size, ==, 14);
   pt_session_state_free(s);
   pt_session_state_free(back);
@@ -109,17 +117,35 @@ static void test_corrupt_becomes_bak(void) {
   g_free(bak); g_free(path); g_free(dir);
 }
 
+/* The version literal is a contract with older builds: a file carrying agent
+ * ids on its leaves is version 2, and a pt that only knows version 1 has to
+ * refuse it rather than restore panes whose agents it will never resume. The
+ * emitted JSON is parsed back structurally: a substring scan for "2" could be
+ * satisfied by any other number in the state. */
+static void test_version_bumped(void) {
+  PtSessionState *s = sample_state();
+  char *text = pt_session_to_json_text(s);
+  JsonParser *parser = json_parser_new();
+  g_assert_true(json_parser_load_from_data(parser, text, -1, NULL));
+  JsonObject *root = json_node_get_object(json_parser_get_root(parser));
+  g_assert_true(json_object_has_member(root, "version"));
+  g_assert_cmpint(json_object_get_int_member(root, "version"), ==, 2);
+  g_object_unref(parser);
+  g_free(text);
+  pt_session_state_free(s);
+}
+
 /* A state file from a newer pt is not something this build can read: treat it
  * like any other unreadable file — move it aside and start from defaults —
  * rather than half-restoring a shape we do not understand. */
 static void test_future_version_becomes_bak(void) {
   g_assert_null(pt_session_from_json_text(
-      "{\"version\":2,\"active_project\":0,\"projects\":[]}"));
+      "{\"version\":3,\"active_project\":0,\"projects\":[]}"));
 
   char *dir = g_dir_make_tmp("pt-test-XXXXXX", NULL);
   char *path = g_build_filename(dir, "state.json", NULL);
   g_file_set_contents(path,
-      "{\"version\":2,\"active_project\":0,\"projects\":[]}", -1, NULL);
+      "{\"version\":3,\"active_project\":0,\"projects\":[]}", -1, NULL);
   g_assert_null(pt_session_load(path));
   char *bak = g_strconcat(path, ".bak", NULL);
   g_assert_true(g_file_test(bak, G_FILE_TEST_EXISTS));
@@ -226,6 +252,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/session/roundtrip", test_roundtrip);
   g_test_add_func("/session/tabless-active-tab",
                   test_tabless_project_active_tab_minus_one);
+  g_test_add_func("/session/version", test_version_bumped);
   g_test_add_func("/session/save-load", test_save_load);
   g_test_add_func("/session/corrupt", test_corrupt_becomes_bak);
   g_test_add_func("/session/future-version", test_future_version_becomes_bak);

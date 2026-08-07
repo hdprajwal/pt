@@ -12,8 +12,20 @@ struct PtSplitNode {
   double ratio;           /* split only, 0..1 position of divider */
   PtSplitNode *a, *b;     /* split only */
   PtSplitNode *parent;    /* NULL at root */
+  /* Leaf only, and both NULL unless an agent reported a session for this pane.
+   * They travel together: an agent without a session id cannot be resumed, so
+   * neither is written or read on its own. */
+  char *agent;            /* machine name, e.g. "claude" */
+  char *agent_session;    /* the session id to resume */
 };
 PtSplitNode *pt_split_leaf_new(const char *cwd);
+/* Both strings are copied; passing NULL for both clears the pair. Calling this
+ * on a split node is a programmer error. */
+void pt_split_leaf_set_agent(PtSplitNode *leaf, const char *agent,
+                             const char *session);
+/* Clear the agent fields on every leaf under `root` — how a window applies
+ * `resume-agents = false` to a tree it is about to restore. */
+void pt_split_strip_agents(PtSplitNode *root);
 /* Split `leaf` in place: leaf's slot in the tree is taken by a new split node
  * whose `a` is the original leaf and `b` a new leaf with the same cwd.
  * Returns the NEW leaf (b). Updates *root if leaf was the root. */
