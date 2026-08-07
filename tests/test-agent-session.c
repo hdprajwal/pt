@@ -1,4 +1,5 @@
 #include "pt-agent-session.h"
+#include <gio/gio.h>          /* GSubprocess, for driving the real helper */
 #include <glib/gstdio.h>
 #include <string.h>
 
@@ -122,6 +123,107 @@ static void test_agent_ancestor(void) {
   g_assert_cmpint(pt_agent_session_find_agent_ancestor(NULL), ==, pid);
 }
 
+/* PT_AGENT_REPORT_BIN is a compile definition added in CMakeLists.txt. */
+
+/* Runs the helper with an optional extra argument (the notify payload codex
+ * passes) and optional stdin text. The two are what tell the modes apart, so
+ * one runner covers both rather than two near-copies. */
+static void run_helper_full(const char *mode, const char *arg,
+                            const char *stdin_text, const char *token,
+                            const char *dir, int *exit_code) {
+  const char *argv[] = { PT_AGENT_REPORT_BIN, mode, arg, NULL };
+  GSubprocessLauncher *l =
+      g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDIN_PIPE);
+  if (token != NULL)
+    g_subprocess_launcher_setenv(l, "PT_PANE_TOKEN", token, TRUE);
+  else
+    g_subprocess_launcher_unsetenv(l, "PT_PANE_TOKEN");
+  /* point XDG_STATE_HOME at the test dir so reports land somewhere owned */
+  g_subprocess_launcher_setenv(l, "XDG_STATE_HOME", dir, TRUE);
+  GError *err = NULL;
+  GSubprocess *p = g_subprocess_launcher_spawnv(l, argv, &err);
+  g_assert_no_error(err);
+  g_assert_true(g_subprocess_communicate_utf8(p, stdin_text, NULL, NULL,
+                                              NULL, &err));
+  g_assert_no_error(err);
+  g_assert_true(g_subprocess_get_if_exited(p));
+  *exit_code = g_subprocess_get_exit_status(p);
+  g_object_unref(p); g_object_unref(l);
+}
+
+static void run_helper(const char *mode, const char *stdin_text,
+                       const char *token, const char *dir, int *exit_code) {
+  run_helper_full(mode, NULL, stdin_text, token, dir, exit_code);
+}
+
+static void test_helper_claude_writes_report(void) {
+  char *dir = g_dir_make_tmp("pt-helper-XXXXXX", NULL);
+  int code = -1;
+  run_helper("claude",
+      "{\"session_id\":\"abc-123\",\"cwd\":\"/tmp/x\","
+      "\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}",
+      "feedfacefeedface", dir, &code);
+  g_assert_cmpint(code, ==, 0);
+  char *path = g_build_filename(dir, "pt", "agent-sessions",
+                                "feedfacefeedface.json", NULL);
+  PtAgentSessionReport *r = pt_agent_session_report_load(path);
+  g_assert_nonnull(r);
+  g_assert_cmpint(r->agent, ==, PT_AGENT_CLAUDE);
+  g_assert_cmpstr(r->session_id, ==, "abc-123");
+  /* no agent in the test's ancestry: the helper records its own parent's pid
+   * as a best effort? No — the contract is agent pid or the reporting
+   * process's ppid fallback; assert it recorded something > 0. */
+  g_assert_cmpint(r->pid, >, 0);
+  pt_agent_session_report_free(r);
+  g_free(path); g_free(dir);   /* leak the tree; it is /tmp and test-scoped */
+}
+
+/* codex hands its notify program the payload as one argv word and closes
+ * stdin, and names the conversation "thread-id" — the string `codex resume`
+ * takes. Both differences from claude live in the helper, so both are here. */
+static void test_helper_codex_writes_report(void) {
+  char *dir = g_dir_make_tmp("pt-helper-XXXXXX", NULL);
+  int code = -1;
+  run_helper_full("codex-notify",
+      "{\"type\":\"agent-turn-complete\","
+      "\"thread-id\":\"019fdd5e-918f-7aa1-9843-a59fe0fa012c\","
+      "\"turn-id\":\"t1\",\"cwd\":\"/tmp/y\",\"client\":\"codex_exec\"}",
+      NULL, "cafecafecafecafe", dir, &code);
+  g_assert_cmpint(code, ==, 0);
+  char *path = g_build_filename(dir, "pt", "agent-sessions",
+                                "cafecafecafecafe.json", NULL);
+  PtAgentSessionReport *r = pt_agent_session_report_load(path);
+  g_assert_nonnull(r);
+  g_assert_cmpint(r->agent, ==, PT_AGENT_CODEX);
+  g_assert_cmpstr(r->session_id, ==, "019fdd5e-918f-7aa1-9843-a59fe0fa012c");
+  g_assert_cmpstr(r->cwd, ==, "/tmp/y");
+  g_assert_cmpint(r->pid, >, 0);
+  pt_agent_session_report_free(r);
+  g_free(path); g_free(dir);
+}
+
+static void test_helper_no_token_is_noop(void) {
+  char *dir = g_dir_make_tmp("pt-helper-XXXXXX", NULL);
+  int code = -1;
+  run_helper("claude", "{\"session_id\":\"abc\"}", NULL, dir, &code);
+  g_assert_cmpint(code, ==, 0);
+  char *sessions = g_build_filename(dir, "pt", "agent-sessions", NULL);
+  g_assert_false(g_file_test(sessions, G_FILE_TEST_EXISTS));
+  g_free(sessions); g_free(dir);
+}
+
+static void test_helper_no_session_id_is_noop(void) {
+  char *dir = g_dir_make_tmp("pt-helper-XXXXXX", NULL);
+  int code = -1;
+  run_helper("claude", "{\"hook_event_name\":\"SessionStart\"}",
+             "feedfacefeedface", dir, &code);
+  g_assert_cmpint(code, ==, 0);
+  char *path = g_build_filename(dir, "pt", "agent-sessions",
+                                "feedfacefeedface.json", NULL);
+  g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+  g_free(path); g_free(dir);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/agent-session/kind-names", test_kind_names);
@@ -131,5 +233,10 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/agent-session/matches", test_report_matches);
   g_test_add_func("/agent-session/resume-command", test_resume_command);
   g_test_add_func("/agent-session/ancestor", test_agent_ancestor);
+  g_test_add_func("/agent-session/helper-claude", test_helper_claude_writes_report);
+  g_test_add_func("/agent-session/helper-codex", test_helper_codex_writes_report);
+  g_test_add_func("/agent-session/helper-no-token", test_helper_no_token_is_noop);
+  g_test_add_func("/agent-session/helper-no-session-id",
+                  test_helper_no_session_id_is_noop);
   return g_test_run();
 }
