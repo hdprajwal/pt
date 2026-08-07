@@ -55,6 +55,7 @@ add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
+  src/pt-agent.c
   src/pt-block.c
   src/pt-config.c
   src/pt-fuzzy.c
@@ -138,6 +139,10 @@ add_test(NAME osc-scan COMMAND test-osc-scan)
 add_executable(test-workspace tests/test-workspace.c)
 target_link_libraries(test-workspace PRIVATE ptcore)
 add_test(NAME workspace COMMAND test-workspace)
+
+add_executable(test-agent tests/test-agent.c)
+target_link_libraries(test-agent PRIVATE ptcore)
+add_test(NAME agent COMMAND test-agent)
 
 add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
 target_include_directories(test-keymap PRIVATE src)
