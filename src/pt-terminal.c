@@ -250,8 +250,10 @@ static void core_exited(PtTermCore *core, int status, gpointer user) {
   g_signal_emit(t, signals[SIG_EXITED], 0, status);
 }
 
-static void core_title(PtTermCore *core, const char *title, gpointer user) {
+static void core_title(PtTermCore *core, const char *title,
+                       gboolean from_prompt, gpointer user) {
   (void)core;
+  (void)from_prompt;
   g_signal_emit(PT_TERMINAL(user), signals[SIG_TITLE_CHANGED], 0, title);
 }
 

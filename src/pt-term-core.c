@@ -154,9 +154,11 @@ static void effect_title_changed(GhosttyTerminal t, void *ud) {
    * Done before the callback check so the state is tracked either way. */
   int code = 0;
   const char *rest = NULL;
+  gboolean from_prompt = FALSE;
   if (pt_exit_marker_parse(buf, &code, &rest)) {
     c->last_exit = code;
     memmove(buf, rest, strlen(rest) + 1);
+    from_prompt = TRUE;
   }
   /* Shells re-emit the same title every prompt; only a change is worth a
    * callback. Compared after the marker strip, so a prompt whose exit code
@@ -164,7 +166,7 @@ static void effect_title_changed(GhosttyTerminal t, void *ud) {
   if (g_strcmp0(buf, c->last_title) == 0) return;
   g_free(c->last_title);
   c->last_title = g_strdup(buf);
-  if (c->cbs.title != NULL) c->cbs.title(c, buf, c->cbs_user);
+  if (c->cbs.title != NULL) c->cbs.title(c, buf, from_prompt, c->cbs_user);
 }
 
 /* ---- foreground-command watcher ----
