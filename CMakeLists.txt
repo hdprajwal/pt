@@ -56,6 +56,7 @@ target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
   src/pt-agent.c
+  src/pt-agent-session.c
   src/pt-block.c
   src/pt-claude-usage.c
   src/pt-codex-usage.c
@@ -147,6 +148,10 @@ add_test(NAME workspace COMMAND test-workspace)
 add_executable(test-agent tests/test-agent.c)
 target_link_libraries(test-agent PRIVATE ptcore)
 add_test(NAME agent COMMAND test-agent)
+
+add_executable(test-agent-session tests/test-agent-session.c)
+target_link_libraries(test-agent-session PRIVATE ptcore)
+add_test(NAME agent-session COMMAND test-agent-session)
 
 add_executable(test-usage tests/test-usage.c)
 target_link_libraries(test-usage PRIVATE ptcore)
