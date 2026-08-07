@@ -108,6 +108,13 @@ carries comments and ordering that no TOML round-trip preserves, so pt prints
 the `notify = [...]` line and you paste it yourself. Both helpers are inert
 outside a pt pane, and `install` a second time changes nothing.
 
+codex only reports its session once a turn completes, so a resumed codex pane
+you quit before finishing a turn comes back as a plain shell next time.
+
+The resume command is typed into the restored pane's shell, so a shell rc that
+reads from stdin while it starts up can swallow it — the pane then sits at a
+prompt with nothing resumed.
+
 Set `resume-agents = false` to keep the ids but always restore plain shells.
 
 What is saved lives in `~/.local/state/pt/agent-sessions/`: one small JSON file
