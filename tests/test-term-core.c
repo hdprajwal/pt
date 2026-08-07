@@ -2774,6 +2774,22 @@ static void test_free_without_report_is_quiet(void) {
   g_free(path);
 }
 
+/* ---- startup input ---- */
+
+/* The restore path writes a pane's resume command immediately after the spawn,
+   long before the shell has read anything: the pty's line discipline must hold
+   those bytes until the child asks for them, or a resumed pane would type into
+   the void. Guards a kernel-side behaviour the whole feature rests on. */
+static void test_write_right_after_spawn_queues(void) {
+  const char *argv[] = { "/bin/sh", "-c", "read line; echo got:$line", NULL };
+  GError *err = NULL;
+  PtTermCore *c = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  pt_term_core_write(c, "hello-resume\n", -1);
+  g_assert_true(wait_for_text(c, "got:hello-resume"));
+  pt_term_core_free(c);
+}
+
 int main(int argc, char *argv[]) {
   /* Report paths come off $XDG_STATE_HOME, and the pane-token tests write real
      files: point them at a temp dir so a test run never touches the state of
@@ -2910,6 +2926,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/pane-token-unlink", test_free_unlinks_report);
   g_test_add_func("/termcore/pane-token-no-report",
                   test_free_without_report_is_quiet);
+  g_test_add_func("/termcore/write-after-spawn-queues",
+                  test_write_right_after_spawn_queues);
   int rc = g_test_run();
   char *sessions = g_build_filename(state_dir, "pt", "agent-sessions", NULL);
   char *pt_dir = g_build_filename(state_dir, "pt", NULL);

@@ -2050,6 +2050,10 @@ static void restore_state(PtWindow *w) {
     if (!p->missing) {
       for (guint j = 0; j < ps->tabs->len; j++) {
         PtTabState *ts = g_ptr_array_index(ps->tabs, j);
+        /* Before add_tab_ui takes the tree and builds panes from it: with
+         * resume-agents off, a restored pane must be a plain shell. */
+        if (w->config == NULL || !w->config->resume_agents)
+          pt_split_strip_agents(ts->tree);
         /* steal the tree from the session copy */
         add_tab_ui(w, p, ts->title, ts->tree);
         ts->tree = NULL;

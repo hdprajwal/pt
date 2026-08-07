@@ -14,6 +14,11 @@ GtkWidget *pt_terminal_new(const char *cwd);
  * respawn: a live shell keeps the env it started with. The pane grid calls this
  * for every pane it builds, with the env its window handed it. */
 void pt_terminal_set_spawn_env(PtTerminal *t, const char *const *env_pairs);
+/* One line the pane writes to its shell right after the first spawn, then
+ * forgets — how a restored pane resumes its agent. Newline included by the
+ * caller. One-shot on purpose: a manual restart_shell is the user asking for
+ * a fresh shell, not a second resume. Copied; NULL clears. */
+void pt_terminal_set_startup_input(PtTerminal *t, const char *line);
 PtTermCore *pt_terminal_core(PtTerminal *t);
 /* Stable for the life of the pane and never reused. A desktop notification
  * sits on screen until the user clicks it, long after the pane that raised it

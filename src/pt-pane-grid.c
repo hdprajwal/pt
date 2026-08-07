@@ -122,6 +122,15 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   pt_terminal_set_pane_mouse_reporting(PT_TERMINAL(term),
                                        g->pane_mouse_reporting);
   pt_terminal_set_pane_osc52(PT_TERMINAL(term), g->pane_osc52);
+  /* A restored leaf that carried an agent session gets the resume command
+   * queued for its first shell. Same window as the env: before the pane is
+   * parented, so before it can allocate and spawn. */
+  if (leaf->agent != NULL && leaf->agent_session != NULL) {
+    char *cmd = pt_agent_session_resume_command(
+        pt_agent_session_kind_from_name(leaf->agent), leaf->agent_session);
+    if (cmd != NULL) pt_terminal_set_startup_input(PT_TERMINAL(term), cmd);
+    g_free(cmd);
+  }
   g_object_ref_sink(term);
   leaf->user = term;
   g_object_set_data(G_OBJECT(term), "pt-leaf", leaf);
