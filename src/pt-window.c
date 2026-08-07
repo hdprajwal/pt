@@ -2003,6 +2003,7 @@ static PtSessionState *capture_state(PtWindow *w) {
           w->ws, pt_workspace_tab_at(w->ws, id, j));
       PtPaneGrid *grid = PT_PANE_GRID(t->grid);
       pt_pane_grid_sync_cwds(grid);
+      pt_pane_grid_sync_agents(grid);
       PtSplitNode *copy = pt_split_copy(pt_pane_grid_tree(grid));
       g_ptr_array_add(ps->tabs, pt_tab_state_new(t->title, copy));
     }

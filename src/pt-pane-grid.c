@@ -1,5 +1,8 @@
 #include "pt-pane-grid.h"
 
+#include "pt-agent.h"
+#include "pt-agent-session.h"
+
 enum { SIG_STRUCTURE, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
        SIG_EMPTIED, SIG_NOTIFICATION, N_SIGNALS };
 static guint signals[N_SIGNALS];
@@ -447,6 +450,43 @@ static void sync_cwd_walk(PtSplitNode *n) {
 }
 
 void pt_pane_grid_sync_cwds(PtPaneGrid *g) { sync_cwd_walk(g->tree); }
+
+static void sync_agent_walk(PtSplitNode *n) {
+  if (n == NULL) return;
+  if (n->kind != PT_SPLIT_LEAF) {
+    sync_agent_walk(n->a);
+    sync_agent_walk(n->b);
+    return;
+  }
+  /* Only a leaf with a live core gets recomputed. A leaf whose pane was never
+   * built, or built but never spawned, has run nothing that could have ended
+   * the agent session it was restored with — clearing its fields here would
+   * throw away the resume of a tab the user simply has not opened yet. The
+   * fields are only ever overwritten by evidence from a shell that actually
+   * ran. */
+  if (n->user == NULL) return;
+  PtTermCore *core = pt_terminal_core(PT_TERMINAL(n->user));
+  if (core == NULL) return;
+  pt_split_leaf_set_agent(n, NULL, NULL);
+  const char *token = pt_term_core_pane_token(core);
+  if (token == NULL) return;
+  char *path = pt_agent_session_report_path(token);
+  PtAgentSessionReport *r = pt_agent_session_report_load(path);
+  g_free(path);
+  if (r == NULL) return;
+  /* NULL fg_name forces the /proc walk so a pid comes back — the fast path
+   * answers kind-only. The walk is bounded and the save is debounced, so this
+   * stays off any hot path. */
+  int pid = 0;
+  PtAgentKind kind =
+      pt_agent_detect((int)pt_term_core_shell_pid(core), NULL, &pid);
+  if (pt_agent_session_report_matches(r, kind, pid))
+    pt_split_leaf_set_agent(n, pt_agent_session_kind_name(r->agent),
+                            r->session_id);
+  pt_agent_session_report_free(r);
+}
+
+void pt_pane_grid_sync_agents(PtPaneGrid *g) { sync_agent_walk(g->tree); }
 
 void pt_pane_grid_focus_terminal(PtPaneGrid *g) {
   if (g->focused != NULL && g->focused->user != NULL)

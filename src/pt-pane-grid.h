@@ -51,6 +51,12 @@ PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
 /* TRUE when any pane in the grid has a foreground process other than the shell. */
 gboolean pt_pane_grid_any_running(PtPaneGrid *g);
 void pt_pane_grid_sync_cwds(PtPaneGrid *g); /* leaf->cwd ← live terminal cwd */
+/* leaf->agent/agent_session ← the pane's validated agent report. Called on
+ * the save path, like sync_cwds: a report is only kept when the agent it
+ * names is still alive in the pane (same kind, same pid), so a pane whose
+ * agent exited saves as a plain shell. A pane that never spawned a shell
+ * keeps whatever it was restored with — nothing ran there to invalidate it. */
+void pt_pane_grid_sync_agents(PtPaneGrid *g);
 void pt_pane_grid_focus_terminal(PtPaneGrid *g); /* grab focus on focused pane */
 /* Signals: "structure-changed" (void) — split/close happened (persist!);
  *          "focus-changed" (void) — focused pane changed;
