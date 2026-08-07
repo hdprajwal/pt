@@ -52,6 +52,19 @@ static void test_report_load_rejects(void) {
       "{\"version\":99,\"agent\":\"claude\",\"session_id\":\"x\",\"pid\":1}" },
     { "no-pid.json",
       "{\"version\":1,\"agent\":\"claude\",\"session_id\":\"x\"}" },
+    /* The resume command is typed into a pty, so a control byte in the id is
+     * a keystroke before it is ever a shell word: 0x15 is ^U, which kills
+     * the line and would leave "def" running on its own. Written as a JSON
+     * escape so the parse succeeds and it is the charset gate doing the
+     * refusing, not json-glib. */
+    { "control-byte-id.json",
+      "{\"version\":1,\"agent\":\"claude\",\"session_id\":\"abc\\u0015def\","
+      "\"pid\":1}" },
+    { "space-id.json",
+      "{\"version\":1,\"agent\":\"claude\",\"session_id\":\"abc def\",\"pid\":1}" },
+    { "quote-id.json",
+      "{\"version\":1,\"agent\":\"claude\",\"session_id\":\"abc\\\"def\","
+      "\"pid\":1}" },
   };
   for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
     char *p = g_build_filename(dir, bad[i].name, NULL);

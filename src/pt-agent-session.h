@@ -31,7 +31,8 @@ gboolean pt_agent_session_report_write(const char *path, PtAgentKind agent,
                                        const char *session_id, const char *cwd,
                                        int pid, GError **err);
 /* NULL on missing file, malformed JSON, unknown agent name, empty session_id,
- * a version newer than PT_AGENT_REPORT_VERSION, or pid <= 0. */
+ * a session_id holding anything outside [A-Za-z0-9._-], a version newer than
+ * PT_AGENT_REPORT_VERSION, or pid <= 0. */
 PtAgentSessionReport *pt_agent_session_report_load(const char *path);
 void pt_agent_session_report_free(PtAgentSessionReport *r);
 
@@ -44,7 +45,11 @@ gboolean pt_agent_session_report_matches(const PtAgentSessionReport *r,
 /* "claude --resume 'id'\n" / "codex resume 'id'\n" — newline included, so a
  * caller writes it to the pty verbatim. The id is g_shell_quote'd: it came
  * from a file on disk, and an unquoted crafted id typed into a shell would be
- * command injection. NULL for PT_AGENT_NONE or empty id. Caller frees. */
+ * command injection. Quoting alone is not the whole defence — the line goes
+ * through a pty line editor, which acts on control bytes before any shell
+ * parses them — so it pairs with report_load's charset gate, which is what
+ * keeps such bytes out of an id in the first place. NULL for PT_AGENT_NONE or
+ * empty id. Caller frees. */
 char *pt_agent_session_resume_command(PtAgentKind kind, const char *session_id);
 
 /* Delete reports whose mtime is older than `days` — crash leftovers keyed by

@@ -113,6 +113,23 @@ gboolean pt_agent_session_report_write(const char *path, PtAgentKind agent,
   return ok;
 }
 
+/* A session id is only ever a UUID or a CLI-generated token, so it may hold
+ * letters, digits, dot, underscore and dash and nothing else.
+ *
+ * The gate is here rather than left to the resume command's quoting because
+ * the command is not handed to a shell — it is typed into the pane's pty,
+ * where the line editor sees the bytes first. Quoting stops the shell parser
+ * but not the terminal: a raw 0x15 inside quotes is still ^U to readline,
+ * which kills the line typed so far and lets the rest of a crafted id stand
+ * on its own as a command. Refusing the whole report is the same move the
+ * other rules make — a report pt cannot trust is a report pt does not use. */
+static gboolean session_id_is_clean(const char *id) {
+  for (const char *p = id; *p != '\0'; p++)
+    if (!g_ascii_isalnum(*p) && *p != '.' && *p != '_' && *p != '-')
+      return FALSE;
+  return TRUE;
+}
+
 PtAgentSessionReport *pt_agent_session_report_load(const char *path) {
   /* Ask before parsing: a pane that never ran an agent has no report at all,
    * which is the common case, and json_parser_load_from_file would log about
@@ -141,7 +158,8 @@ PtAgentSessionReport *pt_agent_session_report_load(const char *path) {
   /* A report from a newer pt may mean anything by these members; refuse it
    * the way a malformed one is refused instead of guessing. */
   if (version > PT_AGENT_REPORT_VERSION || agent == PT_AGENT_NONE ||
-      session_id == NULL || session_id[0] == '\0' || pid <= 0) {
+      session_id == NULL || session_id[0] == '\0' ||
+      !session_id_is_clean(session_id) || pid <= 0) {
     g_object_unref(parser);
     return NULL;
   }
