@@ -177,12 +177,35 @@ static char *codex_config_path(void) {
   return g_build_filename(g_get_home_dir(), ".codex", "config.toml", NULL);
 }
 
-/* NULL when the file is not there — which the callers all read as "nothing
- * installed yet", not as an error. */
-static char *read_file_or_null(const char *path) {
-  char *text = NULL;
-  if (!g_file_get_contents(path, &text, NULL, NULL)) return NULL;
-  return text;
+/* Reads a config file that may legitimately not exist yet.
+ *
+ *   TRUE,  *out == NULL  the file is not there; the caller proceeds as if it
+ *                        were empty, which is the first-install case.
+ *   TRUE,  *out set      the contents.
+ *   FALSE, err set       it is there but could not be read.
+ *
+ * The two failure shapes must not collapse into one. An unreadable
+ * settings.json that read as "missing" would be replaced wholesale by a fresh
+ * document — the same file loss the malformed-JSON path already refuses, only
+ * quieter, because a permission error or a transient I/O error looks exactly
+ * like a user who has never installed anything. */
+static gboolean read_user_file(const char *path, char **out, GError **err) {
+  GError *local = NULL;
+  *out = NULL;
+  if (g_file_get_contents(path, out, NULL, &local)) return TRUE;
+  if (g_error_matches(local, G_FILE_ERROR, G_FILE_ERROR_NOENT)) {
+    g_clear_error(&local);
+    return TRUE;
+  }
+  g_propagate_error(err, local);
+  return FALSE;
+}
+
+/* The shared refusal: pt read something it was not allowed to read, so it
+ * touches nothing. Same posture as the malformed-JSON path. */
+static void report_unreadable(const char *path, const GError *err) {
+  fprintf(stderr, "pt integration: cannot read %s: %s\n", path, err->message);
+  fprintf(stderr, "  refusing to touch a file pt could not read.\n");
 }
 
 /* codex's notify program is configured by hand: pt writes the line, the user
@@ -194,11 +217,14 @@ static gboolean codex_installed(const char *config_text) {
 static int install_claude(const char *helper) {
   char *command = g_strconcat(helper, " claude", NULL);
   char *path = claude_settings_path();
-  char *text = read_file_or_null(path);
+  char *text = NULL;
   GError *err = NULL;
   int rc = 0;
 
-  if (pt_integration_claude_installed(text, command)) {
+  if (!read_user_file(path, &text, &err)) {
+    report_unreadable(path, err);
+    rc = 1;
+  } else if (pt_integration_claude_installed(text, command)) {
     printf("claude: already installed in %s\n", path);
   } else {
     char *merged = pt_integration_claude_merged_settings(text, command, &err);
@@ -241,7 +267,18 @@ static int install_claude(const char *helper) {
  * generic TOML round-trip preserves, and it is the user's file. */
 static int install_codex(const char *helper) {
   char *path = codex_config_path();
-  char *text = read_file_or_null(path);
+  char *text = NULL;
+  GError *err = NULL;
+  int rc = 0;
+  /* Refuses even though this branch only prints: without reading the file pt
+   * cannot tell whether `notify` is already set, and telling the user to paste
+   * a second `notify` key would break their config. */
+  if (!read_user_file(path, &text, &err)) {
+    report_unreadable(path, err);
+    g_clear_error(&err);
+    g_free(path);
+    return 1;
+  }
   if (codex_installed(text)) {
     printf("codex: %s already names pt-agent-report\n", path);
   } else {
@@ -253,28 +290,46 @@ static int install_codex(const char *helper) {
   }
   g_free(text);
   g_free(path);
+  return rc;
+}
+
+/* An unreadable file is reported as such, never as "not installed": that
+ * answer would send the user to `install`, which is the write path. */
+static int status_line(const char *label, const char *path, gboolean (*probe)(
+                           const char *text, const char *arg),
+                       const char *arg) {
+  char *text = NULL;
+  GError *err = NULL;
+  if (!read_user_file(path, &text, &err)) {
+    printf("%s unreadable (%s): %s\n", label, path, err->message);
+    g_clear_error(&err);
+    return 1;
+  }
+  printf("%s %s (%s)\n", label, probe(text, arg) ? "installed"
+                                                 : "not installed", path);
+  g_free(text);
   return 0;
+}
+
+static gboolean probe_claude(const char *text, const char *command) {
+  return pt_integration_claude_installed(text, command);
+}
+
+static gboolean probe_codex(const char *text, const char *unused) {
+  (void)unused;
+  return codex_installed(text);
 }
 
 static int print_status(const char *helper) {
   char *command = g_strconcat(helper, " claude", NULL);
   char *cpath = claude_settings_path();
-  char *ctext = read_file_or_null(cpath);
-  printf("claude: %s (%s)\n",
-         pt_integration_claude_installed(ctext, command) ? "installed"
-                                                         : "not installed",
-         cpath);
-  g_free(ctext);
+  char *xpath = codex_config_path();
+  int rc = status_line("claude:", cpath, probe_claude, command);
+  rc |= status_line("codex: ", xpath, probe_codex, NULL);
+  g_free(xpath);
   g_free(cpath);
   g_free(command);
-
-  char *xpath = codex_config_path();
-  char *xtext = read_file_or_null(xpath);
-  printf("codex:  %s (%s)\n",
-         codex_installed(xtext) ? "installed" : "not installed", xpath);
-  g_free(xtext);
-  g_free(xpath);
-  return 0;
+  return rc;
 }
 
 static int usage(void) {
