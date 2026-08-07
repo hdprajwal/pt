@@ -1,7 +1,85 @@
 #include "pt-claude-usage.h"
 #include <glib/gstdio.h>
+#include <string.h>
 
 #define NOW 1785521225
+
+/* The response the endpoint actually sends, trimmed of the members this reader
+ * does not touch but keeping every one it could trip over — including the two
+ * that report a percentage and are not limit windows.
+ *
+ * Worth stating what this corpus cost: the first build shipped a parser
+ * written from a description of this endpoint rather than a reply from it, and
+ * it read none of these fields. `percent`, `kind` and scope.model.display_name
+ * are not names anybody guesses. */
+static const char *const REAL_BODY =
+  "{"
+  "\"five_hour\":{\"utilization\":8.0,"
+    "\"resets_at\":\"2026-08-07T15:00:00.000000+00:00\","
+    "\"limit_dollars\":null,\"used_dollars\":null},"
+  "\"seven_day\":{\"utilization\":25.0,"
+    "\"resets_at\":\"2026-08-11T09:00:00.000000+00:00\","
+    "\"limit_dollars\":null},"
+  "\"seven_day_opus\":null,\"seven_day_sonnet\":null,\"tangelo\":null,"
+  "\"extra_usage\":{\"is_enabled\":true,\"monthly_limit\":5000,"
+    "\"used_credits\":0.0,\"utilization\":null,\"currency\":\"USD\"},"
+  "\"limits\":["
+    "{\"kind\":\"session\",\"group\":\"session\",\"percent\":8,"
+     "\"severity\":\"normal\","
+     "\"resets_at\":\"2026-08-07T15:00:00.000000+00:00\","
+     "\"scope\":null,\"is_active\":false},"
+    "{\"kind\":\"weekly_all\",\"group\":\"weekly\",\"percent\":25,"
+     "\"severity\":\"normal\","
+     "\"resets_at\":\"2026-08-11T09:00:00.000000+00:00\","
+     "\"scope\":null,\"is_active\":true},"
+    "{\"kind\":\"weekly_scoped\",\"group\":\"weekly\",\"percent\":2,"
+     "\"severity\":\"normal\","
+     "\"resets_at\":\"2026-08-11T09:00:00.000000+00:00\","
+     "\"scope\":{\"model\":{\"id\":null,\"display_name\":\"Fable\"},"
+       "\"surface\":null},\"is_active\":false}],"
+  "\"spend\":{\"used\":{\"amount_minor\":0,\"currency\":\"USD\"},"
+    "\"percent\":0,\"severity\":\"normal\",\"enabled\":true},"
+  "\"member_dashboard_available\":false}";
+
+static void test_real_response(void) {
+  PtUsage u;
+  g_assert_true(pt_claude_usage_parse(REAL_BODY, NOW, &u));
+  g_assert_cmpint(u.kind, ==, PT_AGENT_CLAUDE);
+  /* The array wins over the keyed members, which describe the same two
+   * windows and cannot describe the third. */
+  g_assert_cmpint(u.n_windows, ==, 3);
+  g_assert_cmpstr(u.windows[0].label, ==, "5h limit");
+  g_assert_cmpfloat(u.windows[0].percent, ==, 8.0);
+  g_assert_cmpstr(u.windows[1].label, ==, "weekly");
+  g_assert_cmpfloat(u.windows[1].percent, ==, 25.0);
+  /* Two weekly bars, so the scoped one has to say what it is scoped to. */
+  g_assert_cmpstr(u.windows[2].label, ==, "weekly · Fable");
+  g_assert_cmpfloat(u.windows[2].percent, ==, 2.0);
+  /* ISO 8601 with microseconds and a numeric offset: 2026-08-07T15:00Z. */
+  g_assert_cmpint(u.windows[0].resets_at, ==, 1786114800);
+  g_assert_cmpint(u.windows[1].resets_at, ==, 1786438800);
+  /* The response names no plan; the stored login is where that comes from. */
+  g_assert_cmpstr(u.plan, ==, "");
+  g_assert_cmpint(pt_usage_context_percent(&u), ==, -1);
+}
+
+/* Without the array, the keyed members answer — and the members that report a
+ * percentage of something that is not a limit window must not become bars.
+ * `spend` has a percent and `extra_usage` a utilization; neither resets. */
+static void test_real_response_without_array(void) {
+  GString *b = g_string_new(REAL_BODY);
+  const char *from = strstr(b->str, "\"limits\":[");
+  g_assert_nonnull(from);
+  const char *to = strstr(from, "],") + 2;
+  g_string_erase(b, from - b->str, to - from);
+
+  PtUsage u;
+  g_assert_true(pt_claude_usage_parse(b->str, NOW, &u));
+  g_assert_cmpint(u.n_windows, ==, 2);
+  g_assert_cmpstr(u.windows[0].label, ==, "5h limit");
+  g_assert_cmpstr(u.windows[1].label, ==, "weekly");
+  g_string_free(b, TRUE);
+}
 
 /* The newer shape: one flat array, and the weekly entries say which model
  * they cap. Two weekly bars with the same name would be unreadable, so the
@@ -224,6 +302,8 @@ static void test_creds(void) {
 
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
+  g_test_add_func("/claude/real-response", test_real_response);
+  g_test_add_func("/claude/real-response-keyed", test_real_response_without_array);
   g_test_add_func("/claude/limits-array", test_limits_array);
   g_test_add_func("/claude/keyed-windows", test_keyed_windows);
   g_test_add_func("/claude/keyed-ignores-non-windows",
