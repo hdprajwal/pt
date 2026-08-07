@@ -34,6 +34,7 @@ PtConfig *pt_config_new(void) {
   c->ui_font_family = g_strdup(PT_CONFIG_UI_FONT_FAMILY_DEFAULT);
   c->mouse_reporting = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
   c->claude_usage = PT_CONFIG_CLAUDE_USAGE_DEFAULT;
+  c->resume_agents = PT_CONFIG_RESUME_AGENTS_DEFAULT;
   c->osc52 = PT_CONFIG_OSC52_DEFAULT;
   c->app_overrides = g_hash_table_new_full(g_str_hash, g_str_equal,
                                            g_free, g_free);
@@ -89,6 +90,8 @@ static const PtConfigField config_fields[] = {
   { "mouse-reporting", G_STRUCT_OFFSET(PtConfig, mouse_reporting),
     FLD_BOOL,   0, 0, NULL, NULL },
   { "claude-usage",    G_STRUCT_OFFSET(PtConfig, claude_usage),
+    FLD_BOOL,   0, 0, NULL, NULL },
+  { "resume-agents",   G_STRUCT_OFFSET(PtConfig, resume_agents),
     FLD_BOOL,   0, 0, NULL, NULL },
   { "osc52",           G_STRUCT_OFFSET(PtConfig, osc52),
     FLD_ENUM,   0, 0, osc52_names, "off, write or ask" },

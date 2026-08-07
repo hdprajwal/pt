@@ -42,6 +42,11 @@ typedef enum {
  * because its numbers never leave the machine. */
 #define PT_CONFIG_CLAUDE_USAGE_DEFAULT FALSE
 
+/* Whether a restored pane that was running a coding agent gets its session
+ * resumed automatically (the agent's resume command typed into the fresh
+ * shell). On: the whole point of saving the id is getting the session back. */
+#define PT_CONFIG_RESUME_AGENTS_DEFAULT TRUE
+
 typedef struct {
   char *theme;             /* never NULL */
   int font_size;           /* terminal, points */
@@ -50,6 +55,7 @@ typedef struct {
   char *ui_font_family;    /* never NULL */
   gboolean mouse_reporting;  /* forward mouse events to tracking apps */
   gboolean claude_usage;     /* fetch Claude Code plan usage from Anthropic */
+  gboolean resume_agents;    /* resume a restored pane's agent session */
   PtOsc52Mode osc52;         /* clipboard writes from programs (OSC 52) */
   GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
 } PtConfig;
