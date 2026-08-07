@@ -683,6 +683,31 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
   remove_tab(w, t);
 }
 
+/* The name a tab wears: the focused pane's own title while a program is
+ * running there, and the foreground command otherwise, which is what pt showed
+ * everywhere before. Claude Code and Codex both publish a far better label
+ * than their process name — "✳ Claude Code", then a summary of the session —
+ * and a pane full of agents is otherwise a row of tabs all reading "claude".
+ * Titles go through verbatim, spinner glyph included: that the glyph moves is
+ * how the tab says the agent is still going.
+ * Prompt-set titles never reach last_title and it is dropped at every prompt,
+ * so this can answer with neither the cwd nor a name the previous program left
+ * behind. NULL only before the first comm poll of a pane that set no title. */
+static const char *tab_label_for(PtTabUI *t) {
+  PtTerminal *foc = pt_pane_grid_focused_terminal(PT_PANE_GRID(t->grid));
+  if (foc == NULL) return NULL;
+  const char *title = pt_terminal_last_title(foc);
+  if (pt_terminal_running(foc) && title != NULL && *title != '\0') return title;
+  return pt_terminal_last_command(foc);
+}
+
+static void set_tab_label(PtTabUI *t) {
+  const char *label = tab_label_for(t);
+  if (label == NULL || g_strcmp0(label, t->title) == 0) return;
+  g_free(t->title);
+  t->title = g_strdup(label);
+}
+
 /* Focused pane's foreground program changed → relabel the owning tab live.
  * A comm change is exactly when run-state flips, so refresh the strip (dots)
  * and the sidebar (run counters) regardless of whether the title moved; both
@@ -690,11 +715,11 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
  * Deliberately does NOT mark_dirty: command churn must not spam saves; the tab
  * title is captured on the next structural save anyway. */
 static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
+  (void)comm;   /* the label comes from the pane: its title first, then this */
   PtWindow *w = PT_WINDOW(user);
   PtTabUI *t = find_grid_tab(w, g);
   if (t == NULL) return;
-  g_free(t->title);
-  t->title = g_strdup(comm);
+  set_tab_label(t);
   if (pt_workspace_tab_project(w->ws, t->id) ==
       pt_workspace_active_project(w->ws)) {
     refresh_tabstrip(w);
@@ -706,19 +731,24 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
   queue_refresh_sidebar(w);
 }
 
-/* The prompt smuggles the last exit code out through the terminal title, so a
- * title change is the earliest moment the "✓ / ✗ exit N" marker can settle —
- * a failing builtin (`false`) never moves the foreground comm, so waiting for
- * "command-changed" would leave the bar stale until the next poll. Both
- * renderers dedupe internally, so refreshing on every title is cheap. */
+/* A title change is both the pane's new name and, when the prompt set it, the
+ * earliest moment the "✓ / ✗ exit N" marker can settle — a failing builtin
+ * (`false`) never moves the foreground comm, so waiting for "command-changed"
+ * would leave the bar stale until the next poll. Goes through find_grid_tab
+ * rather than the active tab so a background tab relabels too: an agent left
+ * running in another tab is exactly the one whose name is worth watching.
+ * Both renderers dedupe internally, so refreshing on every title is cheap. */
 static void on_grid_title(PtPaneGrid *g, const char *title, gpointer user) {
   (void)title;
   PtWindow *w = PT_WINDOW(user);
-  if (w->ws == NULL) return;
-  PtTabUI *t = active_tab(active_project(w));
-  if (t == NULL || t->grid != GTK_WIDGET(g)) return;
-  refresh_statusline(w);
-  refresh_tabstrip(w);
+  PtTabUI *t = find_grid_tab(w, g);
+  if (t == NULL) return;
+  set_tab_label(t);
+  if (pt_workspace_tab_project(w->ws, t->id) ==
+      pt_workspace_active_project(w->ws)) {
+    refresh_statusline(w);
+    refresh_tabstrip(w);
+  }
 }
 
 /* PT_BRANCH has to be right for a project's *first* shells, but the git
