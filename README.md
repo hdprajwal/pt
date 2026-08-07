@@ -216,6 +216,35 @@ for a human and pt will not hold on to it to find out.
 `\033]9;4;...` is a progress report, not a notification, and does not raise
 one.
 
+## Agent usage
+
+Run `claude` or `codex` in a pane and the info panel (⌃I) grows an AGENT USAGE
+block: a bar per limit window with how much of it is gone and when it turns
+over, plus how full the session's context is. You find out you are near a limit
+before the agent stops, rather than after.
+
+Codex needs no setup. It writes its limits into its own session log after every
+turn, so pt reads them off disk — no network, no credentials, and nothing
+leaves the machine. The log matching the pane's directory is the one that
+supplies the context bar; the limits themselves are account-wide.
+
+Claude Code is off until you turn it on, with a button in the panel. It keeps
+no local record of its limits, so the only way to show them is to ask Anthropic
+using the token the CLI already stored — your credential on the wire, so your
+call. pt never refreshes that token: rotating it would log you out of your own
+CLI, so an expired login is reported and left alone for you to fix with
+`claude`. Turning the setting back off stops the lookups and drops what they
+fetched.
+
+Neither one is polled faster than every two minutes, and nothing is polled at
+all while the panel is closed or no agent is running. Starting an agent, or
+moving to a pane in another directory, asks again ahead of the poll — but no
+more often than every few seconds, since the directory follows whichever pane
+has focus. A failed lookup leaves the last reading on screen with the error
+under it rather than blanking the card. Anthropic's usage endpoint is not a
+public API and will change; when it does, the block says the lookup failed
+instead of inventing a number.
+
 ## Configuration
 
 pt reads `~/.config/pt/config`, a `key = value` file (`#` starts a comment):
@@ -228,11 +257,14 @@ ui-font-size = 12.5
 ui-font-family = IBM Plex Sans
 mouse-reporting = true
 osc52 = write
+claude-usage = false
 ```
 
-Those seven keys plus `app-*` color-token overrides (e.g.
+Those eight keys plus `app-*` color-token overrides (e.g.
 `app-background = #101010`) are the entire config surface. Booleans accept
 `true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`. `osc52` takes `write`, `ask`
-or `off` (see above). Custom themes go in
+or `off` (see above). `claude-usage` is the info panel's Claude Code opt-in
+(see below); the Turn on button writes it here, and setting it back to `false`
+turns the lookups off again. Custom themes go in
 `~/.config/pt/themes/<name>`; both the config and the active theme are watched
 and applied live.

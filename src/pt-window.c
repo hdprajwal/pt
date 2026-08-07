@@ -49,6 +49,7 @@ struct _PtWindow {
   PtWorkspace *ws;      /* NULL after dispose, like projects used to be */
   GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
   GtkWidget *infopanel;  /* right rail; hidden until ⌃I */
+  PtAgentMonitor *agents; /* the panel's agent-usage block; polls only while shown */
   GtkWidget *palette;   /* overlay child; hidden unless ⌃K is up */
   GtkWidget *settings;  /* overlay child, same stack as the palette; ⌃, */
   guint save_source;    /* debounce timer; used from Task 12 */
@@ -223,6 +224,9 @@ static void render_config(PtWindow *w, const PtConfig *cfg) {
   pt_terminal_set_font(cfg->font_family, cfg->font_size);
   pt_terminal_set_mouse_reporting(cfg->mouse_reporting);
   pt_terminal_set_osc52(cfg->osc52);
+  /* Follows the file both ways: editing claude-usage back to false stops the
+   * lookups and clears what they fetched. */
+  pt_agent_monitor_set_claude_enabled(w->agents, cfg->claude_usage);
   /* Prompts read PT_ACCENT, so it has to track the theme the chrome uses.
    * Accents always resolve opaque, so the css form is "#rrggbb". */
   for (int i = 0; i < PT_ACCENT_COUNT; i++) {
@@ -533,6 +537,22 @@ static const char *shell_name_for(PtTerminal *term) {
   return slash != NULL ? slash + 1 : sh;
 }
 
+/* Draw the agent block from whatever the monitor currently holds. Split out
+ * from refresh_infopanel because the monitor calls it back when a lookup
+ * lands, and going the long way round would re-run detection from inside the
+ * detector's own callback. */
+static void redraw_agent_usage(PtWindow *w) {
+  if (w->infopanel == NULL || w->agents == NULL) return;
+  PtAgentView view;
+  pt_agent_monitor_view(w->agents, &view);
+  pt_info_panel_set_usage(PT_INFO_PANEL(w->infopanel), &view,
+                          g_get_real_time() / G_USEC_PER_SEC);
+}
+
+static void on_agent_usage_changed(gpointer user) {
+  redraw_agent_usage(PT_WINDOW(user));
+}
+
 /* Hidden is the default state, and the 500ms tick calls this unconditionally —
  * so a hidden panel must cost nothing at all. */
 static void refresh_infopanel(PtWindow *w) {
@@ -549,6 +569,14 @@ static void refresh_infopanel(PtWindow *w) {
   pt_info_panel_set_info(PT_INFO_PANEL(w->infopanel), shell, pid,
                          dir != NULL ? dir : "",
                          p != NULL ? proj_accent(p) : 0);
+  /* The pane's foreground command is already polled for the tab title, so
+   * handing it over here means the usual case — an agent typed at the prompt —
+   * is detected without touching /proc at all. The monitor decides for itself
+   * whether anything is due; this call is cheap by design. */
+  pt_agent_monitor_observe(w->agents, TRUE, pid,
+                           term != NULL ? pt_terminal_last_command(term) : NULL,
+                           dir);
+  redraw_agent_usage(w);
   g_free(dir);
   PtGitStatus none = {0};
   pt_info_panel_set_git(PT_INFO_PANEL(w->infopanel),
@@ -1392,6 +1420,10 @@ static void action_toggle_infopanel(PtWindow *w) {
   /* refresh_infopanel is a no-op while hidden, so without this the panel would
    * appear holding whatever it showed when it was last closed. */
   if (show) refresh_infopanel(w);
+  /* Closing is the only moment the agent monitor can learn it is off screen —
+   * everything else runs through refresh_infopanel, which is a no-op by then.
+   * Its poll stops here. */
+  else pt_agent_monitor_observe(w->agents, FALSE, 0, NULL, NULL);
   focus_active_terminal(w);
 }
 
@@ -1477,7 +1509,34 @@ static void on_info_refresh(PtInfoPanel *ip, gpointer user) {
   /* The git side lands asynchronously; everything else is up to date on the
    * spot. */
   if (p != NULL && p->monitor != NULL) pt_git_monitor_refresh(p->monitor);
+  /* Same button for the usage block's Retry. It skips the poll interval but
+   * not an active rate limit — that gate lives inside the monitor precisely
+   * so a button cannot step around it. */
+  pt_agent_monitor_refresh(w->agents);
   refresh_infopanel(w);
+}
+
+/* The user turning Claude usage on. Written to the config as well as pushed
+ * into the monitor: permission to put their token on the wire is a standing
+ * answer, not a per-session one, and the config file is where they can take
+ * it back without hunting for a button.
+ *
+ * Written now, not on the usual debounce. That debounce exists for settings
+ * that arrive in a stream — a font-size drag — and dispose drops it rather
+ * than flushing it, so closing the window within the second would silently
+ * discard this. Everything else it could discard would only be re-done; this
+ * one is the user's answer to a question about their credentials. */
+static void on_info_usage_enable(PtInfoPanel *ip, gpointer user) {
+  (void)ip;
+  PtWindow *w = PT_WINDOW(user);
+  if (w->config == NULL || w->config->claude_usage) return;
+  w->config->claude_usage = TRUE;
+  pt_agent_monitor_set_claude_enabled(w->agents, TRUE);
+  if (w->config_save_source != 0) {
+    g_source_remove(w->config_save_source);
+    w->config_save_source = 0;
+  }
+  config_save_now(w);
 }
 
 /* ---------- command palette ---------- */
@@ -2002,6 +2061,9 @@ static void pt_window_dispose(GObject *obj) {
     g_source_remove(w->sidebar_idle);
     w->sidebar_idle = 0;
   }
+  /* Before the config goes: render_config pushes into this, and a late reload
+   * landing on a freed monitor would be the one path that outlives it. */
+  g_clear_pointer(&w->agents, pt_agent_monitor_free);
   g_clear_object(&w->config_monitor);
   g_clear_object(&w->theme_monitor);
   theme_cache_drop();   /* module-level, but nothing renders past dispose */
@@ -2081,6 +2143,9 @@ static void pt_window_init(PtWindow *w) {
   pt_info_panel_set_has_zed(PT_INFO_PANEL(w->infopanel), zed != NULL);
   g_free(zed);
   gtk_box_append(GTK_BOX(body), w->infopanel);
+  /* Before restore_state, which loads the config and pushes claude-usage into
+   * it. Idle until the panel is first shown. */
+  w->agents = pt_agent_monitor_new(on_agent_usage_changed, w);
 
   gtk_box_append(GTK_BOX(root), body);
 
@@ -2134,6 +2199,8 @@ static void pt_window_init(PtWindow *w) {
   g_signal_connect(w->infopanel, "copy-path",
                    G_CALLBACK(on_info_copy_path), w);
   g_signal_connect(w->infopanel, "refresh", G_CALLBACK(on_info_refresh), w);
+  g_signal_connect(w->infopanel, "usage-enable",
+                   G_CALLBACK(on_info_usage_enable), w);
 
   install_shortcuts(w);
   g_signal_connect(w, "close-request", G_CALLBACK(on_close_request), NULL);

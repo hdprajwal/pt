@@ -125,7 +125,7 @@ button.pt-add-project:hover { background-color: var(--pt-hover); color: var(--pt
   border-left: 1px solid var(--pt-border);
 }
 .pt-info-sect { padding: 10px 12px 12px; }
-.pt-info-sect.git { border-top: 1px solid var(--pt-border); }
+.pt-info-sect.git, .pt-info-sect.agent { border-top: 1px solid var(--pt-border); }
 .pt-info-head {
   font-family: var(--pt-font-mono); font-size: var(--pt-fs-2xs);
   color: var(--pt-text-dim); letter-spacing: 1px;
@@ -215,6 +215,73 @@ button.pt-info-btn:hover image { color: var(--pt-text); }
 .pt-info-empty {
   font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm);
   color: var(--pt-text-ghost); margin-bottom: 8px;
+}
+
+/* ---- agent usage ----
+   The identity line reads like the shell line above it so the two sections
+   look like the same panel; everything under it is the quiet register the
+   file rows use. */
+.pt-usage-agent {
+  font-family: var(--pt-font-sans); font-weight: 600;
+  font-size: var(--pt-fs-md); color: var(--pt-text);
+}
+.pt-usage-plan {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-2xs);
+  color: var(--pt-text-muted); background-color: var(--pt-tag-bg);
+  padding: 1px 5px;
+}
+.pt-usage-hit {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
+  color: var(--pt-err);
+}
+.pt-usage-bars { margin: 10px 0 0 0; }
+.pt-usage-name {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm);
+  color: var(--pt-text-muted);
+}
+.pt-usage-pct {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-sm);
+  color: var(--pt-text);
+}
+.pt-usage-reset {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
+  color: var(--pt-text-ghost);
+}
+/* Flat 3px rules. Adwaita gives the progress bar rounded caps, its own colours,
+   and margins and a min-width on the fill — with the fill this thin its inner
+   node works out to a negative minimum width and GTK warns on every allocation,
+   so the box model is reset on both nodes, not just the paint. */
+progressbar.pt-usage-bar { min-height: 3px; }
+progressbar.pt-usage-bar trough,
+progressbar.pt-usage-bar progress {
+  min-height: 3px; min-width: 0; margin: 0; padding: 0;
+  border: none; border-radius: 1px; box-shadow: none; background-image: none;
+}
+progressbar.pt-usage-bar trough { background-color: var(--pt-track); }
+progressbar.pt-usage-bar progress { background-color: var(--pt-text-dim); }
+/* The bar carries the project accent, like the dot at the top of the rail. */
+progressbar.pt-usage-bar.pt-a0 progress { background-color: var(--pt-accent-0); }
+progressbar.pt-usage-bar.pt-a1 progress { background-color: var(--pt-accent-1); }
+progressbar.pt-usage-bar.pt-a2 progress { background-color: var(--pt-accent-2); }
+progressbar.pt-usage-bar.pt-a3 progress { background-color: var(--pt-accent-3); }
+progressbar.pt-usage-bar.pt-a4 progress { background-color: var(--pt-accent-4); }
+progressbar.pt-usage-bar.pt-a5 progress { background-color: var(--pt-accent-5); }
+/* Same specificity as the accent rules above (two classes and an element), so
+   these must stay below them to win. Getting close to a limit outranks
+   whichever colour the project happens to be. */
+progressbar.pt-usage-bar.warn progress { background-color: var(--pt-warn); }
+progressbar.pt-usage-bar.crit progress { background-color: var(--pt-err); }
+.pt-usage-src {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-2xs);
+  color: var(--pt-text-ghost); margin-top: 10px;
+}
+.pt-usage-err {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
+  color: var(--pt-warn); margin-top: 8px;
+}
+.pt-usage-why {
+  font-family: var(--pt-font-sans); font-size: var(--pt-fs-sm);
+  color: var(--pt-text-muted); margin-top: 2px;
 }
 
 /* ---- project bar (28px; spans the full window width) ---- */
