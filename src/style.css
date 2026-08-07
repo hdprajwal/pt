@@ -437,13 +437,6 @@ paned > separator:hover { background-color: var(--pt-ok); }
 .pt-project-row.active.pt-a4 { box-shadow: inset 2px 0 0 var(--pt-accent-4); }
 .pt-project-row.active.pt-a5 { box-shadow: inset 2px 0 0 var(--pt-accent-5); }
 
-/* Where a dragged row will land. Last in the file on purpose: while a drag is
- * in flight this rule takes the active row's accent edge, because the marker
- * has to be the loudest thing on the rail. A box-shadow, not a border — a
- * border would grow the row by 2px and make the whole list jump. */
-.pt-project-row.pt-drop-above { box-shadow: inset 0 2px 0 var(--pt-text); }
-.pt-project-row.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }
-
 .pt-chip.pt-a0 { color: var(--pt-accent-0); background-color: var(--pt-accent-0-chip); }
 .pt-chip.pt-a1 { color: var(--pt-accent-1); background-color: var(--pt-accent-1-chip); }
 .pt-chip.pt-a2 { color: var(--pt-accent-2); background-color: var(--pt-accent-2-chip); }
@@ -464,3 +457,15 @@ paned > separator:hover { background-color: var(--pt-ok); }
 .pt-run-count.pt-a3 { color: var(--pt-accent-3); }
 .pt-run-count.pt-a4 { color: var(--pt-accent-4); }
 .pt-run-count.pt-a5 { color: var(--pt-accent-5); }
+
+/* Where a dragged row will land. These have to outrank the active row's accent
+   edge, which is (0,3,0) — .pt-project-row.active.pt-aN — so an equally
+   specific .active variant follows each base rule. Source order alone is not
+   enough: GTK4 implements standard CSS specificity, and without these the
+   marker vanishes on exactly the row the user is most likely to drop onto.
+   A box-shadow, not a border — a border would grow the row by 2px and make
+   the whole list jump. */
+.pt-project-row.pt-drop-above { box-shadow: inset 0 2px 0 var(--pt-text); }
+.pt-project-row.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }
+.pt-project-row.active.pt-drop-above { box-shadow: inset 0 2px 0 var(--pt-text); }
+.pt-project-row.active.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }

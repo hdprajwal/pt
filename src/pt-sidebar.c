@@ -292,8 +292,8 @@ static void rebuild_rows(PtSidebar *sb) {
       dirty = TRUE;
     } else if (r->is_repo) {
       /* Same formatter as the project bar's chip — one spelling, one place.
-       * It writes an empty string when there is no branch to name, and an
-       * empty line two would halve the row. */
+       * It writes an empty string when there is no branch to name, and the
+       * path is real information where a blank line two would be none. */
       pt_git_format_chip(&r->git, chip, sizeof chip);
       if (chip[0] != '\0') {
         sub = chip;
