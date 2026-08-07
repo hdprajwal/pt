@@ -1,6 +1,8 @@
 #include "pt-term-core.h"
 #include "pt-term-core-internal.h"   /* pt_osc52_decode, the OSC 52 caps */
 #include "pt-config.h"
+#include "pt-agent-session.h"        /* report path/write, for the pane token */
+#include <glib/gstdio.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -2724,7 +2726,62 @@ static void test_notification_rejects_non_utf8(void) {
   pt_term_core_free(core);
 }
 
+/* ---- pane token ---- */
+
+/* Every child is handed $PT_PANE_TOKEN so an agent integration running inside
+   it can name the report file it writes for this pane. */
+static void test_pane_token_reaches_child(void) {
+  const char *argv[] = { "/bin/sh", "-c", "echo tok=$PT_PANE_TOKEN; sleep 30",
+                         NULL };
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  const char *tok = pt_term_core_pane_token(core);
+  g_assert_nonnull(tok);
+  g_assert_cmpuint(strlen(tok), ==, 16);
+  char *needle = g_strdup_printf("tok=%s", tok);
+  g_assert_true(wait_for_text(core, needle));
+  g_free(needle);
+  pt_term_core_free(core);
+}
+
+/* A closed pane must not leave a report behind: the next save would read a
+   session for a pane that no longer exists. */
+static void test_free_unlinks_report(void) {
+  GError *err = NULL;
+  const char *argv[] = { "/bin/sh", "-c", "sleep 30", NULL };
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  char *path = pt_agent_session_report_path(pt_term_core_pane_token(core));
+  g_assert_true(pt_agent_session_report_write(path, PT_AGENT_CLAUDE, "x",
+                                              "/tmp", 1, NULL));
+  g_assert_true(g_file_test(path, G_FILE_TEST_EXISTS));
+  pt_term_core_free(core);
+  g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+  g_free(path);
+}
+
+/* Freeing a core whose report was never written must be silent — the usual
+   case, and the only case when the state directory is unwritable. */
+static void test_free_without_report_is_quiet(void) {
+  GError *err = NULL;
+  const char *argv[] = { "/bin/sh", "-c", "sleep 30", NULL };
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  char *path = pt_agent_session_report_path(pt_term_core_pane_token(core));
+  g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
+  pt_term_core_free(core);
+  g_free(path);
+}
+
 int main(int argc, char *argv[]) {
+  /* Report paths come off $XDG_STATE_HOME, and the pane-token tests write real
+     files: point them at a temp dir so a test run never touches the state of
+     the pt the developer is running. Set before the first g_get_user_state_dir
+     call, which caches it. */
+  char *state_dir = g_dir_make_tmp("pt-termcore-state-XXXXXX", NULL);
+  g_assert_nonnull(state_dir);
+  g_setenv("XDG_STATE_HOME", state_dir, TRUE);
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
   g_test_add_func("/termcore/exit", test_exit_status_reported);
@@ -2849,5 +2906,14 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/content-serial", test_content_serial);
   g_test_add_func("/termcore/output-callback-only-for-output",
                   test_output_callback_is_output_only);
-  return g_test_run();
+  g_test_add_func("/termcore/pane-token", test_pane_token_reaches_child);
+  g_test_add_func("/termcore/pane-token-unlink", test_free_unlinks_report);
+  g_test_add_func("/termcore/pane-token-no-report",
+                  test_free_without_report_is_quiet);
+  int rc = g_test_run();
+  char *sessions = g_build_filename(state_dir, "pt", "agent-sessions", NULL);
+  char *pt_dir = g_build_filename(state_dir, "pt", NULL);
+  g_rmdir(sessions); g_rmdir(pt_dir); g_rmdir(state_dir);
+  g_free(sessions); g_free(pt_dir); g_free(state_dir);
+  return rc;
 }

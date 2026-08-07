@@ -1,7 +1,9 @@
 #include "pt-term-core.h"
 #include "pt-term-core-internal.h"
 #include "pt-status-parse.h"
+#include "pt-agent-session.h"
 #include <glib-unix.h>
+#include <glib/gstdio.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>
@@ -31,6 +33,7 @@ struct PtTermCore {
   char last_comm[64];
   char *last_title;         /* last title handed to cbs.title, for the dedupe */
   char **env_pairs;         /* extra "KEY=VALUE" set in the child, or NULL */
+  char *pane_token;         /* $PT_PANE_TOKEN; see pt_term_core_pane_token */
   guint16 cols, rows;
   int cell_w, cell_h;
 
@@ -769,6 +772,7 @@ static const char *resolve_shell(char *const *env_pairs) {
 /* `shell` is resolve_shell()'s answer and is consumed iff argv == NULL. */
 static int spawn_pty(const char *cwd, const char *const *argv,
                      const char *shell, char *const *env_pairs,
+                     const char *pane_token,
                      guint16 cols, guint16 rows, int cell_w, int cell_h,
                      pid_t *child_out) {
   struct winsize ws = {
@@ -791,6 +795,10 @@ static int spawn_pty(const char *cwd, const char *const *argv,
     if (cwd != NULL) { if (chdir(cwd) != 0) { /* fall through to $HOME */ chdir(g_get_home_dir()); } }
     setenv("TERM", "xterm-256color", 1);
     setenv("COLORTERM", "truecolor", 1);
+    /* Names this pane to anything the child runs: an agent integration writes
+     * its session report under this key. Set before env_pairs so a caller can
+     * still override it. */
+    if (pane_token != NULL) setenv("PT_PANE_TOKEN", pane_token, 1);
     /* env_pairs was copied before the fork, so putenv'ing its strings keeps
      * them alive for the (immediately following) exec without allocating. */
     for (int i = 0; env_pairs != NULL && env_pairs[i] != NULL; i++)
@@ -822,6 +830,8 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   c->dark = TRUE;
   c->content_serial = 1;    /* a first frame always has everything to draw */
   if (env_pairs != NULL) c->env_pairs = g_strdupv((char **)env_pairs);
+  /* Before the spawn: the child is handed this as $PT_PANE_TOKEN. */
+  c->pane_token = pt_agent_session_token_new();
 
   GhosttyTerminalOptions opts = { .cols = cols, .rows = rows,
                                   .max_scrollback = 10000 };
@@ -844,8 +854,8 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
    * putenv's them before the old in-child resolution ran, so an env_pairs
    * SHELL override changes what gets exec'd. */
   const char *shell = argv == NULL ? resolve_shell(c->env_pairs) : NULL;
-  c->pty_fd = spawn_pty(cwd, argv, shell, c->env_pairs, cols, rows,
-                        cell_w, cell_h, &c->child);
+  c->pty_fd = spawn_pty(cwd, argv, shell, c->env_pairs, c->pane_token,
+                        cols, rows, cell_w, cell_h, &c->child);
   if (c->pty_fd < 0) {
     g_set_error(error, g_quark_from_static_string("pt-term-core"), 2,
                 "forkpty failed: %s", g_strerror(errno));
@@ -2224,6 +2234,8 @@ pid_t pt_term_core_shell_pid(PtTermCore *c) { return c->child; }
 
 const char *pt_term_core_shell_name(PtTermCore *c) { return c->shell_name; }
 
+const char *pt_term_core_pane_token(PtTermCore *c) { return c->pane_token; }
+
 /* A field read: the 700ms foreground poll keeps it current, spawn seeds it
  * TRUE and child exit clears it, so per-frame callers cost no syscall. */
 gboolean pt_term_core_running(PtTermCore *c) {
@@ -2249,6 +2261,15 @@ void pt_term_core_free(PtTermCore *c) {
   if (c->mouse_encoder != NULL) ghostty_mouse_encoder_free(c->mouse_encoder);
   if (c->render_state != NULL) ghostty_render_state_free(c->render_state);
   if (c->terminal != NULL) ghostty_terminal_free(c->terminal);
+  if (c->pane_token != NULL) {
+    /* A closed pane's report must not outlive it: the next save would read
+     * a session for a pane that no longer exists. Crash leftovers are the
+     * sweep's job; this is the orderly path. */
+    char *rp = pt_agent_session_report_path(c->pane_token);
+    g_unlink(rp);
+    g_free(rp);
+    g_free(c->pane_token);
+  }
   g_strfreev(c->env_pairs);
   g_free(c->last_title);
   g_free(c->shell_name);
