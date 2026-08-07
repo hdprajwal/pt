@@ -25,6 +25,12 @@ char *pt_terminal_current_cwd(PtTerminal *t);  /* /proc/<pid>/cwd, caller frees 
 void pt_terminal_paste(PtTerminal *t);          /* async clipboard paste */
 void pt_terminal_copy(PtTerminal *t);           /* copy selection to clipboard */
 const char *pt_terminal_last_command(PtTerminal *t);  /* fg comm; NULL before first poll */
+/* The last title a program in this pane set over OSC 0, verbatim — spinner
+ * glyphs and all. NULL when no program has set one, and again from the moment
+ * the shell is back at a prompt, so this never answers with the cwd the prompt
+ * snippet puts in the title or with a name the previous program left behind.
+ * Borrowed; do not free or hold across a title change. */
+const char *pt_terminal_last_title(PtTerminal *t);
 /* The shell's own name ("zsh"), not the foreground command — derived from the
  * spawn itself (never a /proc read, which could race the child's exec). NULL
  * only while the pane has no live core: before first spawn, or after a failed

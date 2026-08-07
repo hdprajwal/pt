@@ -91,6 +91,10 @@ struct _PtTerminal {
   char *start_cwd;
   char **env;                /* extra child env, or NULL */
   char *last_command;
+  /* Last title a program in this pane set over OSC 0, verbatim. NULL once the
+   * shell is back at a prompt — see core_title. Distinct from last_command:
+   * the comm poll lags by up to 700ms, this lands the moment the bytes do. */
+  char *last_title;
   PangoLayout *layout;
   PangoFontDescription *font_desc;
   int cell_w, cell_h;
@@ -253,8 +257,24 @@ static void core_exited(PtTermCore *core, int status, gpointer user) {
 static void core_title(PtTermCore *core, const char *title,
                        gboolean from_prompt, gpointer user) {
   (void)core;
-  (void)from_prompt;
-  g_signal_emit(PT_TERMINAL(user), signals[SIG_TITLE_CHANGED], 0, title);
+  PtTerminal *t = PT_TERMINAL(user);
+  /* A marked title is the shell at a prompt: the command that owned the pane
+   * is over, so the title it set is finished with. Dropping it here rather
+   * than when the foreground command next changes keeps it off the 700ms comm
+   * poll — that poll runs late enough that it would sometimes wipe a title the
+   * new program had already set, and the tab would keep reading "claude" for
+   * seconds. */
+  if (from_prompt) {
+    g_clear_pointer(&t->last_title, g_free);
+  } else {
+    g_free(t->last_title);
+    t->last_title = g_strdup(title);
+  }
+  /* Emitted either way. The window treats a prompt title as the earliest point
+   * the "✓ / ✗ exit N" marker can settle — a failing builtin like `false`
+   * never moves the foreground comm — so swallowing it here would leave the
+   * statusline stale until the next poll. */
+  g_signal_emit(t, signals[SIG_TITLE_CHANGED], 0, title);
 }
 
 /* A program in this pane asked the desktop to say something (OSC 9 / OSC 777).
@@ -1742,6 +1762,8 @@ guint64 pt_terminal_id(PtTerminal *t) { return t->id; }
 
 const char *pt_terminal_last_command(PtTerminal *t) { return t->last_command; }
 
+const char *pt_terminal_last_title(PtTerminal *t) { return t->last_title; }
+
 /* Delegates rather than copies: the core derives the name from its own spawn
  * (see pt_term_core_shell_name), so a restart's fresh core brings a fresh name
  * with it and a failed respawn answers NULL instead of a stale one. */
@@ -1881,6 +1903,7 @@ static void pt_terminal_dispose(GObject *obj) {
   g_clear_pointer(&t->start_cwd, g_free);
   g_clear_pointer(&t->env, g_strfreev);
   g_clear_pointer(&t->last_command, g_free);
+  g_clear_pointer(&t->last_title, g_free);
   g_clear_pointer(&t->url_uri, g_free);
   G_OBJECT_CLASS(pt_terminal_parent_class)->dispose(obj);
 }
