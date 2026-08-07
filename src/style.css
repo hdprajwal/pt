@@ -255,8 +255,12 @@ button.pt-info-btn:hover image { color: var(--pt-text); }
 }
 /* 28 + the 1px border = 29 rendered, which is what every other bar in the
    window comes to. The filler and the cluster restate it so a project with no
-   tabs open gets the same strip height as one with tabs. */
-.pt-tabstrip-filler, .pt-tab-actions { min-height: 28px; }
+   tabs open gets the same strip height as one with tabs. border-radius: 0
+   undoes the global `* { border-radius: 2px }`: with left/right border widths
+   at 0, nothing fills the rounded corner arcs, so the bottom rule would be
+   nibbled away at each end of each box — exactly the break these carry it to
+   prevent. */
+.pt-tabstrip-filler, .pt-tab-actions { min-height: 28px; border-radius: 0; }
 /* NOTE: tabs are GtkBoxes, not buttons — selectors must be .pt-tab, never
  * button.pt-tab (those match nothing since the close-button refactor). */
 /* Zed-style: square full-height tabs, no gaps; the active tab drops the rule

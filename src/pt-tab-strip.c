@@ -8,7 +8,11 @@ static guint signals[N_SIGNALS];
 
 struct _PtTabStrip {
   GtkWidget parent_instance;
-  GtkWidget *box;          /* horizontal: tabs, spacer, +, zed, panel */
+  /* horizontal, three children: the rowlist's tabs box, an expanding filler,
+   * and the actions box holding +, zed and panel. The buttons sit inside that
+   * third box rather than in `box` directly, so a tab rebuild — which clears
+   * the rowlist's box — can never destroy them mid-click. */
+  GtkWidget *box;
   /* The tabs. The row list owns the last-rendered snapshot and skips a rebuild
    * when nothing in it moved: output-driven refreshes fire several times a
    * second, and a button destroyed between press and release cancels its
@@ -221,7 +225,8 @@ static void pt_tab_strip_init(PtTabStrip *s) {
   s->tabs = pt_rowlist_new(GTK_BOX(tabs));
 
   /* Empty expanding box so the + sits at the strip's right edge, like Zed. It
-   * carries the bottom rule across the strip's empty run — see step below. */
+   * carries the bottom rule across the strip's empty run — see
+   * `.pt-tabstrip-filler` in style.css. */
   GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_hexpand(spacer, TRUE);
   gtk_widget_add_css_class(spacer, "pt-tabstrip-filler");
