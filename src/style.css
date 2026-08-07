@@ -210,9 +210,11 @@ button.pt-info-btn:hover image { color: var(--pt-text); }
   color: var(--pt-text-ghost); margin-bottom: 8px;
 }
 
-/* ---- project bar (46px) ---- */
+/* ---- project bar (28px; spans the full window width) ---- */
+/* surface-alt, the tab strip's colour: the bar is the window's header now, so
+   it should read as chrome rather than as an extension of the terminal. */
 .pt-projectbar {
-  background-color: var(--pt-background);
+  background-color: var(--pt-surface-alt);
   border-bottom: 1px solid var(--pt-border);
   min-height: 28px;
   padding: 0 14px;

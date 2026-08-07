@@ -2045,8 +2045,15 @@ static void pt_window_init(PtWindow *w) {
   for (int i = 0; i < PT_ACCENT_COUNT; i++)
     g_strlcpy(w->accent_hex[i], accent_seed[i], sizeof w->accent_hex[i]);
 
-  /* The sidebar runs the full window height, so the project bar (which owns the
-   * window controls and the drag handle) sits atop the content column only. */
+  /* The project bar is the window's header: it spans the full width, owning the
+   * window controls and the drag handle, and everything else — rail, shell
+   * column, info panel — lives in the body beneath it. The status line is the
+   * exception, scoped to the shell column, so the rail and the panel run all
+   * the way down to the window's bottom edge. */
+  GtkWidget *root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  w->projectbar = pt_project_bar_new();
+  gtk_box_append(GTK_BOX(root), w->projectbar);
+
   GtkWidget *body = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_vexpand(body, TRUE);
   w->sidebar = pt_sidebar_new();
@@ -2054,8 +2061,6 @@ static void pt_window_init(PtWindow *w) {
 
   GtkWidget *main_col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_hexpand(main_col, TRUE);
-  w->projectbar = pt_project_bar_new();
-  gtk_box_append(GTK_BOX(main_col), w->projectbar);
   w->tabstrip = pt_tab_strip_new();
   gtk_box_append(GTK_BOX(main_col), w->tabstrip);
   w->content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -2077,11 +2082,14 @@ static void pt_window_init(PtWindow *w) {
   g_free(zed);
   gtk_box_append(GTK_BOX(body), w->infopanel);
 
-  /* The palette floats over everything, sidebar included, so it wraps the whole
-   * body rather than the content column. GtkOverlay leaves overlay children out
-   * of its size request, so a hidden palette costs the layout nothing. */
+  gtk_box_append(GTK_BOX(root), body);
+
+  /* The palette floats over everything, top bar and rail included, so it wraps
+   * the whole root rather than the shell column. GtkOverlay leaves overlay
+   * children out of its size request, so a hidden palette costs the layout
+   * nothing. */
   GtkWidget *overlay = gtk_overlay_new();
-  gtk_overlay_set_child(GTK_OVERLAY(overlay), body);
+  gtk_overlay_set_child(GTK_OVERLAY(overlay), root);
   w->palette = pt_command_palette_new();
   gtk_widget_set_visible(w->palette, FALSE);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), w->palette);
