@@ -8,6 +8,31 @@ PtSplitNode *pt_split_leaf_new(const char *cwd) {
   return n;
 }
 
+void pt_split_leaf_set_agent(PtSplitNode *leaf, const char *agent,
+                             const char *session) {
+  g_return_if_fail(leaf != NULL);
+  g_return_if_fail(leaf->kind == PT_SPLIT_LEAF);
+  /* Copy before freeing: a caller re-setting a leaf from its own strings would
+   * otherwise hand us memory we just released. */
+  char *new_agent = g_strdup(agent);
+  char *new_session = g_strdup(session);
+  g_free(leaf->agent);
+  g_free(leaf->agent_session);
+  leaf->agent = new_agent;
+  leaf->agent_session = new_session;
+}
+
+void pt_split_strip_agents(PtSplitNode *root) {
+  if (root == NULL) return;
+  if (root->kind != PT_SPLIT_LEAF) {
+    pt_split_strip_agents(root->a);
+    pt_split_strip_agents(root->b);
+    return;
+  }
+  g_clear_pointer(&root->agent, g_free);
+  g_clear_pointer(&root->agent_session, g_free);
+}
+
 static void replace_child(PtSplitNode *parent, PtSplitNode *old,
                           PtSplitNode *newc) {
   if (parent->a == old) parent->a = newc;
@@ -46,8 +71,14 @@ PtSplitNode *pt_split_close(PtSplitNode **root, PtSplitNode *leaf) {
   if (parent->parent != NULL) replace_child(parent->parent, parent, sibling);
   else *root = sibling;
   g_free(leaf->cwd);
+  g_free(leaf->agent);
+  g_free(leaf->agent_session);
   g_free(leaf);
+  /* The parent is a split node, so its leaf-only fields are NULL; freeing them
+   * anyway keeps this in step with pt_split_free rather than relying on it. */
   g_free(parent->cwd);
+  g_free(parent->agent);
+  g_free(parent->agent_session);
   g_free(parent);
   return pt_split_first_leaf(sibling);
 }
@@ -88,6 +119,8 @@ PtSplitNode *pt_split_copy(const PtSplitNode *n) {
   c->kind = n->kind;
   c->ratio = n->ratio;
   c->cwd = g_strdup(n->cwd);
+  c->agent = g_strdup(n->agent);
+  c->agent_session = g_strdup(n->agent_session);
   c->a = pt_split_copy(n->a);
   c->b = pt_split_copy(n->b);
   if (c->a != NULL) c->a->parent = c;
@@ -108,6 +141,8 @@ void pt_split_free(PtSplitNode *root) {
     pt_split_free(root->b);
   }
   g_free(root->cwd);
+  g_free(root->agent);
+  g_free(root->agent_session);
   g_free(root);
 }
 
@@ -116,6 +151,13 @@ JsonNode *pt_split_to_json(const PtSplitNode *root) {
   if (root->kind == PT_SPLIT_LEAF) {
     json_object_set_string_member(obj, "kind", "leaf");
     json_object_set_string_member(obj, "cwd", root->cwd);
+    /* Written only as a pair: half of it would restore a pane that claims an
+     * agent nothing can resume. Leaves without one stay the shape a v1 pt
+     * wrote, so the file only grows where there is something to say. */
+    if (root->agent != NULL && root->agent_session != NULL) {
+      json_object_set_string_member(obj, "agent", root->agent);
+      json_object_set_string_member(obj, "agent_session", root->agent_session);
+    }
   } else {
     json_object_set_string_member(obj, "kind",
                                   root->kind == PT_SPLIT_H ? "h" : "v");
@@ -133,8 +175,18 @@ PtSplitNode *pt_split_from_json(JsonNode *node) {
   JsonObject *obj = json_node_get_object(node);
   const char *kind = json_object_get_string_member_with_default(obj, "kind", "");
   if (g_strcmp0(kind, "leaf") == 0) {
-    return pt_split_leaf_new(
+    PtSplitNode *leaf = pt_split_leaf_new(
         json_object_get_string_member_with_default(obj, "cwd", NULL));
+    /* A v1 file has neither member, and a file with only one of them says
+     * nothing we can act on: both must be there before the leaf claims an
+     * agent. */
+    const char *agent =
+        json_object_get_string_member_with_default(obj, "agent", NULL);
+    const char *session =
+        json_object_get_string_member_with_default(obj, "agent_session", NULL);
+    if (agent != NULL && session != NULL)
+      pt_split_leaf_set_agent(leaf, agent, session);
+    return leaf;
   }
   if (g_strcmp0(kind, "h") != 0 && g_strcmp0(kind, "v") != 0) return NULL;
   PtSplitNode *a = pt_split_from_json(json_object_get_member(obj, "a"));

@@ -90,6 +90,10 @@ struct _PtTerminal {
   PtTermCore *core;
   char *start_cwd;
   char **env;                /* extra child env, or NULL */
+  /* One line to write once the shell is up, or NULL. Set before the pane
+   * spawns (restore fills it from the leaf's agent session) and cleared by the
+   * spawn that consumes it, so only the first shell ever sees it. */
+  char *startup_input;
   char *last_command;
   /* Last title a program in this pane set over OSC 0, verbatim. NULL once the
    * shell is back at a prompt — see core_title. Distinct from last_command:
@@ -650,6 +654,16 @@ static void ensure_core(PtTerminal *t) {
    * and gone by now. Push the widget's real state in so the core does not start
    * out believing a focused pane is unfocused. */
   pt_term_core_focus_report(t->core, t->focused, FALSE);
+  if (t->startup_input != NULL) {
+    /* Restore's resume command. After the spawn and before anything else the
+     * user could type: the pty queues it until the shell is ready, so it
+     * lands as the first line at the first prompt. One-shot — a respawn from
+     * restart_shell must give a plain shell, not a surprise second resume.
+     * Only reached on a spawn that succeeded: the failure path above returns
+     * early and leaves the line for the retry a restart_shell would be. */
+    pt_term_core_write(t->core, t->startup_input, -1);
+    g_clear_pointer(&t->startup_input, g_free);
+  }
 }
 
 static void pt_terminal_size_allocate(GtkWidget *widget, int width, int height,
@@ -1906,6 +1920,7 @@ static void pt_terminal_dispose(GObject *obj) {
   g_clear_pointer(&t->font_desc, pango_font_description_free);
   g_clear_pointer(&t->start_cwd, g_free);
   g_clear_pointer(&t->env, g_strfreev);
+  g_clear_pointer(&t->startup_input, g_free);  /* unconsumed when the pane never spawned */
   g_clear_pointer(&t->last_command, g_free);
   g_clear_pointer(&t->last_title, g_free);
   g_clear_pointer(&t->url_uri, g_free);
@@ -1986,6 +2001,11 @@ static void pt_terminal_init(PtTerminal *t) {
 void pt_terminal_set_spawn_env(PtTerminal *t, const char *const *env_pairs) {
   g_clear_pointer(&t->env, g_strfreev);
   if (env_pairs != NULL) t->env = g_strdupv((char **)env_pairs);
+}
+
+void pt_terminal_set_startup_input(PtTerminal *t, const char *line) {
+  g_clear_pointer(&t->startup_input, g_free);
+  if (line != NULL) t->startup_input = g_strdup(line);
 }
 
 GtkWidget *pt_terminal_new(const char *cwd) {

@@ -72,6 +72,23 @@ static void test_rewrite_mouse_reporting(void) {
   pt_config_free(c);
 }
 
+static void test_parse_resume_agents(void) {
+  /* On by default: saving an agent's session id is only worth anything if the
+   * restored pane picks that session back up. */
+  PtConfig *c = pt_config_parse("");
+  g_assert_true(c->resume_agents);
+  pt_config_free(c);
+
+  c = pt_config_parse("resume-agents = false\n");
+  g_assert_false(c->resume_agents);
+  pt_config_free(c);
+
+  /* Junk keeps the default, like every other key. */
+  c = pt_config_parse("resume-agents = nonsense\n");
+  g_assert_true(c->resume_agents);
+  pt_config_free(c);
+}
+
 static void test_parse_osc52(void) {
   const struct { const char *text; PtOsc52Mode want; } ok[] = {
     { "osc52 = off\n",   PT_OSC52_OFF },
@@ -285,6 +302,7 @@ int main(void) {
   test_parse_bad_values();
   test_parse_mouse_reporting();
   test_rewrite_mouse_reporting();
+  test_parse_resume_agents();
   test_parse_osc52();
   test_rewrite_osc52();
   test_parse_out_of_range_font_size();

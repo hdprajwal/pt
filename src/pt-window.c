@@ -20,6 +20,7 @@
 #include "pt-theme.h"
 #include "pt-style.h"
 #include "pt-workspace.h"
+#include "pt-agent-session.h"
 
 /* The window no longer keeps the project/tab structure itself: PtWorkspace
  * (ptcore, headless) owns order and selection, addressed by stable ids. The
@@ -2003,6 +2004,7 @@ static PtSessionState *capture_state(PtWindow *w) {
           w->ws, pt_workspace_tab_at(w->ws, id, j));
       PtPaneGrid *grid = PT_PANE_GRID(t->grid);
       pt_pane_grid_sync_cwds(grid);
+      pt_pane_grid_sync_agents(grid);
       PtSplitNode *copy = pt_split_copy(pt_pane_grid_tree(grid));
       g_ptr_array_add(ps->tabs, pt_tab_state_new(t->title, copy));
     }
@@ -2049,6 +2051,10 @@ static void restore_state(PtWindow *w) {
     if (!p->missing) {
       for (guint j = 0; j < ps->tabs->len; j++) {
         PtTabState *ts = g_ptr_array_index(ps->tabs, j);
+        /* Before add_tab_ui takes the tree and builds panes from it: with
+         * resume-agents off, a restored pane must be a plain shell. */
+        if (w->config == NULL || !w->config->resume_agents)
+          pt_split_strip_agents(ts->tree);
         /* steal the tree from the session copy */
         add_tab_ui(w, p, ts->title, ts->tree);
         ts->tree = NULL;
@@ -2245,6 +2251,9 @@ static void pt_window_init(PtWindow *w) {
 
   install_shortcuts(w);
   g_signal_connect(w, "close-request", G_CALLBACK(on_close_request), NULL);
+  /* Crash leftovers: reports whose panes died with a previous process. Live
+   * panes rewrite theirs; a week is comfortably past any real session. */
+  pt_agent_session_sweep(7);
   restore_state(w);
   refresh_sidebar(w);
   show_active_grid(w);

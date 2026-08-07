@@ -166,6 +166,47 @@ static void test_from_json_malformed(void) {
   json_node_unref(n);
 }
 
+static void test_agent_fields_json(void) {
+  PtSplitNode *root = pt_split_leaf_new("/a");
+  pt_split_leaf_set_agent(root, "claude", "abc-123");
+  PtSplitNode *second = pt_split_split(&root, root, PT_SPLIT_H);
+  /* a split's fresh leaf is a new shell, never an inherited conversation */
+  g_assert_null(second->agent);
+  JsonNode *j = pt_split_to_json(root);
+  PtSplitNode *back = pt_split_from_json(j);
+  json_node_unref(j);
+  PtSplitNode *first = pt_split_first_leaf(back);
+  g_assert_cmpstr(first->agent, ==, "claude");
+  g_assert_cmpstr(first->agent_session, ==, "abc-123");
+  g_assert_null(pt_split_next_leaf(back, first)->agent);
+  pt_split_free(back); pt_split_free(root);
+}
+
+static void test_agent_fields_copy_and_strip(void) {
+  PtSplitNode *root = pt_split_leaf_new("/a");
+  pt_split_leaf_set_agent(root, "codex", "id-9");
+  PtSplitNode *copy = pt_split_copy(root);
+  g_assert_cmpstr(copy->agent, ==, "codex");
+  pt_split_strip_agents(copy);
+  g_assert_null(copy->agent);
+  g_assert_null(copy->agent_session);
+  /* set NULL clears */
+  pt_split_leaf_set_agent(root, NULL, NULL);
+  g_assert_null(root->agent);
+  pt_split_free(copy); pt_split_free(root);
+}
+
+static void test_agent_fields_absent_in_old_json(void) {
+  /* a v1 file's leaves have no agent members; they must load as NULL */
+  JsonParser *p = json_parser_new();
+  g_assert_true(json_parser_load_from_data(p,
+      "{\"kind\":\"leaf\",\"cwd\":\"/x\"}", -1, NULL));
+  PtSplitNode *n = pt_split_from_json(json_parser_get_root(p));
+  g_assert_nonnull(n);
+  g_assert_null(n->agent);
+  pt_split_free(n); g_object_unref(p);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/split/single", test_single_leaf);
@@ -177,5 +218,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/split/copy", test_copy);
   g_test_add_func("/split/json", test_json_roundtrip);
   g_test_add_func("/split/malformed", test_from_json_malformed);
+  g_test_add_func("/split/agent-json", test_agent_fields_json);
+  g_test_add_func("/split/agent-copy-strip", test_agent_fields_copy_and_strip);
+  g_test_add_func("/split/agent-absent", test_agent_fields_absent_in_old_json);
   return g_test_run();
 }

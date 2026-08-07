@@ -56,12 +56,15 @@ target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
   src/pt-agent.c
+  src/pt-agent-report.c
+  src/pt-agent-session.c
   src/pt-block.c
   src/pt-claude-usage.c
   src/pt-codex-usage.c
   src/pt-config.c
   src/pt-fuzzy.c
   src/pt-git-parse.c
+  src/pt-integration.c
   src/pt-json-read.c
   src/pt-link.c
   src/pt-path.c
@@ -147,6 +150,19 @@ add_test(NAME workspace COMMAND test-workspace)
 add_executable(test-agent tests/test-agent.c)
 target_link_libraries(test-agent PRIVATE ptcore)
 add_test(NAME agent COMMAND test-agent)
+
+add_executable(test-agent-session tests/test-agent-session.c)
+target_link_libraries(test-agent-session PRIVATE ptcore)
+# The reporter tests spawn `pt agent-report` for real, so the test needs pt's
+# path and the build has to produce it first.
+target_compile_definitions(test-agent-session PRIVATE
+  PT_AGENT_REPORT_BIN="$<TARGET_FILE:pt>")
+add_dependencies(test-agent-session pt)
+add_test(NAME agent-session COMMAND test-agent-session)
+
+add_executable(test-integration tests/test-integration.c)
+target_link_libraries(test-integration PRIVATE ptcore)
+add_test(NAME integration COMMAND test-integration)
 
 add_executable(test-usage tests/test-usage.c)
 target_link_libraries(test-usage PRIVATE ptcore)

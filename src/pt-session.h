@@ -10,7 +10,7 @@
 /* Shape of the state file this build writes and can read. A file claiming a
  * higher version is left alone (moved aside on load) rather than read with
  * guesses, so a downgrade cannot rewrite a newer session into a lossy one. */
-#define PT_SESSION_VERSION 1
+#define PT_SESSION_VERSION 2
 
 /* Terminal font size, in points, for a fresh session. Kept as an alias so
  * existing callers keep compiling; pt-config.h owns the value, because the

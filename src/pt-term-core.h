@@ -389,6 +389,10 @@ pid_t pt_term_core_shell_pid(PtTermCore *c);
  * cannot race the child's exec. Set once at spawn, never NULL, owned by the
  * core; valid until pt_term_core_free. */
 const char *pt_term_core_shell_name(PtTermCore *c);
+/* The random token this core's child was given as $PT_PANE_TOKEN — the key
+ * agent integrations write their session reports under. Fresh per spawn,
+ * meaningless across pt restarts. Owned by the core; valid until free. */
+const char *pt_term_core_pane_token(PtTermCore *c);
 /* TRUE when a foreground process other than the shell owns the tty. Answered
  * from a cached field the 700ms foreground poll maintains (seeded TRUE at
  * spawn, cleared on child exit), so it is free to ask every frame; the answer
