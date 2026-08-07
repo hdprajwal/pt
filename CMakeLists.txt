@@ -69,6 +69,7 @@ add_library(ptcore STATIC
   src/pt-config.c
   src/pt-fuzzy.c
   src/pt-git-parse.c
+  src/pt-integration.c
   src/pt-json-read.c
   src/pt-link.c
   src/pt-path.c
@@ -163,6 +164,10 @@ target_compile_definitions(test-agent-session PRIVATE
   PT_AGENT_REPORT_BIN="$<TARGET_FILE:pt-agent-report>")
 add_dependencies(test-agent-session pt-agent-report)
 add_test(NAME agent-session COMMAND test-agent-session)
+
+add_executable(test-integration tests/test-integration.c)
+target_link_libraries(test-integration PRIVATE ptcore)
+add_test(NAME integration COMMAND test-integration)
 
 add_executable(test-usage tests/test-usage.c)
 target_link_libraries(test-usage PRIVATE ptcore)

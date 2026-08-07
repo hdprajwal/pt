@@ -1,5 +1,6 @@
 #include <adwaita.h>
 #include "pt-window.h"
+#include "pt-integration.h"
 
 static void on_activate(AdwApplication *app, gpointer user_data) {
   (void)user_data;
@@ -23,6 +24,12 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
 }
 
 int main(int argc, char *argv[]) {
+  /* Before GTK: this subcommand is a plain terminal program that edits config
+   * files, and it must work with no display and without waking the running
+   * instance through GApplication's single-instance handling. */
+  if (argc >= 2 && g_strcmp0(argv[1], "integration") == 0)
+    return pt_integration_cli(argc, argv);
+
   AdwApplication *app =
       adw_application_new("dev.hdprajwal.pt", G_APPLICATION_DEFAULT_FLAGS);
   g_signal_connect(app, "activate", G_CALLBACK(on_activate), NULL);

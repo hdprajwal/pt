@@ -20,6 +20,7 @@
 #include "pt-theme.h"
 #include "pt-style.h"
 #include "pt-workspace.h"
+#include "pt-agent-session.h"
 
 /* The window no longer keeps the project/tab structure itself: PtWorkspace
  * (ptcore, headless) owns order and selection, addressed by stable ids. The
@@ -2250,6 +2251,9 @@ static void pt_window_init(PtWindow *w) {
 
   install_shortcuts(w);
   g_signal_connect(w, "close-request", G_CALLBACK(on_close_request), NULL);
+  /* Crash leftovers: reports whose panes died with a previous process. Live
+   * panes rewrite theirs; a week is comfortably past any real session. */
+  pt_agent_session_sweep(7);
   restore_state(w);
   refresh_sidebar(w);
   show_active_grid(w);
