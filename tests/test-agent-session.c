@@ -1,5 +1,5 @@
 #include "pt-agent-session.h"
-#include <gio/gio.h>          /* GSubprocess, for driving the real helper */
+#include <gio/gio.h>          /* GSubprocess, for driving the real binary */
 #include <glib/gstdio.h>
 #include <string.h>
 
@@ -136,15 +136,16 @@ static void test_agent_ancestor(void) {
   g_assert_cmpint(pt_agent_session_find_agent_ancestor(NULL), ==, pid);
 }
 
-/* PT_AGENT_REPORT_BIN is a compile definition added in CMakeLists.txt. */
+/* PT_AGENT_REPORT_BIN is a compile definition added in CMakeLists.txt: the pt
+ * binary itself, which the reporter is a subcommand of. */
 
-/* Runs the helper with an optional extra argument (the notify payload codex
- * passes) and optional stdin text. The two are what tell the modes apart, so
- * one runner covers both rather than two near-copies. */
+/* Runs `pt agent-report` with an optional extra argument (the notify payload
+ * codex passes) and optional stdin text. The two are what tell the modes
+ * apart, so one runner covers both rather than two near-copies. */
 static void run_helper_full(const char *mode, const char *arg,
                             const char *stdin_text, const char *token,
                             const char *dir, int *exit_code) {
-  const char *argv[] = { PT_AGENT_REPORT_BIN, mode, arg, NULL };
+  const char *argv[] = { PT_AGENT_REPORT_BIN, "agent-report", mode, arg, NULL };
   GSubprocessLauncher *l =
       g_subprocess_launcher_new(G_SUBPROCESS_FLAGS_STDIN_PIPE);
   if (token != NULL)

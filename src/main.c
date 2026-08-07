@@ -1,5 +1,6 @@
 #include <adwaita.h>
 #include "pt-window.h"
+#include "pt-agent-report.h"
 #include "pt-integration.h"
 
 static void on_activate(AdwApplication *app, gpointer user_data) {
@@ -24,6 +25,13 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
 }
 
 int main(int argc, char *argv[]) {
+  /* First of all: this one runs inside an agent, as a hook or notify command,
+   * where there is no display and where reaching GTK — or worse, waking the
+   * running instance through GApplication — would hang the agent it reports
+   * on. It writes a file and returns. */
+  if (argc >= 2 && g_strcmp0(argv[1], "agent-report") == 0)
+    return pt_agent_report_cli(argc, argv);
+
   /* Before GTK: this subcommand is a plain terminal program that edits config
    * files, and it must work with no display and without waking the running
    * instance through GApplication's single-instance handling. */

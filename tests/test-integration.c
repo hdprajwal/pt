@@ -4,7 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define CMD "/usr/local/bin/pt-agent-report claude"
+#define CMD "/usr/local/bin/pt agent-report claude"
 
 static void test_merge_into_empty(void) {
   GError *err = NULL;

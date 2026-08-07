@@ -54,14 +54,9 @@ add_custom_command(
 add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-command-palette.c src/pt-settings.c src/pt-overlay.c src/pt-rowlist.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c src/pt-agent-monitor.c ${PT_RES_C})
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
-# The program pt's agent integrations run: a hook or notify command that
-# writes the pane's session report. Its own binary because it runs inside the
-# agent, not inside pt, and must not need GTK to start.
-add_executable(pt-agent-report src/pt-agent-report-main.c)
-target_link_libraries(pt-agent-report PRIVATE ptcore)
-
 add_library(ptcore STATIC
   src/pt-agent.c
+  src/pt-agent-report.c
   src/pt-agent-session.c
   src/pt-block.c
   src/pt-claude-usage.c
@@ -87,7 +82,7 @@ target_include_directories(ptcore PUBLIC src)
 target_link_libraries(ptcore PUBLIC ghostty-vt-static PkgConfig::JSON PkgConfig::GLIB util m)
 
 include(GNUInstallDirs)
-install(TARGETS pt pt-agent-report RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS pt RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES share/applications/dev.hdprajwal.pt.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 install(FILES share/icons/hicolor/scalable/apps/dev.hdprajwal.pt.svg
@@ -158,11 +153,11 @@ add_test(NAME agent COMMAND test-agent)
 
 add_executable(test-agent-session tests/test-agent-session.c)
 target_link_libraries(test-agent-session PRIVATE ptcore)
-# The helper tests spawn the real binary, so the test needs its path and the
-# build has to produce it first.
+# The reporter tests spawn `pt agent-report` for real, so the test needs pt's
+# path and the build has to produce it first.
 target_compile_definitions(test-agent-session PRIVATE
-  PT_AGENT_REPORT_BIN="$<TARGET_FILE:pt-agent-report>")
-add_dependencies(test-agent-session pt-agent-report)
+  PT_AGENT_REPORT_BIN="$<TARGET_FILE:pt>")
+add_dependencies(test-agent-session pt)
 add_test(NAME agent-session COMMAND test-agent-session)
 
 add_executable(test-integration tests/test-integration.c)

@@ -57,7 +57,7 @@ char *pt_agent_session_resume_command(PtAgentKind kind, const char *session_id);
 void pt_agent_session_sweep(int days);
 
 /* The nearest ancestor of this process whose cmdline names an agent, walking
- * ppid links through /proc. How pt-agent-report finds the pid to record: a
+ * ppid links through /proc. How `pt agent-report` finds the pid to record: a
  * hook is spawned by a shell that was spawned by the agent, so the agent is
  * up the chain. 0 when no ancestor matches. */
 int pt_agent_session_find_agent_ancestor(PtAgentKind *out_kind);

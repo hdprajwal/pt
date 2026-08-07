@@ -105,8 +105,9 @@ pt integration status           # says which of the two are in place
 Claude Code's settings are JSON, so pt edits them in place — additively, and it
 refuses rather than rewrite a file it did not parse. codex's `config.toml`
 carries comments and ordering that no TOML round-trip preserves, so pt prints
-the `notify = [...]` line and you paste it yourself. Both helpers are inert
-outside a pt pane, and `install` a second time changes nothing.
+the `notify = ["<path-to-pt>", "agent-report", "codex-notify"]` line and you
+paste it yourself. Both hooks run `pt agent-report`, which is inert outside a
+pt pane, and `install` a second time changes nothing.
 
 codex only reports its session once a turn completes, so a resumed codex pane
 you quit before finishing a turn comes back as a plain shell next time.

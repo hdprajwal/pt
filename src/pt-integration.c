@@ -151,22 +151,15 @@ char *pt_integration_claude_merged_settings(const char *settings_text,
 
 /* ---- the CLI ---- */
 
-/* The pt-agent-report next to this binary, so a build tree, a /usr/local
- * install and a distro package each point the hooks at their own helper.
- * Falls back to the bare name for PATH lookup when the sibling is missing —
- * which is what a split install (pt and pt-agent-report in different dirs)
- * looks like from here. Caller frees. */
-static char *helper_path(void) {
+/* This very binary, by absolute path, so a build tree, a /usr/local install
+ * and a distro package each point the hooks at the pt that installed them —
+ * and an agent started from a login shell with a different PATH still finds
+ * it. Falls back to the bare name for PATH lookup on a system without /proc.
+ * Caller frees. */
+static char *pt_binary_path(void) {
   char *exe = g_file_read_link("/proc/self/exe", NULL);
-  if (exe != NULL) {
-    char *dir = g_path_get_dirname(exe);
-    char *helper = g_build_filename(dir, "pt-agent-report", NULL);
-    g_free(dir);
-    g_free(exe);
-    if (g_file_test(helper, G_FILE_TEST_IS_EXECUTABLE)) return helper;
-    g_free(helper);
-  }
-  return g_strdup("pt-agent-report");
+  if (exe != NULL) return exe;
+  return g_strdup("pt");
 }
 
 static char *claude_settings_path(void) {
@@ -209,13 +202,16 @@ static void report_unreadable(const char *path, const GError *err) {
 }
 
 /* codex's notify program is configured by hand: pt writes the line, the user
- * pastes it. TRUE when the config already names the helper. */
+ * pastes it. TRUE when the config already names the reporter — the bare
+ * subcommand, which matches both the current `pt agent-report` line and the
+ * older standalone pt-agent-report one, so an existing install still reads as
+ * installed. */
 static gboolean codex_installed(const char *config_text) {
-  return config_text != NULL && strstr(config_text, "pt-agent-report") != NULL;
+  return config_text != NULL && strstr(config_text, "agent-report") != NULL;
 }
 
-static int install_claude(const char *helper) {
-  char *command = g_strconcat(helper, " claude", NULL);
+static int install_claude(const char *pt_bin) {
+  char *command = g_strconcat(pt_bin, " agent-report claude", NULL);
   char *path = claude_settings_path();
   char *text = NULL;
   GError *err = NULL;
@@ -265,7 +261,7 @@ static int install_claude(const char *helper) {
 
 /* Print, do not write: config.toml carries comments and ordering that no
  * generic TOML round-trip preserves, and it is the user's file. */
-static int install_codex(const char *helper) {
+static int install_codex(const char *pt_bin) {
   char *path = codex_config_path();
   char *text = NULL;
   GError *err = NULL;
@@ -280,11 +276,12 @@ static int install_codex(const char *helper) {
     return 1;
   }
   if (codex_installed(text)) {
-    printf("codex: %s already names pt-agent-report\n", path);
+    printf("codex: %s already names pt's agent-report\n", path);
   } else {
     printf("codex: add this line to %s (top level, outside any [section]):\n",
            path);
-    printf("\n    notify = [\"%s\", \"codex-notify\"]\n\n", helper);
+    printf("\n    notify = [\"%s\", \"agent-report\", \"codex-notify\"]\n\n",
+           pt_bin);
     printf("  pt does not edit config.toml itself — it is your file, comments"
            " and all.\n");
   }
@@ -320,8 +317,8 @@ static gboolean probe_codex(const char *text, const char *unused) {
   return codex_installed(text);
 }
 
-static int print_status(const char *helper) {
-  char *command = g_strconcat(helper, " claude", NULL);
+static int print_status(const char *pt_bin) {
+  char *command = g_strconcat(pt_bin, " agent-report claude", NULL);
   char *cpath = claude_settings_path();
   char *xpath = codex_config_path();
   int rc = status_line("claude:", cpath, probe_claude, command);
@@ -347,21 +344,21 @@ int pt_integration_cli(int argc, char *argv[]) {
   const char *what = argc >= 4 ? argv[3] : NULL;
   if (cmd == NULL) return usage();
 
-  char *helper = helper_path();
+  char *pt_bin = pt_binary_path();
   int rc;
   if (g_strcmp0(cmd, "status") == 0 && what == NULL) {
-    rc = print_status(helper);
+    rc = print_status(pt_bin);
   } else if (g_strcmp0(cmd, "install") == 0 && g_strcmp0(what, "claude") == 0) {
-    rc = install_claude(helper);
+    rc = install_claude(pt_bin);
   } else if (g_strcmp0(cmd, "install") == 0 && g_strcmp0(what, "codex") == 0) {
-    rc = install_codex(helper);
+    rc = install_codex(pt_bin);
   } else if (g_strcmp0(cmd, "install") == 0 && g_strcmp0(what, "all") == 0) {
-    rc = install_claude(helper);
+    rc = install_claude(pt_bin);
     printf("\n");
-    rc |= install_codex(helper);
+    rc |= install_codex(pt_bin);
   } else {
     rc = usage();
   }
-  g_free(helper);
+  g_free(pt_bin);
   return rc;
 }

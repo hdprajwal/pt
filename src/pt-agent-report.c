@@ -1,10 +1,11 @@
-/* pt-agent-report — the one program pt's agent integrations run.
- *   pt-agent-report claude         SessionStart hook JSON on stdin
- *   pt-agent-report codex-notify   notify JSON as last argv (stdin fallback)
- * Writes the report file $PT_PANE_TOKEN names. Exits 0 on "not applicable":
+/* pt agent-report — the one command pt's agent integrations run.
+ *   pt agent-report claude         SessionStart hook JSON on stdin
+ *   pt agent-report codex-notify   notify JSON as last argv (stdin fallback)
+ * Writes the report file $PT_PANE_TOKEN names. Returns 0 on "not applicable":
  * a hook that fails would break the agent it reports on, and a missing
- * report only costs one resume. Exit 2 is reserved for a write that was
- * asked for and failed, which is the only case worth debugging. */
+ * report only costs one resume. 2 is reserved for a write that was asked for
+ * and failed, which is the only case worth debugging. */
+#include "pt-agent-report.h"
 #include "pt-agent-session.h"
 #include "pt-json-read.h"
 #include <json-glib/json-glib.h>
@@ -34,8 +35,10 @@ static const char *session_ref(JsonObject *o, PtAgentKind kind) {
   return s;
 }
 
-int main(int argc, char *argv[]) {
-  const char *mode = argc >= 2 ? argv[1] : NULL;
+int pt_agent_report_cli(int argc, char *argv[]) {
+  /* argv[1] is "agent-report", so the mode is argv[2] and any payload word
+   * codex appends comes after it. */
+  const char *mode = argc >= 3 ? argv[2] : NULL;
   const char *token = g_getenv("PT_PANE_TOKEN");
   if (mode == NULL || token == NULL || *token == '\0') return 0;
 
@@ -46,7 +49,7 @@ int main(int argc, char *argv[]) {
     payload = read_stdin();
   } else if (g_strcmp0(mode, "codex-notify") == 0) {
     kind = PT_AGENT_CODEX;
-    payload = argc >= 3 ? g_strdup(argv[argc - 1]) : read_stdin();
+    payload = argc >= 4 ? g_strdup(argv[argc - 1]) : read_stdin();
   } else {
     return 0;
   }
@@ -69,7 +72,7 @@ int main(int argc, char *argv[]) {
   }
 
   /* The pid pt validates against is the agent's own. The agent spawned the
-   * shell that spawned this helper, so it is up the ancestry; when the walk
+   * shell that spawned this command, so it is up the ancestry; when the walk
    * finds nothing (sandboxing, future spawn changes), fall back to the
    * direct parent — validation will simply fail closed at save time. */
   PtAgentKind walked = PT_AGENT_NONE;
@@ -81,7 +84,7 @@ int main(int argc, char *argv[]) {
   gboolean ok = pt_agent_session_report_write(path, kind, session,
                                               cwd != NULL ? cwd : "", pid,
                                               &err);
-  if (!ok) fprintf(stderr, "pt-agent-report: %s\n",
+  if (!ok) fprintf(stderr, "pt agent-report: %s\n",
                    err != NULL ? err->message : "write failed");
   g_clear_error(&err);
   g_free(path);
