@@ -8,6 +8,8 @@
 typedef struct { GMainLoop *loop; PtTermCore *core;
                  gboolean found; int exit_status; gboolean exited;
                  char comm[64]; char title[128]; int title_count;
+                 gboolean title_from_prompt;
+                 gboolean title_valid; gsize title_bytes;
                  int osc_code; char osc_payload[128]; int osc_count;
                  char clip[256]; gsize clip_len; gboolean clip_primary;
                  int clip_count;
@@ -476,10 +478,16 @@ static void test_spawn_env(void) {
 }
 
 /* ---- exit-code title marker ---- */
-static void on_title_cb(PtTermCore *core, const char *title, gpointer user) {
+static void on_title_cb(PtTermCore *core, const char *title,
+                        gboolean from_prompt, gpointer user) {
   (void)core;
   Ctx *ctx = user;
   ctx->title_count++;
+  ctx->title_from_prompt = from_prompt;
+  /* Measured on the callback's own string: ctx->title is too short to hold a
+     truncation-boundary case, and copying it would cut a codepoint itself. */
+  ctx->title_valid = g_utf8_validate(title, -1, NULL);
+  ctx->title_bytes = strlen(title);
   g_strlcpy(ctx->title, title, sizeof(ctx->title));
 }
 
@@ -502,6 +510,60 @@ static void test_exit_marker_from_title(void) {
   g_assert_true(ctx.found);
   g_assert_cmpint(pt_term_core_last_exit(core), ==, 7);
   g_assert_cmpstr(ctx.title, ==, "proj-title");   /* marker stripped */
+  g_assert_true(ctx.title_from_prompt);            /* the shell set this one */
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx.loop);
+}
+
+/* A title with no marker came from the program in the pane, not from the
+   prompt. The braille frame is what Claude Code and Codex actually animate
+   while they work, and it has to arrive untouched: pt shows titles verbatim. */
+static void test_program_title_not_from_prompt(void) {
+  Ctx ctx = {0};
+  ctx.loop = g_main_loop_new(NULL, FALSE);
+  const char *argv[] = {"/bin/sh", "-c",
+    "printf '\\033]0;\\342\\240\\202 Claude Code\\007'; printf 'done-marker\\n'; "
+    "sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .draw = on_draw_marker, .title = on_title_cb };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  guint to = g_timeout_add_seconds(10, on_timeout, &ctx);
+  g_main_loop_run(ctx.loop);
+  g_source_remove(to);
+  g_assert_true(ctx.found);
+  g_assert_false(ctx.title_from_prompt);
+  g_assert_cmpstr(ctx.title, ==, "⠂ Claude Code");   /* verbatim, glyph and all */
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx.loop);
+}
+
+/* A title too long for the core's buffer is cut back to a character boundary.
+   The title is the pane's name now — it reaches a GtkLabel and the session
+   file — so a half-codepoint tail would be a state.json json-glib cannot read
+   back. 250 ASCII bytes then ten two-byte characters puts a codepoint across
+   the 255-byte cut: the answer must be 254 bytes, not 255. */
+static void test_long_title_cut_on_boundary(void) {
+  Ctx ctx = {0};
+  ctx.loop = g_main_loop_new(NULL, FALSE);
+  const char *argv[] = {"/bin/sh", "-c",
+    "a=aaaaaaaaaa; a=$a$a$a$a$a; a=$a$a$a$a$a; "
+    "printf '\\033]0;%s\\303\\251\\303\\251\\303\\251\\303\\251\\303\\251"
+    "\\303\\251\\303\\251\\303\\251\\303\\251\\303\\251\\007' \"$a\"; "
+    "printf 'done-marker\\n'; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  PtTermCoreCallbacks cbs = { .draw = on_draw_marker, .title = on_title_cb };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  guint to = g_timeout_add_seconds(10, on_timeout, &ctx);
+  g_main_loop_run(ctx.loop);
+  g_source_remove(to);
+  g_assert_true(ctx.found);
+  g_assert_cmpint(ctx.title_count, ==, 1);
+  g_assert_true(ctx.title_valid);
+  g_assert_cmpuint(ctx.title_bytes, ==, 254);
   pt_term_core_free(core);
   g_main_loop_unref(ctx.loop);
 }
@@ -2680,6 +2742,10 @@ int main(int argc, char *argv[]) {
                   test_running_state_cleared_on_exit);
   g_test_add_func("/termcore/spawn-env", test_spawn_env);
   g_test_add_func("/termcore/exit-marker", test_exit_marker_from_title);
+  g_test_add_func("/termcore/program-title-not-from-prompt",
+                  test_program_title_not_from_prompt);
+  g_test_add_func("/termcore/long-title-boundary",
+                  test_long_title_cut_on_boundary);
   g_test_add_func("/termcore/title-dedupe", test_title_dedupes);
   g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
   g_test_add_func("/termcore/wheel-report-batch",

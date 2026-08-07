@@ -145,8 +145,24 @@ static void effect_title_changed(GhosttyTerminal t, void *ud) {
   if (ghostty_terminal_get(t, GHOSTTY_TERMINAL_DATA_TITLE, &title) !=
       GHOSTTY_SUCCESS)
     return;
+  /* Titles longer than the buffer are cut back to a character boundary, never
+   * mid-codepoint: this string is the pane's name now, so it reaches a
+   * GtkLabel in the tab strip and is written into state.json. Invalid UTF-8
+   * there makes json-glib emit bytes it cannot read back, and an unparseable
+   * state file is moved aside at the next launch — the user loses the whole
+   * workspace layout. Ghostty's OSC buffer is 2048 bytes and it validates the
+   * title as UTF-8 before this runs, so oversized-but-valid is the real case:
+   * backing off continuation bytes lands on the lead byte of the sequence the
+   * cut fell inside. Not notify_copy, whose answer to a bad string is to
+   * refuse the whole thing: the exit marker below has to be recorded even from
+   * a title whose tail is unusable. The validate after it is the belt. */
   char buf[256];
-  size_t len = title.len < sizeof(buf) - 1 ? title.len : sizeof(buf) - 1;
+  size_t len = title.len;
+  if (len > sizeof(buf) - 1) {
+    const uint8_t *p = title.ptr + sizeof(buf) - 1;
+    while (p > title.ptr && (*p & 0xC0) == 0x80) p--;
+    len = (size_t)(p - title.ptr);
+  }
   if (len > 0) memcpy(buf, title.ptr, len);
   buf[len] = '\0';
   /* The prompt snippet prefixes the title with the last command's status:
@@ -154,17 +170,25 @@ static void effect_title_changed(GhosttyTerminal t, void *ud) {
    * Done before the callback check so the state is tracked either way. */
   int code = 0;
   const char *rest = NULL;
+  gboolean from_prompt = FALSE;
   if (pt_exit_marker_parse(buf, &code, &rest)) {
     c->last_exit = code;
     memmove(buf, rest, strlen(rest) + 1);
+    from_prompt = TRUE;
   }
+  /* Nothing invalid may go on to a GtkLabel or the session file, so a title
+   * that does not validate is dropped whole — including from last_title, which
+   * would otherwise dedupe away the next good one. The exit code is kept
+   * either way: it rides in the ASCII marker at the front, which a bad tail
+   * cannot reach. */
+  if (!g_utf8_validate(buf, -1, NULL)) return;
   /* Shells re-emit the same title every prompt; only a change is worth a
    * callback. Compared after the marker strip, so a prompt whose exit code
    * moved but whose title did not still updates last_exit above in silence. */
   if (g_strcmp0(buf, c->last_title) == 0) return;
   g_free(c->last_title);
   c->last_title = g_strdup(buf);
-  if (c->cbs.title != NULL) c->cbs.title(c, buf, c->cbs_user);
+  if (c->cbs.title != NULL) c->cbs.title(c, buf, from_prompt, c->cbs_user);
 }
 
 /* ---- foreground-command watcher ----

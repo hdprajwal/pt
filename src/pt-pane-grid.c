@@ -45,10 +45,12 @@ static void on_term_command(PtTerminal *t, const char *comm, gpointer user) {
     g_signal_emit(g, signals[SIG_COMMAND], 0, comm);
 }
 
-/* The prompt reports the previous command's exit code through the terminal
- * title, which lands the instant the prompt is redrawn — well before the 700ms
- * comm poll notices the foreground program went back to the shell. Re-emitting
- * it lets the window repaint "✗ exit 1" (and the tab dot) with no lag. */
+/* The title is the tab's name while a program owns the pane — an agent renames
+ * itself as its session goes on, and the window has no other edge to relabel
+ * on. It also carries the previous command's exit code from the prompt, which
+ * lands the instant the prompt is redrawn, well before the 700ms comm poll
+ * notices the foreground program went back to the shell; re-emitting here lets
+ * the window repaint "✗ exit 1" (and the tab dot) with no lag either. */
 static void on_term_title(PtTerminal *t, const char *title, gpointer user) {
   PtPaneGrid *g = PT_PANE_GRID(user);
   if (g->focused != NULL && g->focused->user == (gpointer)t)

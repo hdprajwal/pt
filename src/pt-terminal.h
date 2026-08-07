@@ -25,6 +25,19 @@ char *pt_terminal_current_cwd(PtTerminal *t);  /* /proc/<pid>/cwd, caller frees 
 void pt_terminal_paste(PtTerminal *t);          /* async clipboard paste */
 void pt_terminal_copy(PtTerminal *t);           /* copy selection to clipboard */
 const char *pt_terminal_last_command(PtTerminal *t);  /* fg comm; NULL before first poll */
+/* The last title a program in this pane set over OSC 0, verbatim — spinner
+ * glyphs and all. NULL when no program has set one, and again from the moment
+ * a title arrives carrying the prompt's exit-code marker, which says the shell
+ * is back at a prompt.
+ * That clearing is only as good as the prompt snippet the marker comes from
+ * (share/prompt/pt-prompt.{zsh,bash,fish}, which the README asks the user to
+ * source — it is opt-in). With it sourced this never answers with the cwd or
+ * with a name the previous program left behind. Without it nothing ever clears
+ * the value: a program that sets no title of its own (`make`) wears whatever
+ * the last one left, and under a stock Debian/Ubuntu bash or a fish whose own
+ * prompt writes an unmarked title, that leftover is the cwd.
+ * Borrowed; do not free or hold across a title change. */
+const char *pt_terminal_last_title(PtTerminal *t);
 /* The shell's own name ("zsh"), not the foreground command — derived from the
  * spawn itself (never a /proc read, which could race the child's exec). NULL
  * only while the pane has no live core: before first spawn, or after a failed

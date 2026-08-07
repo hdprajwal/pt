@@ -18,6 +18,10 @@ struct _PtTabStrip {
    * second, and a button destroyed between press and release cancels its
    * gesture — the click is silently swallowed. */
   PtRowList *tabs;
+  /* The box the row list renders into, kept so a title change can be written
+   * straight onto the labels already on screen instead of going through a
+   * rebuild. Owned by `box` — dispose unparents that and these go with it. */
+  GtkWidget *tabs_host;
   /* Probed once in init, not per rebuild: the strip rebuilds several times a
    * second and PATH does not move underneath a running window. */
   gboolean has_zed;
@@ -63,10 +67,15 @@ static gboolean snapshot_equal(gpointer ap, guint na, gpointer bp, guint nb,
   const TabSnapshot *a = ap, *b = bp;
   if (a == NULL || b == NULL || na != nb) return FALSE;
   if (a->active != b->active || a->accent != b->accent) return FALSE;
+  /* Titles are deliberately not compared. A tab is named after the title the
+   * program in it set, and a coding agent animates a spinner in that title
+   * about once a second — comparing them would report "moved" at exactly the
+   * rate this dedupe exists to keep rebuilds away from, and every close button
+   * in the strip would be destroyed between a press and its release. The set
+   * caller writes new titles onto the existing labels instead. */
   for (guint i = 0; i < na; i++) {
     if (a->tabs[i].running != b->tabs[i].running ||
-        a->tabs[i].last_exit != b->tabs[i].last_exit ||
-        g_strcmp0(a->tabs[i].title, b->tabs[i].title) != 0)
+        a->tabs[i].last_exit != b->tabs[i].last_exit)
       return FALSE;
   }
   return TRUE;
@@ -162,6 +171,8 @@ static GtkWidget *build_tab(gpointer items, guint idx, gpointer u) {
   gtk_box_append(GTK_BOX(slot), sep);
   g_object_set_data(G_OBJECT(slot), "pt-tab", row);
   g_object_set_data(G_OBJECT(slot), "pt-close", close);
+  /* Reachable from the slot so a later set can retitle this tab in place. */
+  g_object_set_data(G_OBJECT(slot), "pt-label", lbl);
 
   /* The gesture goes on the slot, not the tab: the row list carries the tab
    * index there, and the hit-test above sorts out where the press landed. */
@@ -179,12 +190,34 @@ void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
   pt_rowlist_set(s->tabs, snapshot_new(tabs, n, active, accent),
                  n > 0 ? (guint)n : 0, build_tab, snapshot_equal, s,
                  snapshot_free);
+
+  /* The one piece of state a rebuild is not allowed to carry, applied by hand.
+   * Correct either way: a rebuild built its labels from this same array, so
+   * every write below lands on text already equal to it; without one, this is
+   * the only thing that moves the titles at all. gtk_label_set_text drops a
+   * write that changes nothing, so a strip nobody is animating costs a string
+   * compare per tab and no relayout. */
+  if (s->tabs_host == NULL) return;
+  for (GtkWidget *slot = gtk_widget_get_first_child(s->tabs_host);
+       slot != NULL; slot = gtk_widget_get_next_sibling(slot)) {
+    GtkWidget *lbl = g_object_get_data(G_OBJECT(slot), "pt-label");
+    if (lbl == NULL) continue;
+    /* The row list's index, not the position: a build_row that filtered an
+     * item out would leave the two disagreeing. */
+    int idx = pt_rowlist_row_index(slot);
+    if (idx < 0 || idx >= n) continue;
+    gtk_label_set_text(GTK_LABEL(lbl),
+                       tabs[idx].title != NULL ? tabs[idx].title : "");
+  }
 }
 
 static void pt_tab_strip_dispose(GObject *obj) {
   PtTabStrip *s = PT_TAB_STRIP(obj);
   /* Rows before the row list: a tab must never outlive the list its gesture
-   * points at. */
+   * points at. The tabs box is only borrowed — `box` owns it and takes it down
+   * on the next line — so clear the pointer first, or a set arriving after this
+   * would walk freed children. Same reason the row list drops its own host. */
+  s->tabs_host = NULL;
   g_clear_pointer(&s->box, gtk_widget_unparent);
   g_clear_object(&s->tabs);
   G_OBJECT_CLASS(pt_tab_strip_parent_class)->dispose(obj);
@@ -220,9 +253,9 @@ static void pt_tab_strip_init(PtTabStrip *s) {
   /* The tabs get a box of their own: the cluster on the right is built once
    * here, and a rebuild that cleared it would destroy those buttons several
    * times a second — mid-click, given the chance. */
-  GtkWidget *tabs = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_append(GTK_BOX(s->box), tabs);
-  s->tabs = pt_rowlist_new(GTK_BOX(tabs));
+  s->tabs_host = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_box_append(GTK_BOX(s->box), s->tabs_host);
+  s->tabs = pt_rowlist_new(GTK_BOX(s->tabs_host));
 
   /* Empty expanding box so the + sits at the strip's right edge, like Zed. It
    * carries the bottom rule across the strip's empty run — see

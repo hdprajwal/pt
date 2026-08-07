@@ -16,7 +16,13 @@ typedef struct {
    * blink phase, which output pushes back to visible — belongs here. */
   void (*output)(PtTermCore *core, gpointer user);
   void (*exited)(PtTermCore *core, int status, gpointer user);
-  void (*title)(PtTermCore *core, const char *title, gpointer user);
+  /* `from_prompt` is TRUE when the title arrived behind the prompt snippet's
+   * "pt-exit:<code>;" marker — the shell set it at a prompt, not a program in
+   * the pane. The marker is already stripped from `title` and the code
+   * recorded (see pt_term_core_last_exit). Consumers that label a pane after
+   * its title need this: the prompt sets one on every single prompt. */
+  void (*title)(PtTermCore *core, const char *title, gboolean from_prompt,
+                gpointer user);
   void (*command)(PtTermCore *core, const char *comm, gpointer user);
   /* An OSC sequence the shell or an app emitted, scanned off the pty stream
    * because libghostty parses OSC but hands almost none of it back. `code` is
