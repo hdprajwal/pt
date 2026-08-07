@@ -241,17 +241,27 @@ button.pt-info-btn:hover image { color: var(--pt-text); }
 }
 
 /* ---- tab strip (28px) ---- */
+/* No border-bottom here: a child cannot erase its parent's border (the border
+   is drawn outside the parent's content box, where no child is allocated), so
+   the rule lives on the strip's children instead and the active tab clears it.
+   Everything that is not a tab carries it too, or the line breaks. */
 .pt-tabstrip {
   background-color: var(--pt-surface-alt);
-  border-bottom: 1px solid var(--pt-border);
   min-height: 28px;
   padding: 0px;
 }
+.pt-tab, .pt-tab-sep, .pt-tabstrip-filler, .pt-tab-actions {
+  border-bottom: 1px solid var(--pt-border);
+}
+/* 28 + the 1px border = 29 rendered, which is what every other bar in the
+   window comes to. The filler and the cluster restate it so a project with no
+   tabs open gets the same strip height as one with tabs. */
+.pt-tabstrip-filler, .pt-tab-actions { min-height: 28px; }
 /* NOTE: tabs are GtkBoxes, not buttons — selectors must be .pt-tab, never
  * button.pt-tab (those match nothing since the close-button refactor). */
-/* Zed-style: square full-height tabs, no gaps; the active tab drops the
- * outline and takes the terminal background so it reads as connected to the
- * content below. */
+/* Zed-style: square full-height tabs, no gaps; the active tab drops the rule
+ * beneath it and takes the terminal's own clear colour, so it reads as
+ * connected to the content below rather than as a lid on top of it. */
 .pt-tab {
   min-height: 28px; padding: 0 8px; margin-right: 0px;
   color: var(--pt-text-muted);
@@ -259,7 +269,8 @@ button.pt-info-btn:hover image { color: var(--pt-text); }
 }
 .pt-tab:hover { background-color: var(--pt-hover); }
 .pt-tab.active {
-  background-color: var(--pt-background);
+  background-color: var(--pt-terminal-clear);
+  border-bottom-color: transparent;
   box-shadow: none;
 }
 /* Full-height 1px border after every tab (see pt-tab-strip.c). */
