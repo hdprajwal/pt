@@ -35,6 +35,13 @@ typedef enum {
 } PtOsc52Mode;
 #define PT_CONFIG_OSC52_DEFAULT PT_OSC52_WRITE
 
+/* Whether the info panel may look up Claude Code's plan usage, which means
+ * sending the token Claude Code stored to Anthropic. Off, and only the user
+ * can turn it on — every other reader in that panel reads a local file, and
+ * this is the one that puts a credential on the wire. Codex needs no such key
+ * because its numbers never leave the machine. */
+#define PT_CONFIG_CLAUDE_USAGE_DEFAULT FALSE
+
 typedef struct {
   char *theme;             /* never NULL */
   int font_size;           /* terminal, points */
@@ -42,6 +49,7 @@ typedef struct {
   double ui_font_size;     /* chrome base, px */
   char *ui_font_family;    /* never NULL */
   gboolean mouse_reporting;  /* forward mouse events to tracking apps */
+  gboolean claude_usage;     /* fetch Claude Code plan usage from Anthropic */
   PtOsc52Mode osc52;         /* clipboard writes from programs (OSC 52) */
   GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
 } PtConfig;

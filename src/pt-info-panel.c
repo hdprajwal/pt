@@ -8,13 +8,35 @@
 #define PT_INFO_PANEL_WIDTH 266
 
 enum { SIG_OPEN_EDITOR, SIG_OPEN_FILES, SIG_COPY_PATH, SIG_REFRESH,
-       N_SIGNALS };
+       SIG_USAGE_ENABLE, N_SIGNALS };
 static guint signals[N_SIGNALS];
+
+/* A limit window on screen: its name and numbers on one line, its bar under
+ * them. Every one of these is built once and then shown, hidden and rewritten
+ * in place — the panel refreshes twice a second to keep the countdowns moving,
+ * and rebuilding a widget tree at that rate to redraw numbers that change once
+ * every two minutes would be pure waste. */
+typedef struct {
+  GtkWidget *row;    /* the pair: header line and bar */
+  GtkWidget *label, *pct, *reset;
+  GtkWidget *bar;
+} PtUsageBarUI;
+
+/* One per limit window the model can hold, plus the context bar at the end. */
+#define PT_INFO_BAR_COUNT (PT_USAGE_MAX_WINDOWS + 1)
 
 struct _PtInfoPanel {
   GtkWidget parent_instance;
-  GtkWidget *box;                  /* vertical: info section, git section */
+  GtkWidget *box;                  /* vertical: info, agent usage, git */
   GtkWidget *dot, *shell, *pid, *dir, *zed;
+  /* ---- agent usage ----
+   * Hidden whole while no agent is running, which is most of the time. */
+  GtkWidget *usage_sect;
+  GtkWidget *agent_name, *agent_plan, *agent_hit;
+  PtUsageBarUI bars[PT_INFO_BAR_COUNT];
+  GtkWidget *usage_src;            /* where the numbers came from, and when */
+  GtkWidget *usage_err_row, *usage_err;
+  GtkWidget *usage_optin_row, *usage_optin_btn;
   /* The git section's header row IS the branch line: icon, branch, count,
    * ahead/behind — or the icon and `not_repo` when there is no repo. */
   GtkWidget *branch_icon, *branch, *count, *ab, *not_repo;
@@ -47,6 +69,11 @@ static void on_files_clicked(GtkButton *btn, gpointer user) {
 static void on_copy_clicked(GtkButton *btn, gpointer user) {
   (void)btn;
   g_signal_emit(PT_INFO_PANEL(user), signals[SIG_COPY_PATH], 0);
+}
+
+static void on_usage_enable_clicked(GtkButton *btn, gpointer user) {
+  (void)btn;
+  g_signal_emit(PT_INFO_PANEL(user), signals[SIG_USAGE_ENABLE], 0);
 }
 
 /* ---------- file list ---------- */
@@ -182,6 +209,107 @@ void pt_info_panel_set_has_zed(PtInfoPanel *ip, gboolean has_zed) {
   gtk_widget_set_visible(ip->zed, has_zed);
 }
 
+/* ---------- agent usage ---------- */
+/* Only when it moves: GTK invalidates a widget's style on every add and every
+ * remove, whether or not the class was there, and this runs on the panel's
+ * twice-a-second refresh. Same reasoning as pt_accent_set_class. */
+static void set_class(GtkWidget *w, const char *cls, gboolean on) {
+  if (gtk_widget_has_css_class(w, cls) == on) return;
+  if (on) gtk_widget_add_css_class(w, cls);
+  else    gtk_widget_remove_css_class(w, cls);
+}
+
+/* The bar's colour is the only thing that says "this is getting tight", so it
+ * is the one piece of state here not spelled in words. Below three quarters it
+ * carries the project's accent, like the dot at the top of the panel. */
+static void bar_severity(GtkWidget *bar, double pct, int accent) {
+  set_class(bar, "crit", pct >= 90.0);
+  set_class(bar, "warn", pct >= 75.0 && pct < 90.0);
+  pt_accent_set_class(bar, accent);
+}
+
+/* `resets_at` 0 means the source did not say when the window turns over, which
+ * is not the same as "it resets now" — the countdown is simply left off. */
+static void set_bar(PtUsageBarUI *b, const char *label, double pct,
+                    gint64 resets_at, gint64 now, int accent) {
+  gtk_widget_set_visible(b->row, TRUE);
+  gtk_label_set_text(GTK_LABEL(b->label), label);
+
+  char buf[16];
+  g_snprintf(buf, sizeof(buf), "%.0f%%", pct);
+  gtk_label_set_text(GTK_LABEL(b->pct), buf);
+
+  char *left = resets_at > 0 ? pt_usage_format_duration(resets_at - now) : NULL;
+  gtk_label_set_text(GTK_LABEL(b->reset), left != NULL ? left : "");
+  gtk_widget_set_visible(b->reset, left != NULL);
+
+  /* The row is three short pieces on a 266px rail, so the sentence the issue
+   * asks for lives in the tooltip and the row keeps the numbers. */
+  char *tip = left != NULL
+                  ? g_strdup_printf("%s: %.0f%% used, resets in %s", label,
+                                    pct, left)
+                  : g_strdup_printf("%s: %.0f%% used", label, pct);
+  gtk_widget_set_tooltip_text(b->row, tip);
+  g_free(tip);
+  g_free(left);
+
+  gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(b->bar), pct / 100.0);
+  bar_severity(b->bar, pct, accent);
+}
+
+void pt_info_panel_set_usage(PtInfoPanel *ip, const PtAgentView *v,
+                             gint64 now) {
+  /* No agent: the section goes away entirely rather than sitting there empty.
+   * Note this is driven by the view's kind alone — the monitor keeps the last
+   * reading across the moment an agent disappears, so a tab switch hides this
+   * and shows it again with its numbers intact instead of blanking them. */
+  gtk_widget_set_visible(ip->usage_sect, v->kind != PT_AGENT_NONE);
+  if (v->kind == PT_AGENT_NONE) return;
+
+  gtk_label_set_text(GTK_LABEL(ip->agent_name), pt_agent_label(v->kind));
+
+  const PtUsage *u = v->usage;
+  const char *plan = u != NULL ? u->plan : "";
+  gtk_label_set_text(GTK_LABEL(ip->agent_plan), plan);
+  gtk_widget_set_visible(ip->agent_plan, plan[0] != '\0');
+  gtk_widget_set_visible(ip->agent_hit, u != NULL && u->limit_hit);
+
+  /* The opt-in and the bars are mutually exclusive: until the user says yes
+   * there is nothing to draw, because nothing has been fetched. */
+  gtk_widget_set_visible(ip->usage_optin_row, v->needs_optin);
+
+  int shown = 0;
+  if (u != NULL && !v->needs_optin) {
+    for (int i = 0; i < u->n_windows && shown < PT_INFO_BAR_COUNT; i++)
+      set_bar(&ip->bars[shown++], u->windows[i].label, u->windows[i].percent,
+              u->windows[i].resets_at, now, ip->accent);
+    int ctx = pt_usage_context_percent(u);
+    if (ctx >= 0 && shown < PT_INFO_BAR_COUNT)
+      set_bar(&ip->bars[shown++], "context", ctx, 0, now, ip->accent);
+  }
+  for (int i = shown; i < PT_INFO_BAR_COUNT; i++)
+    gtk_widget_set_visible(ip->bars[i].row, FALSE);
+
+  /* The source line doubles as the staleness line: a number with no age on it
+   * looks live whether or not it is. */
+  char *age = u != NULL ? pt_usage_format_age(u->fetched_at, now) : NULL;
+  char *src = NULL;
+  if (v->busy && u == NULL)   src = g_strdup("checking…");
+  else if (u != NULL)         src = g_strdup_printf("%s · %s", u->source,
+                                                    age != NULL ? age : "");
+  gtk_label_set_text(GTK_LABEL(ip->usage_src), src != NULL ? src : "");
+  gtk_widget_set_visible(ip->usage_src, src != NULL && !v->needs_optin);
+  g_free(src);
+  g_free(age);
+
+  /* Under the numbers, not instead of them: a failed refresh does not make a
+   * two-minute-old reading wrong, so the old bars stay and this explains why
+   * they are not moving. */
+  gboolean has_err = v->error != NULL && !v->needs_optin;
+  gtk_widget_set_visible(ip->usage_err_row, has_err);
+  if (has_err) gtk_label_set_text(GTK_LABEL(ip->usage_err), v->error);
+}
+
 /* ---------- GObject ---------- */
 static void pt_info_panel_dispose(GObject *obj) {
   PtInfoPanel *ip = PT_INFO_PANEL(obj);
@@ -230,6 +358,8 @@ static void pt_info_panel_class_init(PtInfoPanelClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_REFRESH] = g_signal_new("refresh", PT_TYPE_INFO_PANEL,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[SIG_USAGE_ENABLE] = g_signal_new("usage-enable", PT_TYPE_INFO_PANEL,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static GtkWidget *section_head(const char *text) {
@@ -259,6 +389,110 @@ static GtkWidget *action_button(PtInfoPanel *ip, const char *icon,
   gtk_widget_add_css_class(b, "pt-info-btn");
   g_signal_connect(b, "clicked", cb, ip);
   return b;
+}
+
+/* One limit window's two lines, built empty. Hidden until something fills it,
+ * so the panel is never briefly a stack of blank bars. */
+static void build_usage_bar(PtUsageBarUI *b, GtkWidget *parent) {
+  b->row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  gtk_widget_add_css_class(b->row, "pt-usage-row");
+  gtk_widget_set_visible(b->row, FALSE);
+
+  GtkWidget *head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  b->label = gtk_label_new("");
+  gtk_widget_add_css_class(b->label, "pt-usage-name");
+  gtk_label_set_xalign(GTK_LABEL(b->label), 0.0f);
+  gtk_label_set_ellipsize(GTK_LABEL(b->label), PANGO_ELLIPSIZE_END);
+  gtk_widget_set_hexpand(b->label, TRUE);
+  gtk_box_append(GTK_BOX(head), b->label);
+  b->pct = gtk_label_new("");
+  gtk_widget_add_css_class(b->pct, "pt-usage-pct");
+  gtk_box_append(GTK_BOX(head), b->pct);
+  b->reset = gtk_label_new("");
+  gtk_widget_add_css_class(b->reset, "pt-usage-reset");
+  gtk_box_append(GTK_BOX(head), b->reset);
+  gtk_box_append(GTK_BOX(b->row), head);
+
+  /* GtkProgressBar rather than a hand-measured box: its trough and progress
+   * nodes take a flat 3px style directly, and the fraction is the one number
+   * this has to express. */
+  b->bar = gtk_progress_bar_new();
+  gtk_widget_add_css_class(b->bar, "pt-usage-bar");
+  gtk_box_append(GTK_BOX(b->row), b->bar);
+  gtk_box_append(GTK_BOX(parent), b->row);
+}
+
+static void build_usage_section(PtInfoPanel *ip) {
+  ip->usage_sect = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_add_css_class(ip->usage_sect, "pt-info-sect");
+  gtk_widget_add_css_class(ip->usage_sect, "agent");
+  gtk_widget_set_visible(ip->usage_sect, FALSE);
+  gtk_box_append(GTK_BOX(ip->usage_sect), section_head("AGENT USAGE"));
+
+  /* The agent's name is the section's identity line: no dot, because the one
+   * at the top of the panel already speaks for the pane. */
+  GtkWidget *ident = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  ip->agent_name = gtk_label_new("");
+  gtk_widget_add_css_class(ip->agent_name, "pt-usage-agent");
+  gtk_label_set_xalign(GTK_LABEL(ip->agent_name), 0.0f);
+  gtk_box_append(GTK_BOX(ident), ip->agent_name);
+  ip->agent_plan = gtk_label_new("");
+  gtk_widget_add_css_class(ip->agent_plan, "pt-usage-plan");
+  gtk_widget_set_valign(ip->agent_plan, GTK_ALIGN_CENTER);
+  gtk_box_append(GTK_BOX(ident), ip->agent_plan);
+  ip->agent_hit = gtk_label_new("limit reached");
+  gtk_widget_add_css_class(ip->agent_hit, "pt-usage-hit");
+  gtk_widget_set_hexpand(ip->agent_hit, TRUE);
+  gtk_widget_set_halign(ip->agent_hit, GTK_ALIGN_END);
+  gtk_widget_set_visible(ip->agent_hit, FALSE);
+  gtk_box_append(GTK_BOX(ident), ip->agent_hit);
+  gtk_box_append(GTK_BOX(ip->usage_sect), ident);
+
+  GtkWidget *bars = gtk_box_new(GTK_ORIENTATION_VERTICAL, 7);
+  gtk_widget_add_css_class(bars, "pt-usage-bars");
+  for (int i = 0; i < PT_INFO_BAR_COUNT; i++)
+    build_usage_bar(&ip->bars[i], bars);
+  gtk_box_append(GTK_BOX(ip->usage_sect), bars);
+
+  ip->usage_src = gtk_label_new("");
+  gtk_widget_add_css_class(ip->usage_src, "pt-usage-src");
+  gtk_label_set_xalign(GTK_LABEL(ip->usage_src), 0.0f);
+  gtk_label_set_ellipsize(GTK_LABEL(ip->usage_src), PANGO_ELLIPSIZE_END);
+  gtk_widget_set_visible(ip->usage_src, FALSE);
+  gtk_box_append(GTK_BOX(ip->usage_sect), ip->usage_src);
+
+  /* Error and retry, kept as one row so the button can never appear without
+   * the reason for it. */
+  ip->usage_err_row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+  gtk_widget_set_visible(ip->usage_err_row, FALSE);
+  ip->usage_err = gtk_label_new("");
+  gtk_widget_add_css_class(ip->usage_err, "pt-usage-err");
+  gtk_label_set_xalign(GTK_LABEL(ip->usage_err), 0.0f);
+  gtk_label_set_wrap(GTK_LABEL(ip->usage_err), TRUE);
+  gtk_box_append(GTK_BOX(ip->usage_err_row), ip->usage_err);
+  GtkWidget *retry = action_button(ip, NULL, "Retry",
+                                   G_CALLBACK(on_refresh_clicked));
+  gtk_widget_set_halign(retry, GTK_ALIGN_START);
+  gtk_box_append(GTK_BOX(ip->usage_err_row), retry);
+  gtk_box_append(GTK_BOX(ip->usage_sect), ip->usage_err_row);
+
+  /* The opt-in. Claude Code stores no usage locally, so these numbers can only
+   * come from a request to Anthropic carrying the user's token — which is
+   * theirs to allow, so it says what it will do and waits to be pressed. */
+  ip->usage_optin_row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+  gtk_widget_set_visible(ip->usage_optin_row, FALSE);
+  GtkWidget *why = gtk_label_new(
+      "Reads your plan limits from Anthropic, using the login Claude Code "
+      "already stored.");
+  gtk_widget_add_css_class(why, "pt-usage-why");
+  gtk_label_set_xalign(GTK_LABEL(why), 0.0f);
+  gtk_label_set_wrap(GTK_LABEL(why), TRUE);
+  gtk_box_append(GTK_BOX(ip->usage_optin_row), why);
+  ip->usage_optin_btn = action_button(ip, NULL, "Turn on",
+                                      G_CALLBACK(on_usage_enable_clicked));
+  gtk_widget_set_halign(ip->usage_optin_btn, GTK_ALIGN_START);
+  gtk_box_append(GTK_BOX(ip->usage_optin_row), ip->usage_optin_btn);
+  gtk_box_append(GTK_BOX(ip->usage_sect), ip->usage_optin_row);
 }
 
 static void pt_info_panel_init(PtInfoPanel *ip) {
@@ -323,6 +557,13 @@ static void pt_info_panel_init(PtInfoPanel *ip) {
                                G_CALLBACK(on_copy_clicked)));
   gtk_box_append(GTK_BOX(info), actions);
   gtk_box_append(GTK_BOX(ip->box), info);
+
+  /* ---- AGENT USAGE ----
+   * Above git and below the pane's identity: it is about what is running in
+   * the pane, and the git section wants the bottom of the rail because its
+   * file list is the one thing here that scrolls. */
+  build_usage_section(ip);
+  gtk_box_append(GTK_BOX(ip->box), ip->usage_sect);
 
   /* ---- GIT ---- */
   GtkWidget *git = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);

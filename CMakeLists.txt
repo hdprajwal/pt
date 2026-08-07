@@ -51,16 +51,21 @@ add_custom_command(
           src/icons/scalable/actions/pt-git-branch-symbolic.svg
   COMMENT "Compiling GResources")
 
-add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-command-palette.c src/pt-settings.c src/pt-overlay.c src/pt-rowlist.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c ${PT_RES_C})
+add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-command-palette.c src/pt-settings.c src/pt-overlay.c src/pt-rowlist.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c src/pt-agent-monitor.c ${PT_RES_C})
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 
 add_library(ptcore STATIC
+  src/pt-agent.c
   src/pt-block.c
+  src/pt-claude-usage.c
+  src/pt-codex-usage.c
   src/pt-config.c
   src/pt-fuzzy.c
   src/pt-git-parse.c
+  src/pt-json-read.c
   src/pt-link.c
   src/pt-path.c
+  src/pt-usage.c
   src/pt-status-parse.c
   src/pt-style-css.c
   src/pt-split-tree.c
@@ -138,6 +143,22 @@ add_test(NAME osc-scan COMMAND test-osc-scan)
 add_executable(test-workspace tests/test-workspace.c)
 target_link_libraries(test-workspace PRIVATE ptcore)
 add_test(NAME workspace COMMAND test-workspace)
+
+add_executable(test-agent tests/test-agent.c)
+target_link_libraries(test-agent PRIVATE ptcore)
+add_test(NAME agent COMMAND test-agent)
+
+add_executable(test-usage tests/test-usage.c)
+target_link_libraries(test-usage PRIVATE ptcore)
+add_test(NAME usage COMMAND test-usage)
+
+add_executable(test-codex-usage tests/test-codex-usage.c)
+target_link_libraries(test-codex-usage PRIVATE ptcore)
+add_test(NAME codex-usage COMMAND test-codex-usage)
+
+add_executable(test-claude-usage tests/test-claude-usage.c)
+target_link_libraries(test-claude-usage PRIVATE ptcore)
+add_test(NAME claude-usage COMMAND test-claude-usage)
 
 add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
 target_include_directories(test-keymap PRIVATE src)
