@@ -90,8 +90,11 @@ windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
 }
 .pt-project-row .pt-branch.dirty { color: var(--pt-warn); }
 /* The fallback line two, for a project with no branch to name. Quieter than a
-   branch: it is there to keep the row whole, not to be read first. */
-.pt-project-row .pt-branch.path { color: var(--pt-text-ghost); }
+   branch — it is there to keep the row whole, not to be read first — but not
+   invisible: text-ghost measured 1.9:1 against the rail on screen, where a
+   clean branch sits at 3.1:1. text-dim lands between them, and is what the
+   shell count on the same row already uses. */
+.pt-project-row .pt-branch.path { color: var(--pt-text-dim); }
 .pt-shell-count {
   font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-dim);
 }
@@ -318,7 +321,7 @@ button.pt-tab-panel, button.pt-tab-panel image {
 button.pt-tab-panel:hover { background-color: var(--pt-hover); }
 button.pt-tab-panel:hover, button.pt-tab-panel:hover image { color: var(--pt-text); }
 
-/* ---- status bar (34px) ---- */
+/* ---- status bar (28px) ---- */
 .pt-statusbar {
   background-color: var(--pt-surface);
   border-top: 1px solid var(--pt-border);

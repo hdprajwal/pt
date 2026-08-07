@@ -2070,7 +2070,7 @@ static void pt_window_init(PtWindow *w) {
   gtk_box_append(GTK_BOX(main_col), w->statusline);
   gtk_box_append(GTK_BOX(body), main_col);
 
-  /* Right rail, mirror of the sidebar: full window height, hidden until ⌃I or
+  /* Right rail, mirror of the sidebar: full body height, hidden until ⌃I or
    * the tab strip's panel button, and never persisted — every launch starts
    * without it. */
   w->infopanel = pt_info_panel_new();
