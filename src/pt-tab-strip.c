@@ -8,7 +8,11 @@ static guint signals[N_SIGNALS];
 
 struct _PtTabStrip {
   GtkWidget parent_instance;
-  GtkWidget *box;          /* horizontal: tabs, spacer, +, zed, panel */
+  /* horizontal, three children: the rowlist's tabs box, an expanding filler,
+   * and the actions box holding +, zed and panel. The buttons sit inside that
+   * third box rather than in `box` directly, so a tab rebuild — which clears
+   * the rowlist's box — can never destroy them mid-click. */
+  GtkWidget *box;
   /* The tabs. The row list owns the last-rendered snapshot and skips a rebuild
    * when nothing in it moved: output-driven refreshes fire several times a
    * second, and a button destroyed between press and release cancels its
@@ -207,8 +211,10 @@ static void pt_tab_strip_init(PtTabStrip *s) {
   char *zed = g_find_program_in_path("zed");
   s->has_zed = (zed != NULL);
   g_free(zed);
+  /* Fill, not centre (GTK_ALIGN_FILL is the default): the strip's bottom rule
+   * lives on the tabs now, so a centred box would float them mid-strip and
+   * draw the line in the wrong place. The buttons keep their own valign. */
   s->box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_valign(s->box, GTK_ALIGN_CENTER);
   gtk_widget_set_parent(s->box, GTK_WIDGET(s));
 
   /* The tabs get a box of their own: the cluster on the right is built once
@@ -218,17 +224,27 @@ static void pt_tab_strip_init(PtTabStrip *s) {
   gtk_box_append(GTK_BOX(s->box), tabs);
   s->tabs = pt_rowlist_new(GTK_BOX(tabs));
 
-  /* Empty expanding box so the + sits at the strip's right edge, like Zed. */
+  /* Empty expanding box so the + sits at the strip's right edge, like Zed. It
+   * carries the bottom rule across the strip's empty run — see
+   * `.pt-tabstrip-filler` in style.css. */
   GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_set_hexpand(spacer, TRUE);
+  gtk_widget_add_css_class(spacer, "pt-tabstrip-filler");
   gtk_box_append(GTK_BOX(s->box), spacer);
+
+  /* One box for the right-hand cluster, so the bottom rule can run across it
+   * too: with the border on the strip's children rather than the strip, every
+   * child that is not a tab has to carry it or the line breaks. */
+  GtkWidget *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_add_css_class(actions, "pt-tab-actions");
+  gtk_box_append(GTK_BOX(s->box), actions);
 
   GtkWidget *plus = gtk_button_new_with_label("+");
   gtk_widget_add_css_class(plus, "flat");
   gtk_widget_add_css_class(plus, "pt-tab-new");
   gtk_widget_set_valign(plus, GTK_ALIGN_CENTER);
   g_signal_connect(plus, "clicked", G_CALLBACK(on_new_clicked), s);
-  gtk_box_append(GTK_BOX(s->box), plus);
+  gtk_box_append(GTK_BOX(actions), plus);
 
   /* Opens the active project in Zed. Omitted entirely when zed is not on
    * PATH — a button that cannot do anything is worse than no button. */
@@ -239,7 +255,7 @@ static void pt_tab_strip_init(PtTabStrip *s) {
     gtk_widget_set_valign(zed_btn, GTK_ALIGN_CENTER);
     gtk_widget_set_tooltip_text(zed_btn, "Open in Zed");
     g_signal_connect(zed_btn, "clicked", G_CALLBACK(on_zed_clicked), s);
-    gtk_box_append(GTK_BOX(s->box), zed_btn);
+    gtk_box_append(GTK_BOX(actions), zed_btn);
   }
 
   /* Last in the cluster: toggles the info panel, same as ⌃I. Unlike the Zed
@@ -250,7 +266,7 @@ static void pt_tab_strip_init(PtTabStrip *s) {
   gtk_widget_set_valign(panel, GTK_ALIGN_CENTER);
   gtk_widget_set_tooltip_text(panel, "Toggle info panel  ^I");
   g_signal_connect(panel, "clicked", G_CALLBACK(on_panel_clicked), s);
-  gtk_box_append(GTK_BOX(s->box), panel);
+  gtk_box_append(GTK_BOX(actions), panel);
 }
 
 GtkWidget *pt_tab_strip_new(void) {

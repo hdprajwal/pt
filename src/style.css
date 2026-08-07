@@ -72,10 +72,11 @@ windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
 }
 .pt-search-glyph { color: var(--pt-text-dim); font-size: var(--pt-fs-md); padding-right: 6px; }
 
+/* Two lines: name + live state, then branch. No min-height — the two lines and
+   the padding set it (≈44px), and a floor would only fight them. */
 .pt-project-row {
-  min-height: 30px;
-  margin: 0 8px 1px 8px;
-  padding: 0 10px;
+  margin: 0 8px 2px 8px;
+  padding: 5px 10px 6px 10px;
   color: var(--pt-text);
 }
 .pt-project-row:hover { background-color: var(--pt-hover); }
@@ -88,6 +89,12 @@ windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
   font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-faint);
 }
 .pt-project-row .pt-branch.dirty { color: var(--pt-warn); }
+/* The fallback line two, for a project with no branch to name. Quieter than a
+   branch — it is there to keep the row whole, not to be read first — but not
+   invisible: text-ghost measured 1.9:1 against the rail on screen, where a
+   clean branch sits at 3.1:1. text-dim lands between them, and is what the
+   shell count on the same row already uses. */
+.pt-project-row .pt-branch.path { color: var(--pt-text-dim); }
 .pt-shell-count {
   font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-dim);
 }
@@ -210,9 +217,11 @@ button.pt-info-btn:hover image { color: var(--pt-text); }
   color: var(--pt-text-ghost); margin-bottom: 8px;
 }
 
-/* ---- project bar (46px) ---- */
+/* ---- project bar (28px; spans the full window width) ---- */
+/* surface-alt, the tab strip's colour: the bar is the window's header now, so
+   it should read as chrome rather than as an extension of the terminal. */
 .pt-projectbar {
-  background-color: var(--pt-background);
+  background-color: var(--pt-surface-alt);
   border-bottom: 1px solid var(--pt-border);
   min-height: 28px;
   padding: 0 14px;
@@ -235,17 +244,31 @@ button.pt-info-btn:hover image { color: var(--pt-text); }
 }
 
 /* ---- tab strip (28px) ---- */
+/* No border-bottom here: a child cannot erase its parent's border (the border
+   is drawn outside the parent's content box, where no child is allocated), so
+   the rule lives on the strip's children instead and the active tab clears it.
+   Everything that is not a tab carries it too, or the line breaks. */
 .pt-tabstrip {
   background-color: var(--pt-surface-alt);
-  border-bottom: 1px solid var(--pt-border);
   min-height: 28px;
   padding: 0px;
 }
+.pt-tab, .pt-tab-sep, .pt-tabstrip-filler, .pt-tab-actions {
+  border-bottom: 1px solid var(--pt-border);
+}
+/* 28 + the 1px border = 29 rendered, which is what every other bar in the
+   window comes to. The filler and the cluster restate it so a project with no
+   tabs open gets the same strip height as one with tabs. border-radius: 0
+   undoes the global `* { border-radius: 2px }`: with left/right border widths
+   at 0, nothing fills the rounded corner arcs, so the bottom rule would be
+   nibbled away at each end of each box — exactly the break these carry it to
+   prevent. */
+.pt-tabstrip-filler, .pt-tab-actions { min-height: 28px; border-radius: 0; }
 /* NOTE: tabs are GtkBoxes, not buttons — selectors must be .pt-tab, never
  * button.pt-tab (those match nothing since the close-button refactor). */
-/* Zed-style: square full-height tabs, no gaps; the active tab drops the
- * outline and takes the terminal background so it reads as connected to the
- * content below. */
+/* Zed-style: square full-height tabs, no gaps; the active tab drops the rule
+ * beneath it and takes the terminal's own clear colour, so it reads as
+ * connected to the content below rather than as a lid on top of it. */
 .pt-tab {
   min-height: 28px; padding: 0 8px; margin-right: 0px;
   color: var(--pt-text-muted);
@@ -253,7 +276,8 @@ button.pt-info-btn:hover image { color: var(--pt-text); }
 }
 .pt-tab:hover { background-color: var(--pt-hover); }
 .pt-tab.active {
-  background-color: var(--pt-background);
+  background-color: var(--pt-terminal-clear);
+  border-bottom-color: transparent;
   box-shadow: none;
 }
 /* Full-height 1px border after every tab (see pt-tab-strip.c). */
@@ -297,7 +321,7 @@ button.pt-tab-panel, button.pt-tab-panel image {
 button.pt-tab-panel:hover { background-color: var(--pt-hover); }
 button.pt-tab-panel:hover, button.pt-tab-panel:hover image { color: var(--pt-text); }
 
-/* ---- status bar (34px) ---- */
+/* ---- status bar (28px) ---- */
 .pt-statusbar {
   background-color: var(--pt-surface);
   border-top: 1px solid var(--pt-border);
@@ -413,13 +437,6 @@ paned > separator:hover { background-color: var(--pt-ok); }
 .pt-project-row.active.pt-a4 { box-shadow: inset 2px 0 0 var(--pt-accent-4); }
 .pt-project-row.active.pt-a5 { box-shadow: inset 2px 0 0 var(--pt-accent-5); }
 
-/* Where a dragged row will land. Last in the file on purpose: while a drag is
- * in flight this rule takes the active row's accent edge, because the marker
- * has to be the loudest thing on the rail. A box-shadow, not a border — a
- * border would grow the row by 2px and make the whole list jump. */
-.pt-project-row.pt-drop-above { box-shadow: inset 0 2px 0 var(--pt-text); }
-.pt-project-row.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }
-
 .pt-chip.pt-a0 { color: var(--pt-accent-0); background-color: var(--pt-accent-0-chip); }
 .pt-chip.pt-a1 { color: var(--pt-accent-1); background-color: var(--pt-accent-1-chip); }
 .pt-chip.pt-a2 { color: var(--pt-accent-2); background-color: var(--pt-accent-2-chip); }
@@ -440,3 +457,15 @@ paned > separator:hover { background-color: var(--pt-ok); }
 .pt-run-count.pt-a3 { color: var(--pt-accent-3); }
 .pt-run-count.pt-a4 { color: var(--pt-accent-4); }
 .pt-run-count.pt-a5 { color: var(--pt-accent-5); }
+
+/* Where a dragged row will land. These have to outrank the active row's accent
+   edge, which is (0,3,0) — .pt-project-row.active.pt-aN — so an equally
+   specific .active variant follows each base rule. Source order alone is not
+   enough: GTK4 implements standard CSS specificity, and without these the
+   marker vanishes on exactly the row the user is most likely to drop onto.
+   A box-shadow, not a border — a border would grow the row by 2px and make
+   the whole list jump. */
+.pt-project-row.pt-drop-above { box-shadow: inset 0 2px 0 var(--pt-text); }
+.pt-project-row.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }
+.pt-project-row.active.pt-drop-above { box-shadow: inset 0 2px 0 var(--pt-text); }
+.pt-project-row.active.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }
