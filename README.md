@@ -86,6 +86,35 @@ reports each command's exit code back to the app and prints an identity line
 If a repository with a huge untracked tree makes the prompt slow, set
 `PT_PROMPT_GIT_UNTRACKED=no` to count only tracked changes.
 
+## Agent resume
+
+Close pt with `claude` or `codex` running in a pane and the next launch brings
+the conversation back: the restored pane types `claude --resume <id>` for
+itself. It is the same session, not a fresh one that happens to sit in the same
+directory.
+
+The agent has to tell pt which session it is in, so each one needs a small
+integration installed once:
+
+```sh
+pt integration install claude   # adds a SessionStart hook to ~/.claude/settings.json
+pt integration install codex    # prints a notify line for ~/.codex/config.toml
+pt integration status           # says which of the two are in place
+```
+
+Claude Code's settings are JSON, so pt edits them in place — additively, and it
+refuses rather than rewrite a file it did not parse. codex's `config.toml`
+carries comments and ordering that no TOML round-trip preserves, so pt prints
+the `notify = [...]` line and you paste it yourself. Both helpers are inert
+outside a pt pane, and `install` a second time changes nothing.
+
+Set `resume-agents = false` to keep the ids but always restore plain shells.
+
+What is saved lives in `~/.local/state/pt/agent-sessions/`: one small JSON file
+per pane holding the agent's session id and working directory, swept after a
+week. That is a list of what you were working on and where — treat the
+directory like shell history.
+
 ## Projects
 
 The sidebar lists your projects. Click a row to switch to it, or press
@@ -258,13 +287,15 @@ ui-font-family = IBM Plex Sans
 mouse-reporting = true
 osc52 = write
 claude-usage = false
+resume-agents = true
 ```
 
-Those eight keys plus `app-*` color-token overrides (e.g.
+Those nine keys plus `app-*` color-token overrides (e.g.
 `app-background = #101010`) are the entire config surface. Booleans accept
 `true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`. `osc52` takes `write`, `ask`
 or `off` (see above). `claude-usage` is the info panel's Claude Code opt-in
 (see below); the Turn on button writes it here, and setting it back to `false`
-turns the lookups off again. Custom themes go in
+turns the lookups off again. `resume-agents` is on by default and restores a
+pane's agent conversation (see above). Custom themes go in
 `~/.config/pt/themes/<name>`; both the config and the active theme are watched
 and applied live.
