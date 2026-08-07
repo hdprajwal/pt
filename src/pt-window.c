@@ -690,9 +690,14 @@ static void on_grid_emptied(PtPaneGrid *g, gpointer user) {
  * and a pane full of agents is otherwise a row of tabs all reading "claude".
  * Titles go through verbatim, spinner glyph included: that the glyph moves is
  * how the tab says the agent is still going.
- * Prompt-set titles never reach last_title and it is dropped at every prompt,
- * so this can answer with neither the cwd nor a name the previous program left
- * behind. NULL only before the first comm poll of a pane that set no title. */
+ * Prompt-set titles never reach last_title, and it is dropped at every prompt
+ * that carries the snippet's exit marker — so with share/prompt/pt-prompt.*
+ * sourced (opt-in, per the README) this answers with neither the cwd nor a
+ * name the previous program left behind. Without the snippet nothing clears
+ * last_title, and a tab can keep wearing the title of a program that has
+ * already finished; an accepted tradeoff, and one the snippet fixes.
+ * NULL when the tab has no focused pane at all, and before the first comm poll
+ * of a pane that set no title. */
 static const char *tab_label_for(PtTabUI *t) {
   PtTerminal *foc = pt_pane_grid_focused_terminal(PT_PANE_GRID(t->grid));
   if (foc == NULL) return NULL;
@@ -737,18 +742,24 @@ static void on_grid_command(PtPaneGrid *g, const char *comm, gpointer user) {
  * would leave the bar stale until the next poll. Goes through find_grid_tab
  * rather than the active tab so a background tab relabels too: an agent left
  * running in another tab is exactly the one whose name is worth watching.
- * Both renderers dedupe internally, so refreshing on every title is cheap. */
+ * The statusline stops one step short of that, at the active tab. It speaks
+ * for focused_terminal(w) — the active tab's focused pane — so a title from a
+ * background tab of the same project recomputes an identical bar, and not for
+ * free: the refresh scans the grid for its last non-empty row and parses it
+ * for progress. An agent spins a braille frame through the title about once a
+ * second, per tab. The renderers do dedupe their output, but that scan is
+ * upstream of the dedupe. */
 static void on_grid_title(PtPaneGrid *g, const char *title, gpointer user) {
   (void)title;
   PtWindow *w = PT_WINDOW(user);
   PtTabUI *t = find_grid_tab(w, g);
   if (t == NULL) return;
   set_tab_label(t);
-  if (pt_workspace_tab_project(w->ws, t->id) ==
-      pt_workspace_active_project(w->ws)) {
-    refresh_statusline(w);
-    refresh_tabstrip(w);
-  }
+  if (pt_workspace_tab_project(w->ws, t->id) !=
+      pt_workspace_active_project(w->ws))
+    return;
+  refresh_tabstrip(w);
+  if (t == active_tab(active_project(w))) refresh_statusline(w);
 }
 
 /* PT_BRANCH has to be right for a project's *first* shells, but the git

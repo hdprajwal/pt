@@ -1101,6 +1101,10 @@ static void restart_shell(PtTerminal *t) {
   t->start_cwd = cwd != NULL ? cwd : g_strdup(g_get_home_dir());
   link_cache_reset(t);       /* the new core's serial starts over */
   url_clear(t);              /* and its grid holds none of the old text */
+  /* Same reason: the agent that owned the dead session is not running in the
+   * fresh shell, so its title must not stay on the tab until something else
+   * sets one. */
+  g_clear_pointer(&t->last_title, g_free);
   ensure_core(t);
   gtk_widget_queue_allocate(GTK_WIDGET(t)); /* re-sizes the new core */
   gtk_widget_queue_draw(GTK_WIDGET(t));
