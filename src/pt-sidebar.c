@@ -1,6 +1,7 @@
 #include "pt-sidebar.h"
 #include "pt-fuzzy.h"
 #include "pt-accent.h"
+#include "pt-path.h"
 
 /* The sidebar is a fixed-width rail, not a min-width one. */
 #define PT_SIDEBAR_WIDTH 266
@@ -217,7 +218,7 @@ static void rebuild_rows(PtSidebar *sb) {
     if (!row_matches(sb, i)) continue;
     const PtSidebarRow *r = &sb->rows[i];
 
-    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_add_css_class(row, "pt-project-row");
     /* The row carries no dot any more; the accent survives as the active
      * row's inset left edge (see .pt-project-row.active.pt-aN). */
@@ -226,37 +227,25 @@ static void rebuild_rows(PtSidebar *sb) {
     /* Original project index — the window never sees filtered positions. */
     g_object_set_data(G_OBJECT(row), "pt-index", GINT_TO_POINTER(i));
 
+    /* Two lines: the name and the row's live state, then the branch. Giving
+     * the branch a line of its own is the point of the shape — it no longer
+     * competes with the name for width, so a long one renders in full. */
+    GtkWidget *col = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_hexpand(col, TRUE);
+    gtk_box_append(GTK_BOX(row), col);
+
+    GtkWidget *l1 = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(col), l1);
+
     GtkWidget *name = gtk_label_new(r->name);
     gtk_label_set_xalign(GTK_LABEL(name), 0.0f);
     gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
     gtk_widget_add_css_class(name, "pt-name");
-    gtk_box_append(GTK_BOX(row), name);
-
-    char chip[192];
-    const char *btxt = NULL;
-    gboolean dirty = FALSE;
-    if (r->missing) {
-      btxt = "[missing]";
-      dirty = TRUE;
-    } else if (r->is_repo) {
-      /* Same formatter as the project bar's chip — one spelling, one place. */
-      pt_git_format_chip(&r->git, chip, sizeof chip);
-      btxt = chip;
-      dirty = r->git.changed > 0;
-    }
-    if (btxt != NULL) {
-      GtkWidget *branch = gtk_label_new(btxt);
-      gtk_label_set_xalign(GTK_LABEL(branch), 0.0f);
-      gtk_label_set_ellipsize(GTK_LABEL(branch), PANGO_ELLIPSIZE_END);
-      gtk_widget_set_hexpand(branch, FALSE);
-      gtk_widget_add_css_class(branch, "pt-branch");
-      if (dirty) gtk_widget_add_css_class(branch, "dirty");
-      gtk_box_append(GTK_BOX(row), branch);
-    }
+    gtk_box_append(GTK_BOX(l1), name);
 
     GtkWidget *spacer = gtk_label_new(NULL);
     gtk_widget_set_hexpand(spacer, TRUE);
-    gtk_box_append(GTK_BOX(row), spacer);
+    gtk_box_append(GTK_BOX(l1), spacer);
 
     char ctxt[32];
     GtkWidget *count;
@@ -281,7 +270,7 @@ static void rebuild_rows(PtSidebar *sb) {
     g_object_set_data(G_OBJECT(rm), "pt-index", GINT_TO_POINTER(i));
     g_signal_connect(rm, "clicked", G_CALLBACK(on_remove_clicked), sb);
 
-    /* The × sits ON TOP of the count in one end-of-row slot: the count shows
+    /* The × sits ON TOP of the count in one end-of-line slot: the count shows
      * at rest, and on row hover the × fades in over it (the count fades out
      * via .pt-project-row:hover — see style.css). No side-by-side gap. */
     GtkWidget *slot = gtk_overlay_new();
@@ -289,7 +278,41 @@ static void rebuild_rows(PtSidebar *sb) {
     gtk_overlay_add_overlay(GTK_OVERLAY(slot), rm);
     gtk_widget_set_halign(slot, GTK_ALIGN_END);
     gtk_widget_set_valign(slot, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(row), slot);
+    gtk_box_append(GTK_BOX(l1), slot);
+
+    /* Line two always says something, so every row is one height: the branch
+     * chip for a repo, and the path for anything else — which is what
+     * identifies a project that has no branch to show. */
+    char chip[192];
+    char abbrev[512];
+    const char *sub = NULL;
+    gboolean dirty = FALSE;
+    if (r->missing) {
+      sub = "[missing]";
+      dirty = TRUE;
+    } else if (r->is_repo) {
+      /* Same formatter as the project bar's chip — one spelling, one place.
+       * It writes an empty string when there is no branch to name, and an
+       * empty line two would halve the row. */
+      pt_git_format_chip(&r->git, chip, sizeof chip);
+      if (chip[0] != '\0') {
+        sub = chip;
+        dirty = r->git.changed > 0;
+      }
+    }
+    if (sub == NULL) {
+      pt_path_home_abbrev(r->path, g_get_home_dir(), abbrev, sizeof abbrev);
+      sub = abbrev;
+    }
+
+    GtkWidget *branch = gtk_label_new(sub);
+    gtk_label_set_xalign(GTK_LABEL(branch), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(branch), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(branch, TRUE);
+    gtk_widget_add_css_class(branch, "pt-branch");
+    if (dirty) gtk_widget_add_css_class(branch, "dirty");
+    if (sub == abbrev) gtk_widget_add_css_class(branch, "path");
+    gtk_box_append(GTK_BOX(col), branch);
 
     GtkGesture *click = gtk_gesture_click_new();
     g_signal_connect(click, "pressed", G_CALLBACK(on_row_pressed), sb);

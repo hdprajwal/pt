@@ -72,10 +72,11 @@ windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
 }
 .pt-search-glyph { color: var(--pt-text-dim); font-size: var(--pt-fs-md); padding-right: 6px; }
 
+/* Two lines: name + live state, then branch. No min-height — the two lines and
+   the padding set it (≈44px), and a floor would only fight them. */
 .pt-project-row {
-  min-height: 30px;
-  margin: 0 8px 1px 8px;
-  padding: 0 10px;
+  margin: 0 8px 2px 8px;
+  padding: 5px 10px 6px 10px;
   color: var(--pt-text);
 }
 .pt-project-row:hover { background-color: var(--pt-hover); }
@@ -88,6 +89,9 @@ windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
   font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-faint);
 }
 .pt-project-row .pt-branch.dirty { color: var(--pt-warn); }
+/* The fallback line two, for a project with no branch to name. Quieter than a
+   branch: it is there to keep the row whole, not to be read first. */
+.pt-project-row .pt-branch.path { color: var(--pt-text-ghost); }
 .pt-shell-count {
   font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-dim);
 }
