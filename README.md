@@ -307,3 +307,21 @@ turns the lookups off again. `resume-agents` is on by default and restores a
 pane's agent conversation (see above). Custom themes go in
 `~/.config/pt/themes/<name>`; both the config and the active theme are watched
 and applied live.
+
+## Built on
+
+pt stands on other people's open source work:
+
+- [ghostty](https://github.com/ghostty-org/ghostty)'s `libghostty-vt` is the
+  core of the terminal emulation, and its behavior is the reference for how
+  pt handles the terminal protocol.
+- [GTK4](https://gtk.org) and
+  [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/) draw the UI,
+  with GLib/GIO and json-glib underneath.
+- [Zig](https://ziglang.org) builds `libghostty-vt`, and
+  [curl](https://curl.se) does the network call for the Claude usage lookup.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The `lib-vt` code fetched from ghostty at build
+time is MIT too, and its notice covers the release binaries built from it.

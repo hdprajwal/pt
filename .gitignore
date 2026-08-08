@@ -1,5 +1,6 @@
 docs/
 .superpowers/
+.claude/
 build/
 build-release/
 release-local.sh
