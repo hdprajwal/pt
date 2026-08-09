@@ -179,6 +179,16 @@ void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count);
  * A query is dropped in silence — no callback, and not one byte to the pty. */
 void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode);
 
+/* ---- scrollback (process-wide) ----
+ *
+ * How much history a pane keeps, in bytes rather than lines: that is what
+ * libghostty's max_scrollback counts (terminal/Screen.zig), whatever its C
+ * header calls it. Defaults to PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT, ghostty's
+ * own scrollback-limit. Read when a core spawns, so a change reaches the panes
+ * opened after it and leaves the running ones alone — as in ghostty, where
+ * scrollback-limit is a new-surface setting too. */
+void pt_term_core_set_scrollback_limit(gsize bytes);
+
 /* ---- color scheme (CSI ? 996 n, mode 2031) ----
  *
  * What pt tells programs about the light/dark question, so a TUI can pick a

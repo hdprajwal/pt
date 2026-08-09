@@ -15,6 +15,9 @@ static void test_defaults(void) {
   /* Clipboard writes from programs ship on: a yank on the far end of an ssh
    * session is meant to land on the local clipboard without setup. */
   g_assert_cmpint(c->osc52, ==, PT_OSC52_WRITE);
+  /* Bytes of history per pane, ghostty's 10MB — a pane that keeps a session's
+   * worth of output, not the ~10KB the old hardcoded number bought. */
+  g_assert_cmpint(c->scrollback_limit, ==, 10000000);
   pt_config_free(c);
 }
 
@@ -141,6 +144,53 @@ static void test_rewrite_osc52(void) {
   g_assert_nonnull(strstr(out, "# tail\n"));
   g_free(out);
   pt_config_free(c);
+}
+
+static void test_parse_scrollback_limit(void) {
+  /* Absent: ghostty's 10MB, in bytes. */
+  PtConfig *c = pt_config_parse("");
+  g_assert_cmpint(c->scrollback_limit, ==, PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT);
+  pt_config_free(c);
+
+  c = pt_config_parse("scrollback-limit = 123456\n");
+  g_assert_cmpint(c->scrollback_limit, ==, 123456);
+  pt_config_free(c);
+
+  /* Zero is a real setting — a pane that keeps no history at all — so it has
+   * to survive the parse rather than read as "unset". */
+  c = pt_config_parse("scrollback-limit = 0\n");
+  g_assert_cmpint(c->scrollback_limit, ==, 0);
+  pt_config_free(c);
+
+  /* Junk and out-of-range keep the default, like every other number here. */
+  const char *bad[] = {
+    "scrollback-limit = junk\n",
+    "scrollback-limit = -5\n",
+    "scrollback-limit = 10MB\n",
+    "scrollback-limit = 99999999999999\n",   /* overflows int when narrowed */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
+    PtConfig *b = pt_config_parse(bad[i]);
+    g_assert_cmpint(b->scrollback_limit, ==,
+                    PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT);
+    pt_config_free(b);
+  }
+
+  /* It takes part in copy/equal and the rewrite like the rest. */
+  PtConfig *a = pt_config_parse("scrollback-limit = 2000000\n");
+  PtConfig *b = pt_config_copy(a);
+  g_assert_cmpint(b->scrollback_limit, ==, 2000000);
+  g_assert_true(pt_config_equal(a, b));
+  b->scrollback_limit = 3000000;
+  g_assert_false(pt_config_equal(a, b));
+  char *out = pt_config_rewrite("theme = pt-dark\n", a);
+  g_assert_nonnull(strstr(out, "scrollback-limit = 2000000\n"));
+  PtConfig *back = pt_config_parse(out);
+  g_assert_true(pt_config_equal(a, back));
+  g_free(out);
+  pt_config_free(a);
+  pt_config_free(b);
+  pt_config_free(back);
 }
 
 static void test_parse(void) {
@@ -305,6 +355,7 @@ int main(void) {
   test_parse_resume_agents();
   test_parse_osc52();
   test_rewrite_osc52();
+  test_parse_scrollback_limit();
   test_parse_out_of_range_font_size();
   test_parse_ui_font_size_not_a_number();
   test_copy_equal();

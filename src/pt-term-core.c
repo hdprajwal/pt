@@ -83,6 +83,10 @@ struct PtTermCore {
 #define PT_CORE_PAD_X 20
 #define PT_CORE_PAD_Y 18
 
+/* Bytes of history a fresh core is built with; see
+ * pt_term_core_set_scrollback_limit. */
+static gsize default_scrollback = PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT;
+
 /* ---- pty write (non-blocking best effort, as in ghostling) ---- */
 static void pty_write_raw(int fd, const char *buf, size_t len) {
   while (len > 0) {
@@ -833,8 +837,11 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   /* Before the spawn: the child is handed this as $PT_PANE_TOKEN. */
   c->pane_token = pt_agent_session_token_new();
 
+  /* max_scrollback is a byte budget, not a line count — the header's wording
+   * is wrong, terminal/Screen.zig is not — so this is 10MB by default, the
+   * same number ghostty's scrollback-limit carries. */
   GhosttyTerminalOptions opts = { .cols = cols, .rows = rows,
-                                  .max_scrollback = 10000 };
+                                  .max_scrollback = default_scrollback };
   if (ghostty_terminal_new(NULL, &c->terminal, opts) != GHOSTTY_SUCCESS ||
       ghostty_render_state_new(NULL, &c->render_state) != GHOSTTY_SUCCESS ||
       ghostty_key_encoder_new(NULL, &c->key_encoder) != GHOSTTY_SUCCESS ||
@@ -900,6 +907,10 @@ void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
 
 void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode) {
   c->osc52 = mode;
+}
+
+void pt_term_core_set_scrollback_limit(gsize bytes) {
+  default_scrollback = bytes;
 }
 
 void pt_term_core_set_color_scheme(PtTermCore *c, gboolean dark) {

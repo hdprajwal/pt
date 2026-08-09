@@ -47,12 +47,22 @@ typedef enum {
  * shell). On: the whole point of saving the id is getting the session back. */
 #define PT_CONFIG_RESUME_AGENTS_DEFAULT TRUE
 
+/* How much history a pane keeps, in *bytes*. Not lines, whatever the C header
+ * calls the field: libghostty's max_scrollback is a byte budget
+ * (terminal/Screen.zig, "the amount of scrollback to keep in bytes"), rounded
+ * up to a page. The default mirrors ghostty's own `scrollback-limit`
+ * (config/Config.zig), 10MB. Read when a pane spawns, so — again as in
+ * ghostty — a change reaches panes opened after it and leaves the ones already
+ * running with the limit they were built with. */
+#define PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT 10000000
+
 typedef struct {
   char *theme;             /* never NULL */
   int font_size;           /* terminal, points */
   char *font_family;       /* never NULL */
   double ui_font_size;     /* chrome base, px */
   char *ui_font_family;    /* never NULL */
+  int scrollback_limit;    /* history a pane keeps, bytes */
   gboolean mouse_reporting;  /* forward mouse events to tracking apps */
   gboolean claude_usage;     /* fetch Claude Code plan usage from Anthropic */
   gboolean resume_agents;    /* resume a restored pane's agent session */

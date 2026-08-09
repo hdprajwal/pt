@@ -296,15 +296,19 @@ mouse-reporting = true
 osc52 = write
 claude-usage = false
 resume-agents = true
+scrollback-limit = 10000000
 ```
 
-Those nine keys plus `app-*` color-token overrides (e.g.
+Those ten keys plus `app-*` color-token overrides (e.g.
 `app-background = #101010`) are the entire config surface. Booleans accept
 `true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`. `osc52` takes `write`, `ask`
 or `off` (see above). `claude-usage` is the info panel's Claude Code opt-in
 (see below); the Turn on button writes it here, and setting it back to `false`
 turns the lookups off again. `resume-agents` is on by default and restores a
-pane's agent conversation (see above). Custom themes go in
+pane's agent conversation (see above). `scrollback-limit` is how much history
+one pane keeps, in bytes rather than lines — ghostty's key, its semantics and
+its 10MB default — and it is read when a pane spawns, so a change applies to
+panes opened after it. Custom themes go in
 `~/.config/pt/themes/<name>`; both the config and the active theme are watched
 and applied live.
 
