@@ -168,15 +168,22 @@ static void on_drag_end(GtkDragSource *src, GdkDrag *drag, gboolean del,
   }
 }
 
-static GdkDragAction on_drop_enter(GtkDropTarget *dt, double x, double y,
-                                   gpointer user) {
+/* enter and motion both, like the strip's — though the marker here is decided
+ * once per row, motion is where a refused drag stays refused: GtkDropTarget's
+ * default ::motion handler answers with the target's configured actions, so
+ * with only ::enter connected a foreign drag (a tab — its payload is a bare
+ * int too) gets the accepting cursor back on the first pointer move. The
+ * drag_from guard is what tells the two apart: only this sidebar's own drag
+ * has a row lifted. */
+static GdkDragAction on_drop_motion(GtkDropTarget *dt, double x, double y,
+                                    gpointer user) {
   (void)x; (void)y;
   PtSidebar *sb = user;
   int idx = row_index(GTK_EVENT_CONTROLLER(dt));
   if (sb->drag_from < 0 || idx == sb->drag_from) return 0;
   /* A drop lands the dragged row in this row's slot, so the marker goes on the
    * edge it will arrive from: below when it is heading down the list, above
-   * when it is heading up. */
+   * when it is heading up. Re-adding the class per motion is a no-op. */
   gtk_widget_add_css_class(gtk_event_controller_get_widget(
       GTK_EVENT_CONTROLLER(dt)),
       idx > sb->drag_from ? "pt-drop-below" : "pt-drop-above");
@@ -197,7 +204,9 @@ static gboolean on_drop(GtkDropTarget *dt, const GValue *value, double x,
   if (!G_VALUE_HOLDS_INT(value)) return FALSE;
   int from = g_value_get_int(value);
   int to = row_index(GTK_EVENT_CONTROLLER(dt));
-  if (from < 0 || from >= sb->n_rows || from == to) return FALSE;
+  /* Only the drag this sidebar started — the same guard the motion handler
+   * applies, for the drop a broken cursor hint could still deliver. */
+  if (from < 0 || from != sb->drag_from || from == to) return FALSE;
   sb->drop_from = from;
   sb->drop_to = to;
   return TRUE;
@@ -334,7 +343,8 @@ static void rebuild_rows(PtSidebar *sb) {
       gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(src));
 
       GtkDropTarget *dst = gtk_drop_target_new(G_TYPE_INT, GDK_ACTION_MOVE);
-      g_signal_connect(dst, "enter", G_CALLBACK(on_drop_enter), sb);
+      g_signal_connect(dst, "enter", G_CALLBACK(on_drop_motion), sb);
+      g_signal_connect(dst, "motion", G_CALLBACK(on_drop_motion), sb);
       g_signal_connect(dst, "leave", G_CALLBACK(on_drop_leave), sb);
       g_signal_connect(dst, "drop", G_CALLBACK(on_drop), sb);
       gtk_widget_add_controller(row, GTK_EVENT_CONTROLLER(dst));

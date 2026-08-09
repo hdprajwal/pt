@@ -51,6 +51,14 @@ PtWsId pt_workspace_add_tab(PtWorkspace *ws, PtWsId project);
  * meaning what it meant, the active tab included. new_index past the end
  * clamps to the end. */
 void   pt_workspace_move_tab(PtWorkspace *ws, PtWsId tab, guint new_index);
+/* The same reorder, addressed by ids alone: `tab` lands beside `dest` — before
+ * it, or after it when `after`. This is the drop shape — a drag decided over a
+ * render that may have gone stale, so both ends are ids and the positions are
+ * resolved here, against the order as it is now. Either id dead, the two in
+ * different projects, or a resolved position that is no move at all: FALSE,
+ * nothing changes. TRUE means the order moved. */
+gboolean pt_workspace_move_tab_beside(PtWorkspace *ws, PtWsId tab,
+                                      PtWsId dest, gboolean after);
 /* Active-tab selection mirrors remove_project: the successor slides in, the
  * last falls back to the new last, a non-active removal changes nothing, an
  * empty project has no active tab. */

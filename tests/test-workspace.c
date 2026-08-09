@@ -351,6 +351,76 @@ static void test_move_tab_matches_array(void) {
   }
 }
 
+/* The drop shape: both ends are ids and the positions are resolved when the
+ * move runs, not when the drop was aimed. */
+static void test_move_tab_beside(void) {
+  PtWorkspace *ws = pt_workspace_new();
+  PtWsId p = pt_workspace_add_project(ws, "p", "/tmp", -1);
+  PtWsId a = pt_workspace_add_tab(ws, p);
+  PtWsId b = pt_workspace_add_tab(ws, p);
+  PtWsId c = pt_workspace_add_tab(ws, p);
+  PtWsId d = pt_workspace_add_tab(ws, p);
+
+  /* Before and after, across the lift in both directions: the same slots
+   * move_tab reaches by index. */
+  g_assert_true(pt_workspace_move_tab_beside(ws, a, c, FALSE));  /* b a c d */
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 0), ==, b);
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 1), ==, a);
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 2), ==, c);
+  g_assert_true(pt_workspace_move_tab_beside(ws, a, d, TRUE));   /* b c d a */
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 3), ==, a);
+  g_assert_true(pt_workspace_move_tab_beside(ws, a, b, FALSE));  /* a b c d */
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 0), ==, a);
+
+  /* Every spelling of "where it already is" is a no-move: before the next,
+   * after the previous, beside itself. */
+  g_assert_false(pt_workspace_move_tab_beside(ws, b, c, FALSE));
+  g_assert_false(pt_workspace_move_tab_beside(ws, b, a, TRUE));
+  g_assert_false(pt_workspace_move_tab_beside(ws, b, b, TRUE));
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 1), ==, b);
+  pt_workspace_free(ws);
+}
+
+/* The regression the id shape exists for: a drop is decided against rows
+ * frozen at drag-begin, and the workspace mutates before it lands. */
+static void test_move_tab_beside_stale_drop(void) {
+  PtWorkspace *ws = pt_workspace_new();
+  PtWsId p = pt_workspace_add_project(ws, "p", "/tmp", -1);
+  PtWsId q = pt_workspace_add_project(ws, "q", "/tmp", -1);
+  PtWsId a = pt_workspace_add_tab(ws, p);
+  PtWsId b = pt_workspace_add_tab(ws, p);
+  PtWsId c = pt_workspace_add_tab(ws, p);
+  PtWsId d = pt_workspace_add_tab(ws, p);
+  PtWsId o = pt_workspace_add_tab(ws, q);
+
+  /* "a after c" was aimed while b was alive; b's shell exits before the drop
+   * lands. The ids still put a beside c — index math would have hit d. */
+  pt_workspace_remove_tab(ws, b);                                /* a c d */
+  g_assert_true(pt_workspace_move_tab_beside(ws, a, c, TRUE));   /* c a d */
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 0), ==, c);
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 1), ==, a);
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 2), ==, d);
+
+  /* The active project switched mid-drag (⌥⇥ stays live during one): the move
+   * still runs in the dragged tab's own project, and never crosses into
+   * another's. */
+  pt_workspace_set_active_project(ws, q);
+  g_assert_true(pt_workspace_move_tab_beside(ws, a, d, TRUE));   /* c d a */
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 2), ==, a);
+  g_assert_false(pt_workspace_move_tab_beside(ws, a, o, FALSE));
+  g_assert_cmpuint(pt_workspace_tab_at(ws, q, 0), ==, o);
+  g_assert_cmpuint(pt_workspace_tab_count(ws, q), ==, 1);
+  g_assert_cmpuint(pt_workspace_tab_count(ws, p), ==, 3);
+
+  /* Either end closed mid-drag: a dead id resolves to a no-op. */
+  pt_workspace_remove_tab(ws, d);                                /* c a */
+  g_assert_false(pt_workspace_move_tab_beside(ws, a, d, FALSE));
+  g_assert_false(pt_workspace_move_tab_beside(ws, d, a, FALSE));
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 0), ==, c);
+  g_assert_cmpuint(pt_workspace_tab_at(ws, p, 1), ==, a);
+  pt_workspace_free(ws);
+}
+
 static void test_active_tab_is_per_project(void) {
   PtWorkspace *ws = pt_workspace_new();
   PtWsId p1 = pt_workspace_add_project(ws, "p1", "/tmp", -1);
@@ -447,6 +517,9 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/workspace/move-tab", test_move_tab);
   g_test_add_func("/workspace/move-tab-matches-array",
                   test_move_tab_matches_array);
+  g_test_add_func("/workspace/move-tab-beside", test_move_tab_beside);
+  g_test_add_func("/workspace/move-tab-beside-stale-drop",
+                  test_move_tab_beside_stale_drop);
   g_test_add_func("/workspace/active-tab-is-per-project",
                   test_active_tab_is_per_project);
   g_test_add_func("/workspace/set-active-rejects-wrong-ids",

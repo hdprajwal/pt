@@ -466,11 +466,12 @@ static void refresh_tabstrip(PtWindow *w) {
    * this returns, and nothing here can free a title in between. */
   PtTabInfo *infos = g_new0(PtTabInfo, n);
   for (int i = 0; i < n; i++) {
-    PtTabUI *t = pt_workspace_get_data(
-        w->ws, pt_workspace_tab_at(w->ws, p->id, (guint)i));
+    PtWsId id = pt_workspace_tab_at(w->ws, p->id, (guint)i);
+    PtTabUI *t = pt_workspace_get_data(w->ws, id);
     PtPaneGrid *grid = PT_PANE_GRID(t->grid);
     PtTerminal *foc = pt_pane_grid_focused_terminal(grid);
     infos[i].title = t->title;
+    infos[i].id = id;
     infos[i].running = pt_pane_grid_any_running(grid);
     infos[i].last_exit = foc != NULL ? pt_terminal_last_exit(foc) : -1;
   }
@@ -1491,18 +1492,21 @@ static void on_tab_close(PtTabStrip *s, int idx, gpointer user) {
 /* Same shape as on_project_moved one level down: the strip renders the
  * workspace order and does not own it, so a drop is one model move plus a save.
  * The active tab and ⌥⇥ both follow along on their own — one is an id, the
- * other walks the workspace order. */
-static void on_tab_moved(PtTabStrip *s, int from, int to, gpointer user) {
+ * other walks the workspace order.
+ *
+ * Ids and not indices, resolved in the workspace call: the strip's rows are
+ * frozen for the length of a drag, and the workspace does not hold still under
+ * them — a shell can exit, and the still-live ⌥⇥ capture controller can switch
+ * the active project. An index taken from the frozen rows would then move the
+ * wrong tab, or the wrong project's; the ids keep naming what the user saw
+ * (the move lands in the dragged tab's own project even if it is no longer the
+ * active one), and a tab closed mid-drag resolves to a no-op. */
+static void on_tab_moved(PtTabStrip *s, guint tab, guint dest, gboolean after,
+                         gpointer user) {
   (void)s;
   PtWindow *w = PT_WINDOW(user);
   if (w->ws == NULL) return;
-  PtProjectUI *p = active_project(w);
-  if (p == NULL) return;
-  int n = (int)pt_workspace_tab_count(w->ws, p->id);
-  if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
-  pt_workspace_move_tab(w->ws,
-                        pt_workspace_tab_at(w->ws, p->id, (guint)from),
-                        (guint)to);
+  if (!pt_workspace_move_tab_beside(w->ws, tab, dest, after)) return;
   refresh_tabstrip(w);
   mark_dirty(w);
 }

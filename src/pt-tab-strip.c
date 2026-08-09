@@ -27,10 +27,20 @@ struct _PtTabStrip {
   /* Probed once in init, not per rebuild: the strip rebuilds several times a
    * second and PATH does not move underneath a running window. */
   gboolean has_zed;
-  gboolean dragging;       /* a tab drag is in flight (see set_tabs) */
-  int drag_from;           /* tab being dragged, -1 when idle */
-  int drop_from, drop_to;  /* move a drop asked for, -1 for none yet */
-  TabSnapshot *pending;    /* newest data a drag held back, NULL for none */
+  /* Both freezes park refreshes in `pending` instead of rebuilding: a rebuild
+   * mid-drag destroys the very widget GTK is dragging, and one mid-press
+   * destroys the slot whose release would have selected (a widget destroyed
+   * between press and release never finishes its gesture — the same hazard the
+   * snapshot dedupe exists for, forced open by any run-state flip elsewhere in
+   * the strip). */
+  gboolean pressed;        /* a press is riding some slot's click gesture */
+  int drag_from;           /* row the drag lifted, -1 when idle. The row, not
+                            * the tab: it positions the drop marks, which live
+                            * on widgets the freeze holds in place. */
+  guint drag_id;           /* the dragged tab's PtWsId, 0 when idle */
+  guint drop_id;           /* tab the drop landed on, 0 for none yet */
+  gboolean drop_after;     /* …on its right half */
+  TabSnapshot *pending;    /* newest data a freeze held back, NULL for none */
 };
 
 G_DEFINE_FINAL_TYPE(PtTabStrip, pt_tab_strip, GTK_TYPE_WIDGET)
@@ -78,13 +88,35 @@ static gboolean snapshot_equal(gpointer ap, guint na, gpointer bp, guint nb,
    * about once a second — comparing them would report "moved" at exactly the
    * rate this dedupe exists to keep rebuilds away from, and every close button
    * in the strip would be destroyed between a press and its release. The set
-   * caller writes new titles onto the existing labels instead. */
+   * caller writes new titles onto the existing labels instead. Ids are: they
+   * are what says a tab was closed-and-another-opened or reordered when every
+   * count and flag happens to match. */
   for (guint i = 0; i < na; i++) {
-    if (a->tabs[i].running != b->tabs[i].running ||
+    if (a->tabs[i].id != b->tabs[i].id ||
+        a->tabs[i].running != b->tabs[i].running ||
         a->tabs[i].last_exit != b->tabs[i].last_exit)
       return FALSE;
   }
   return TRUE;
+}
+
+/* ---------- rendering, and the freezes that defer it ---------- */
+static GtkWidget *build_tab(gpointer items, guint idx, gpointer u);
+
+/* One rebuild, from a snapshot this takes ownership of. */
+static void render_tabs(PtTabStrip *s, TabSnapshot *snap) {
+  pt_rowlist_set(s->tabs, snap, snap->n > 0 ? (guint)snap->n : 0, build_tab,
+                 snapshot_equal, s, snapshot_free);
+}
+
+/* Draw what a freeze held back, unless something still holds one. Callers on
+ * a slot's own gesture read everything they need off the slot first: the
+ * render destroys it. */
+static void render_pending(PtTabStrip *s) {
+  if (s->pending == NULL || s->pressed || s->drag_from >= 0) return;
+  TabSnapshot *snap = s->pending;
+  s->pending = NULL;
+  render_tabs(s, snap);
 }
 
 /* ---------- callbacks ---------- */
@@ -102,7 +134,7 @@ static gboolean snapshot_equal(gpointer ap, guint na, gpointer bp, guint nb,
  * rather than acted on. */
 static void on_tab_pressed(GtkGestureClick *g, int n, double x, double y,
                            gpointer user) {
-  (void)n; (void)user;
+  (void)n;
   GtkWidget *slot = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
   GtkWidget *tab = g_object_get_data(G_OBJECT(slot), "pt-tab");
   GtkWidget *close = g_object_get_data(G_OBJECT(slot), "pt-close");
@@ -114,6 +146,11 @@ static void on_tab_pressed(GtkGestureClick *g, int n, double x, double y,
   g_object_set_data(G_OBJECT(g), "pt-armed", GINT_TO_POINTER(on_tab));
   g_object_set_data(G_OBJECT(g), "pt-press-x", GINT_TO_POINTER((int)x));
   g_object_set_data(G_OBJECT(g), "pt-press-y", GINT_TO_POINTER((int)y));
+  /* Freeze rebuilds until this press resolves, wherever in the slot it landed
+   * (the × needs its widget alive through the click too). Without this, any
+   * other pane's command starting or finishing between press and release
+   * rebuilds the strip and eats the click. */
+  PT_TAB_STRIP(user)->pressed = TRUE;
 }
 
 /* Release, not press, exactly as the sidebar's rows do it: selecting on press
@@ -125,20 +162,39 @@ static void on_tab_pressed(GtkGestureClick *g, int n, double x, double y,
 static void on_tab_released(GtkGestureClick *g, int n, double x, double y,
                             gpointer user) {
   (void)n;
+  PtTabStrip *s = PT_TAB_STRIP(user);
   GtkWidget *slot = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
-  if (!GPOINTER_TO_INT(g_object_get_data(G_OBJECT(g), "pt-armed"))) return;
+  gboolean armed =
+      GPOINTER_TO_INT(g_object_get_data(G_OBJECT(g), "pt-armed")) != 0;
   /* A drag that never started still ends up here: GtkDragSource ignores motion
    * for the first 100ms of a press (MIN_TIME_TO_DND), so a quick flick crosses
    * the drag threshold without ever beginning a drag. Measure the travel with
    * GTK's own threshold and let that release go, otherwise an abandoned drag
    * switches tab. */
-  if (gtk_drag_check_threshold(
-          slot, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(g), "pt-press-x")),
-          GPOINTER_TO_INT(g_object_get_data(G_OBJECT(g), "pt-press-y")),
-          (int)x, (int)y))
-    return;
-  g_signal_emit(PT_TAB_STRIP(user), signals[SIG_SELECTED], 0,
-                pt_rowlist_row_index(slot));
+  gboolean travelled = gtk_drag_check_threshold(
+      slot, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(g), "pt-press-x")),
+      GPOINTER_TO_INT(g_object_get_data(G_OBJECT(g), "pt-press-y")),
+      (int)x, (int)y);
+  int idx = pt_rowlist_row_index(slot);
+  /* Before the emit as well as the early returns: the press freeze lifts on
+   * every way a release can go, and the selection lands on a strip already
+   * showing current data. `slot` may not survive the render. */
+  s->pressed = FALSE;
+  render_pending(s);
+  if (!armed || travelled) return;
+  g_signal_emit(s, signals[SIG_SELECTED], 0, idx);
+}
+
+/* A recognised drag lands here, not in "released": gtk_drag_source_drag_begin()
+ * resets the slot's controllers, which cancels this gesture's sequence. So do
+ * a broken grab and the slot's teardown. Only lift the press freeze — drawing
+ * `pending` from a cancel would destroy the very widgets a starting drag is
+ * lifting, whichever order GTK fires the two in. The drag freeze (or, for the
+ * dragless cancels, the next refresh) picks the parked snapshot up. */
+static void on_tab_press_cancel(GtkGesture *g, GdkEventSequence *seq,
+                                gpointer user) {
+  (void)g; (void)seq;
+  PT_TAB_STRIP(user)->pressed = FALSE;
 }
 
 static void on_tab_close_clicked(GtkButton *btn, gpointer user) {
@@ -162,14 +218,6 @@ static void on_panel_clicked(GtkButton *btn, gpointer user) {
 }
 
 /* ---------- drag to reorder ---------- */
-static GtkWidget *build_tab(gpointer items, guint idx, gpointer u);
-
-/* One rebuild, from a snapshot this takes ownership of. */
-static void render_tabs(PtTabStrip *s, TabSnapshot *snap) {
-  pt_rowlist_set(s->tabs, snap, snap->n > 0 ? (guint)snap->n : 0, build_tab,
-                 snapshot_equal, s, snapshot_free);
-}
-
 /* The drop marks ride the tab itself, not the slot: the slot also holds the
  * separator, and a marker drawn across that would sit in the next tab's gutter. */
 static GtkWidget *slot_tab(GtkWidget *slot) {
@@ -187,11 +235,12 @@ static void clear_drop_marks(PtTabStrip *s) {
   }
 }
 
-/* Where the dragged tab would land if it were dropped at `x` on this slot, in
- * the index space pt_workspace_move_tab speaks: the half of the tab the pointer
- * is in says before or after it, and the steal that precedes the insert shifts
- * everything past the dragged tab down one. -1 when that is where it already
- * is, which is not a move. */
+/* Where the dragged tab would land if it were dropped at `x` on this slot,
+ * among the rows as shown: the half of the tab the pointer is in says before
+ * or after it, and the steal that precedes the insert shifts everything past
+ * the dragged tab down one. -1 when that is where it already is, which is not
+ * a move — no mark, no drop. Display space only: the drop itself is emitted as
+ * ids and re-resolved against the workspace, which a frozen strip may trail. */
 static int drop_target_index(PtTabStrip *s, GtkWidget *slot, double x,
                              gboolean *after) {
   int idx = pt_rowlist_row_index(slot);
@@ -219,9 +268,13 @@ static void on_drag_begin(GtkDragSource *src, GdkDrag *drag, gpointer user) {
   (void)drag;
   PtTabStrip *s = user;
   GtkWidget *slot = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(src));
-  s->dragging = TRUE;
   s->drag_from = pt_rowlist_row_index(slot);
-  s->drop_from = s->drop_to = -1;
+  /* The id, not the position, is what the drop will report: the workspace can
+   * mutate mid-drag (a shell exits, ⌥⇥ switches project — its capture
+   * controller stays live) while the freeze pins these rows, and by then the
+   * position names the wrong tab, or the wrong project's. */
+  s->drag_id = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(slot), "pt-ws-id"));
+  s->drop_id = 0;
   GdkPaintable *icon = gtk_widget_paintable_new(slot_tab(slot));
   gtk_drag_source_set_icon(src, icon,
       GPOINTER_TO_INT(g_object_get_data(G_OBJECT(src), "pt-hot-x")),
@@ -239,23 +292,19 @@ static void on_drag_end(GtkDragSource *src, GdkDrag *drag, gboolean del,
   /* A GtkDragSource keeps itself alive until the drag ends, so this can arrive
    * after the strip took its tabs down (the window closing mid-drag). */
   if (s->tabs_host == NULL) return;
-  s->dragging = FALSE;
   s->drag_from = -1;
   clear_drop_marks(s);
-  int from = s->drop_from, to = s->drop_to;
-  s->drop_from = s->drop_to = -1;
+  guint tab = s->drag_id, dest = s->drop_id;
+  gboolean after = s->drop_after;
+  s->drag_id = s->drop_id = 0;
   /* Deferred out of ::drop on purpose: the window answers by rebuilding every
    * tab, and the dragged widget has to outlive GTK's drop handling. */
-  if (from >= 0 && to >= 0)
-    g_signal_emit(s, signals[SIG_MOVED], 0, from, to);
+  if (tab != 0 && dest != 0)
+    g_signal_emit(s, signals[SIG_MOVED], 0, tab, dest, after);
   /* Refreshes that arrived mid-drag were held back; draw the newest data once.
    * A move above normally does this already, through the window's refresh —
    * which clears `pending` as it renders. */
-  if (s->pending != NULL) {
-    TabSnapshot *snap = s->pending;
-    s->pending = NULL;
-    render_tabs(s, snap);
-  }
+  render_pending(s);
 }
 
 /* enter and motion both: the mark follows the pointer across the tab, so it
@@ -297,11 +346,14 @@ static gboolean on_drop(GtkDropTarget *dt, const GValue *value, double x,
    * window's tab index would name a tab that is not ours. */
   if (from < 0 || from != s->drag_from) return FALSE;
   GtkWidget *slot = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(dt));
-  int to = drop_target_index(s, slot, x, NULL);
-  if (to < 0) return FALSE;
-  s->drop_from = from;
-  s->drop_to = to;
-  return TRUE;
+  gboolean after = FALSE;
+  if (drop_target_index(s, slot, x, &after) < 0) return FALSE;
+  /* Which tab, not which position — see on_drag_begin. The `after` half is
+   * kept raw too; the receiving side redoes the lift-and-shift arithmetic
+   * against the workspace as it stands at drop time. */
+  s->drop_id = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(slot), "pt-ws-id"));
+  s->drop_after = after;
+  return s->drop_id != 0;
 }
 
 /* ---------- one tab ---------- */
@@ -350,12 +402,17 @@ static GtkWidget *build_tab(gpointer items, guint idx, gpointer u) {
   g_object_set_data(G_OBJECT(slot), "pt-close", close);
   /* Reachable from the slot so a later set can retitle this tab in place. */
   g_object_set_data(G_OBJECT(slot), "pt-label", lbl);
+  /* Which tab this slot shows, position-proof: the drag handlers and the
+   * retitle loop address slots by it while a freeze lets the rows trail the
+   * workspace. */
+  g_object_set_data(G_OBJECT(slot), "pt-ws-id", GUINT_TO_POINTER(info->id));
 
   /* The gesture goes on the slot, not the tab: the row list carries the tab
    * index there, and the hit-test above sorts out where the press landed. */
   GtkGesture *click = gtk_gesture_click_new();
   g_signal_connect(click, "pressed", G_CALLBACK(on_tab_pressed), s);
   g_signal_connect(click, "released", G_CALLBACK(on_tab_released), s);
+  g_signal_connect(click, "cancel", G_CALLBACK(on_tab_press_cancel), s);
   gtk_widget_add_controller(slot, GTK_EVENT_CONTROLLER(click));
 
   /* connect_object, unlike the click gesture above: a drag source outlives its
@@ -383,31 +440,34 @@ static GtkWidget *build_tab(gpointer items, guint idx, gpointer u) {
 void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
                            int active, int accent) {
   TabSnapshot *snap = snapshot_new(tabs, n, active, accent);
-  /* Rebuilding mid-drag would destroy the very widget GTK is dragging, and one
-   * busy pane pushes refreshes through here a couple of times a second. Keep
-   * the newest data and let drag-end draw it; the titles below still land on
-   * the tabs already on screen. */
+  /* Frozen — a drag or a press owns the widgets right now (see the struct).
+   * Keep the newest data and let the freeze's end draw it; the titles below
+   * still land on the tabs already on screen. */
   g_clear_pointer(&s->pending, snapshot_free);
-  if (s->dragging) s->pending = snap;
-  else             render_tabs(s, snap);
+  if (s->drag_from >= 0 || s->pressed) s->pending = snap;
+  else                                 render_tabs(s, snap);
 
-  /* The one piece of state a rebuild is not allowed to carry, applied by hand.
-   * Correct either way: a rebuild built its labels from this same array, so
-   * every write below lands on text already equal to it; without one, this is
-   * the only thing that moves the titles at all. gtk_label_set_text drops a
-   * write that changes nothing, so a strip nobody is animating costs a string
-   * compare per tab and no relayout. */
+  /* The one piece of state a rebuild is not allowed to carry, applied by hand:
+   * a rebuild rebuilds its labels from this same array, so after one every
+   * write below is a no-op, and under a freeze this is the only thing that
+   * moves the titles at all. Slots are matched by tab id, never by position —
+   * a frozen strip can be showing rows the new data has since reordered or
+   * closed, and a positional write would put one tab's title on another. A
+   * tab the new data no longer has keeps its last title until the freeze
+   * lifts. gtk_label_set_text drops a write that changes nothing, so a strip
+   * nobody is animating costs a string compare per tab and no relayout. */
   if (s->tabs_host == NULL) return;
   for (GtkWidget *slot = gtk_widget_get_first_child(s->tabs_host);
        slot != NULL; slot = gtk_widget_get_next_sibling(slot)) {
     GtkWidget *lbl = g_object_get_data(G_OBJECT(slot), "pt-label");
     if (lbl == NULL) continue;
-    /* The row list's index, not the position: a build_row that filtered an
-     * item out would leave the two disagreeing. */
-    int idx = pt_rowlist_row_index(slot);
-    if (idx < 0 || idx >= n) continue;
-    gtk_label_set_text(GTK_LABEL(lbl),
-                       tabs[idx].title != NULL ? tabs[idx].title : "");
+    guint id = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(slot), "pt-ws-id"));
+    for (int i = 0; i < n; i++) {
+      if (tabs[i].id != id) continue;
+      gtk_label_set_text(GTK_LABEL(lbl),
+                         tabs[i].title != NULL ? tabs[i].title : "");
+      break;
+    }
   }
 }
 
@@ -435,8 +495,8 @@ static void pt_tab_strip_class_init(PtTabStripClass *klass) {
   signals[SIG_CLOSE] = g_signal_new("tab-close", PT_TYPE_TAB_STRIP,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
   signals[SIG_MOVED] = g_signal_new("tab-moved", PT_TYPE_TAB_STRIP,
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
-      G_TYPE_INT, G_TYPE_INT);
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+      G_TYPE_UINT, G_TYPE_UINT, G_TYPE_BOOLEAN);
   signals[SIG_OPEN_EDITOR] = g_signal_new("open-editor", PT_TYPE_TAB_STRIP,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_TOGGLE_PANEL] = g_signal_new("toggle-panel", PT_TYPE_TAB_STRIP,
@@ -445,7 +505,7 @@ static void pt_tab_strip_class_init(PtTabStripClass *klass) {
 
 static void pt_tab_strip_init(PtTabStrip *s) {
   gtk_widget_add_css_class(GTK_WIDGET(s), "pt-tabstrip");
-  s->drag_from = s->drop_from = s->drop_to = -1;
+  s->drag_from = -1;
   char *zed = g_find_program_in_path("zed");
   s->has_zed = (zed != NULL);
   g_free(zed);
