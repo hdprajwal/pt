@@ -62,6 +62,11 @@ void pt_terminal_set_font(const char *family, int pts);
  * follows what is drawn. Unlike ghostty, where padding is a new-surface
  * setting, this applies to panes already open. */
 void pt_terminal_set_padding(int x, int y);
+/* The `scrollback-limit` key: bytes of history a pane keeps. Read when a pane
+ * spawns its core — the library takes the limit at terminal creation and
+ * never after — so a change reaches the panes opened after it and leaves the
+ * running ones alone, as ghostty's scrollback-limit does. */
+void pt_terminal_set_scrollback_limit(gsize bytes);
 /* The `mouse-reporting` config key, pushed into every live terminal: a pane
  * toggled by hand follows the file again the next time the config is applied.
  * Nothing is remembered between calls, so a pane built later gets its value

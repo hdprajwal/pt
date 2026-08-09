@@ -35,6 +35,13 @@ static GSList *live_terminals;
 static int pad_x = PT_CONFIG_WINDOW_PADDING_X_DEFAULT;
 static int pad_y = PT_CONFIG_WINDOW_PADDING_Y_DEFAULT;
 
+/* Bytes of history the next core is built with, the `scrollback-limit` key.
+ * Shared like the padding above, but read only at spawn: the library takes it
+ * at terminal creation and never after, so unlike the inset a change cannot
+ * reach a live core — it reaches the panes opened after it, as in ghostty,
+ * where scrollback-limit is a new-surface setting too. */
+static gsize scrollback_limit = PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT;
+
 /* Terminal colors from the active theme. Defaults mirror pt-dark so a
  * terminal created before the first set_theme call renders correctly. */
 static PtColor th_bg  = {0x0b, 0x0d, 0x10, 1.0};
@@ -627,7 +634,7 @@ static void ensure_core(PtTerminal *t) {
   t->core = pt_term_core_new(t->start_cwd, NULL,
                              (const char *const *)t->env,
                              (guint16)cols, (guint16)rows,
-                             t->cell_w, t->cell_h, &err);
+                             t->cell_w, t->cell_h, scrollback_limit, &err);
   if (t->core == NULL) {
     g_warning("pt: terminal spawn failed: %s",
               err != NULL ? err->message : "?");
@@ -1910,6 +1917,10 @@ void pt_terminal_set_padding(int x, int y) {
     gtk_widget_queue_resize(GTK_WIDGET(t));
     gtk_widget_queue_draw(GTK_WIDGET(t));
   }
+}
+
+void pt_terminal_set_scrollback_limit(gsize bytes) {
+  scrollback_limit = bytes;
 }
 
 void pt_terminal_set_pane_mouse_reporting(PtTerminal *t, gboolean on) {

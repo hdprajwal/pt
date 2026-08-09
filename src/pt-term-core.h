@@ -62,11 +62,19 @@ typedef struct {
 
 /* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh).
  * env_pairs: NULL-terminated "KEY=VALUE" strings set in the child before
- * exec (after TERM). NULL → none. Copied; caller keeps ownership. */
+ * exec (after TERM). NULL → none. Copied; caller keeps ownership.
+ * max_scrollback: how much history this core keeps, in bytes rather than
+ * lines — that is what libghostty's max_scrollback counts
+ * (terminal/Screen.zig), whatever its C header calls it. Per core and fixed
+ * for its life, like cols/rows: the caller reads its config at spawn, which
+ * is how a scrollback-limit change reaches the panes opened after it and
+ * leaves the running ones alone — in ghostty too it is a new-surface
+ * setting. */
 PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
                              const char *const *env_pairs,
                              guint16 cols, guint16 rows,
-                             int cell_w, int cell_h, GError **error);
+                             int cell_w, int cell_h, gsize max_scrollback,
+                             GError **error);
 void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
                                 gpointer user);
 /* A no-op when all four arguments match what the core already has. Otherwise
@@ -190,16 +198,6 @@ void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count);
  * that some remote program is reading, which is exfiltration with extra steps.
  * A query is dropped in silence — no callback, and not one byte to the pty. */
 void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode);
-
-/* ---- scrollback (process-wide) ----
- *
- * How much history a pane keeps, in bytes rather than lines: that is what
- * libghostty's max_scrollback counts (terminal/Screen.zig), whatever its C
- * header calls it. Defaults to PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT, ghostty's
- * own scrollback-limit. Read when a core spawns, so a change reaches the panes
- * opened after it and leaves the running ones alone — as in ghostty, where
- * scrollback-limit is a new-surface setting too. */
-void pt_term_core_set_scrollback_limit(gsize bytes);
 
 /* ---- grid inset ----
  *

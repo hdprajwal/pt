@@ -228,7 +228,7 @@ static void render_config(PtWindow *w, const PtConfig *cfg) {
   pt_terminal_set_padding(cfg->window_padding_x, cfg->window_padding_y);
   /* Spawn-time, so editing this reaches the next pane rather than the open
    * ones; ghostty's scrollback-limit works the same way. */
-  pt_term_core_set_scrollback_limit((gsize)cfg->scrollback_limit);
+  pt_terminal_set_scrollback_limit((gsize)cfg->scrollback_limit);
   /* Follows the file both ways: editing claude-usage back to false stops the
    * lookups and clears what they fetched. */
   pt_agent_monitor_set_claude_enabled(w->agents, cfg->claude_usage);

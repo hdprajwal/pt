@@ -80,10 +80,6 @@ struct PtTermCore {
   gpointer cbs_user;
 };
 
-/* Bytes of history a fresh core is built with; see
- * pt_term_core_set_scrollback_limit. */
-static gsize default_scrollback = PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT;
-
 /* ---- pty write (non-blocking best effort, as in ghostling) ---- */
 static void pty_write_raw(int fd, const char *buf, size_t len) {
   while (len > 0) {
@@ -820,7 +816,8 @@ static int spawn_pty(const char *cwd, const char *const *argv,
 PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
                              const char *const *env_pairs,
                              guint16 cols, guint16 rows,
-                             int cell_w, int cell_h, GError **error) {
+                             int cell_w, int cell_h, gsize max_scrollback,
+                             GError **error) {
   PtTermCore *c = g_new0(PtTermCore, 1);
   c->cols = cols; c->rows = rows; c->cell_w = cell_w; c->cell_h = cell_h;
   c->pad_x = PT_CONFIG_WINDOW_PADDING_X_DEFAULT;
@@ -837,10 +834,10 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   c->pane_token = pt_agent_session_token_new();
 
   /* max_scrollback is a byte budget, not a line count — the header's wording
-   * is wrong, terminal/Screen.zig is not — so this is 10MB by default, the
-   * same number ghostty's scrollback-limit carries. */
+   * is wrong, terminal/Screen.zig is not. Read once, here: the library takes
+   * it at terminal creation and never after. */
   GhosttyTerminalOptions opts = { .cols = cols, .rows = rows,
-                                  .max_scrollback = default_scrollback };
+                                  .max_scrollback = max_scrollback };
   if (ghostty_terminal_new(NULL, &c->terminal, opts) != GHOSTTY_SUCCESS ||
       ghostty_render_state_new(NULL, &c->render_state) != GHOSTTY_SUCCESS ||
       ghostty_key_encoder_new(NULL, &c->key_encoder) != GHOSTTY_SUCCESS ||
@@ -906,10 +903,6 @@ void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
 
 void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode) {
   c->osc52 = mode;
-}
-
-void pt_term_core_set_scrollback_limit(gsize bytes) {
-  default_scrollback = bytes;
 }
 
 void pt_term_core_set_padding(PtTermCore *c, int x, int y) {
