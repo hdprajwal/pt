@@ -155,6 +155,19 @@ PtWsId pt_workspace_add_tab(PtWorkspace *ws, PtWsId project) {
   return t->id;
 }
 
+void pt_workspace_move_tab(PtWorkspace *ws, PtWsId tab, guint new_index) {
+  WsTab *t = tab_ref(ws, tab);
+  if (t == NULL) return;
+  GPtrArray *tabs = t->owner->tabs;
+  guint from = 0;
+  if (!g_ptr_array_find(tabs, t, &from)) return;
+  guint to = MIN(new_index, tabs->len - 1);
+  if (from == to) return;
+  g_ptr_array_steal_index(tabs, from);
+  g_ptr_array_insert(tabs, (gint)to, t);
+  /* Nothing else moves: every id, the active tab included, keeps its meaning. */
+}
+
 void pt_workspace_remove_tab(PtWorkspace *ws, PtWsId tab) {
   WsTab *t = tab_ref(ws, tab);
   if (t == NULL) return;

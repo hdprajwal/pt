@@ -242,6 +242,33 @@ static void test_accent_out_of_range_is_clamped(void) {
   pt_session_state_free(s);
 }
 
+/* Tab order is positional in the file — the tabs array is the order — so a
+ * reorder in the strip only outlives a restart if the array does. */
+static void test_tab_order_roundtrip(void) {
+  PtSessionState *s = pt_session_state_new();
+  PtProjectState *p = pt_project_state_new("proj", "/tmp/proj");
+  const char *titles[] = { "one", "two", "three" };
+  for (guint i = 0; i < G_N_ELEMENTS(titles); i++)
+    g_ptr_array_add(p->tabs,
+                    pt_tab_state_new(titles[i], pt_split_leaf_new("/tmp/proj")));
+  p->active_tab = 2;
+  g_ptr_array_add(s->projects, p);
+  char *text = pt_session_to_json_text(s);
+  PtSessionState *back = pt_session_from_json_text(text);
+  g_free(text);
+  g_assert_nonnull(back);
+  PtProjectState *bp = g_ptr_array_index(back->projects, 0);
+  g_assert_cmpuint(bp->tabs->len, ==, G_N_ELEMENTS(titles));
+  for (guint i = 0; i < G_N_ELEMENTS(titles); i++)
+    g_assert_cmpstr(((PtTabState *)g_ptr_array_index(bp->tabs, i))->title, ==,
+                    titles[i]);
+  /* active_tab is an index into that array, so it only means anything while
+     the order holds. */
+  g_assert_cmpint(bp->active_tab, ==, 2);
+  pt_session_state_free(s);
+  pt_session_state_free(back);
+}
+
 /* Reorder-survival used to live here as pt_session_index_after_move; the
  * workspace's stable ids replaced it, and its semantics are pinned by
  * tests/test-workspace.c (/workspace/move-spot-checks and
@@ -252,6 +279,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/session/roundtrip", test_roundtrip);
   g_test_add_func("/session/tabless-active-tab",
                   test_tabless_project_active_tab_minus_one);
+  g_test_add_func("/session/tab-order", test_tab_order_roundtrip);
   g_test_add_func("/session/version", test_version_bumped);
   g_test_add_func("/session/save-load", test_save_load);
   g_test_add_func("/session/corrupt", test_corrupt_becomes_bak);

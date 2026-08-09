@@ -536,3 +536,14 @@ paned > separator:hover { background-color: var(--pt-ok); }
 .pt-project-row.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }
 .pt-project-row.active.pt-drop-above { box-shadow: inset 0 2px 0 var(--pt-text); }
 .pt-project-row.active.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }
+
+/* The same marker for the tab strip, turned on its side: the strip runs
+   horizontally, so the edge a dragged tab arrives at is a left or a right one.
+   The .active variants are here for the specificity reason above — the active
+   tab clears its own shadow with .pt-tab.active { box-shadow: none }, which is
+   as specific as a base rule here — and a box-shadow again, because a border
+   would widen the tab and shove every tab after it sideways. */
+.pt-tab.pt-drop-left  { box-shadow: inset 2px 0 0 var(--pt-text); }
+.pt-tab.pt-drop-right { box-shadow: inset -2px 0 0 var(--pt-text); }
+.pt-tab.active.pt-drop-left  { box-shadow: inset 2px 0 0 var(--pt-text); }
+.pt-tab.active.pt-drop-right { box-shadow: inset -2px 0 0 var(--pt-text); }

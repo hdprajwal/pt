@@ -1488,6 +1488,25 @@ static void on_tab_close(PtTabStrip *s, int idx, gpointer user) {
   action_close_tab(PT_WINDOW(user), idx);
 }
 
+/* Same shape as on_project_moved one level down: the strip renders the
+ * workspace order and does not own it, so a drop is one model move plus a save.
+ * The active tab and ⌥⇥ both follow along on their own — one is an id, the
+ * other walks the workspace order. */
+static void on_tab_moved(PtTabStrip *s, int from, int to, gpointer user) {
+  (void)s;
+  PtWindow *w = PT_WINDOW(user);
+  if (w->ws == NULL) return;
+  PtProjectUI *p = active_project(w);
+  if (p == NULL) return;
+  int n = (int)pt_workspace_tab_count(w->ws, p->id);
+  if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+  pt_workspace_move_tab(w->ws,
+                        pt_workspace_tab_at(w->ws, p->id, (guint)from),
+                        (guint)to);
+  refresh_tabstrip(w);
+  mark_dirty(w);
+}
+
 static void on_toggle_panel(PtTabStrip *s, gpointer user) {
   (void)s;
   action_toggle_infopanel(PT_WINDOW(user));
@@ -2262,6 +2281,7 @@ static void pt_window_init(PtWindow *w) {
                    G_CALLBACK(on_tab_selected), w);
   g_signal_connect(w->tabstrip, "tab-new", G_CALLBACK(on_tab_new), w);
   g_signal_connect(w->tabstrip, "tab-close", G_CALLBACK(on_tab_close), w);
+  g_signal_connect(w->tabstrip, "tab-moved", G_CALLBACK(on_tab_moved), w);
   g_signal_connect(w->tabstrip, "open-editor", G_CALLBACK(on_open_editor), w);
   g_signal_connect(w->tabstrip, "toggle-panel",
                    G_CALLBACK(on_toggle_panel), w);

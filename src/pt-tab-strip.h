@@ -18,6 +18,8 @@ GtkWidget *pt_tab_strip_new(void);
 void pt_tab_strip_set_tabs(PtTabStrip *s, const PtTabInfo *tabs, int n,
                            int active, int accent);
 /* Signals: "tab-selected" (int index), "tab-new" (void),
+ *          "tab-moved" (int from, int to) — a tab was dragged onto another
+ *          position; `to` is where it goes once lifted out of `from`.
  *          "tab-close" (int index) — the × on a tab; closes the whole tab
  *          "open-editor" (void) — the Zed button; opens the active project.
  *          Only emitted when zed is on PATH (the button is otherwise absent).
