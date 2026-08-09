@@ -1818,14 +1818,11 @@ typedef enum {
   PT_ACTION_ZOOM,
 } PtActionId;
 
-/* accel spells the trigger; a row with no accel binds keyval + mods raw
- * instead, for ISO_Left_Tab, which some setups deliver for Shift+Tab and which
- * does not always round-trip through parse_string. arg is the action's
- * argument: project/tab index, PtSplitKind, PtPaneDirection, zoom delta. */
+/* accel spells the trigger; arg is the action's argument: project/tab index,
+ * PtSplitKind, PtPaneDirection, zoom delta. The Tab chords are not here — see
+ * on_tab_chord for why they cannot be. */
 static const struct {
   const char *accel;
-  guint keyval;
-  GdkModifierType mods;
   PtActionId id;
   int arg;
 } shortcuts[] = {
@@ -1855,17 +1852,6 @@ static const struct {
   { .accel = "<Control>i", .id = PT_ACTION_TOGGLE_INFOPANEL },
   { .accel = "<Control>t", .id = PT_ACTION_NEW_TAB },
   { .accel = "<Control><Shift>t", .id = PT_ACTION_NEW_TAB },
-  /* ⌃⇥ / ⌃⇧⇥ cycle projects — the same axis as ⌃1…9. */
-  { .accel = "<Control>Tab", .id = PT_ACTION_NEXT_PROJECT },
-  { .accel = "<Control><Shift>Tab", .id = PT_ACTION_PREV_PROJECT },
-  { .keyval = GDK_KEY_ISO_Left_Tab, .mods = GDK_CONTROL_MASK,
-    .id = PT_ACTION_PREV_PROJECT },
-  /* ⌥⇥ / ⌥⇧⇥ cycle tabs within the active project — the same axis as ⌥1…9 —
-   * when the compositor does not claim them first. No grab is attempted. */
-  { .accel = "<Alt>Tab", .id = PT_ACTION_NEXT_TAB },
-  { .accel = "<Alt><Shift>Tab", .id = PT_ACTION_PREV_TAB },
-  { .keyval = GDK_KEY_ISO_Left_Tab, .mods = GDK_ALT_MASK,
-    .id = PT_ACTION_PREV_TAB },
   /* ⌃PgDn / ⌃PgUp cycle tabs too: no compositor claims those, so shells stay
    * reachable as a "next" on desktops that own ⌥⇥. */
   { .accel = "<Control>Page_Down", .id = PT_ACTION_NEXT_TAB },
@@ -1943,14 +1929,49 @@ static void add_shortcut(GtkShortcutController *ctl, const char *accel,
       gtk_shortcut_new(trig, gtk_callback_action_new(fn, data, destroy)));
 }
 
-/* Bind a raw keyval+mods (used for ISO_Left_Tab, which some setups deliver for
- * Shift+Tab and which does not always round-trip through parse_string). */
-static void add_keyval_shortcut(GtkShortcutController *ctl, guint keyval,
-                                GdkModifierType mods, GtkShortcutFunc fn,
-                                gpointer data, GDestroyNotify destroy) {
-  gtk_shortcut_controller_add_shortcut(ctl,
-      gtk_shortcut_new(gtk_keyval_trigger_new(keyval, mods),
-                       gtk_callback_action_new(fn, data, destroy)));
+/* ⌃⇥ / ⌃⇧⇥ cycle projects — the axis of ⌃1…9 — and ⌥⇥ / ⌥⇧⇥ cycle tabs within
+ * the active project, the axis of ⌥1…9, when the compositor does not claim them
+ * first. No grab is attempted.
+ *
+ * They are dispatched by hand because the table above cannot spell them. Tab and
+ * ISO_Left_Tab are one physical key at two shift levels, and gdk_key_event_matches
+ * — what a GtkKeyvalTrigger asks — accepts either keysym for that key's keycode,
+ * so one plain ⌥⇥ press matches an <Alt>Tab trigger and an ISO_Left_Tab+ALT one
+ * alike. GtkShortcutController answers repeated matches by round-robin (it
+ * resumes its search after whichever shortcut it fired last), so six identical
+ * ⌥⇥ presses ran next, prev, next, prev — a two-tab bounce — while ⌥⇧⇥, which
+ * arrives as ISO_Left_Tab with SHIFT still in the state, matched neither trigger
+ * and did nothing. A key handler can say "exactly this chord"; a trigger cannot.
+ *
+ * The CAPTURE phase and the overlay rule are the shortcut controller's, for the
+ * same reasons: see the comment on overlay_open. */
+static gboolean on_tab_chord(GtkEventControllerKey *ctl, guint keyval,
+                             guint keycode, GdkModifierType state,
+                             gpointer user) {
+  (void)ctl; (void)keycode;
+  if (keyval != GDK_KEY_Tab && keyval != GDK_KEY_KP_Tab &&
+      keyval != GDK_KEY_ISO_Left_Tab)
+    return GDK_EVENT_PROPAGATE;
+  GdkModifierType mods = state & gtk_accelerator_get_default_mod_mask();
+  /* Exactly Control or exactly Alt, Shift optional. Anything else — ⌃⌥⇥, ⌘⇥ —
+   * is somebody else's chord and travels on. */
+  GdkModifierType base = mods & ~GDK_SHIFT_MASK;
+  if (base != GDK_CONTROL_MASK && base != GDK_ALT_MASK)
+    return GDK_EVENT_PROPAGATE;
+  PtWindow *w = PT_WINDOW(user);
+  if (overlay_open(w)) return GDK_EVENT_PROPAGATE;
+  /* Some setups deliver a shifted Tab as ISO_Left_Tab with SHIFT already spent,
+   * so the keysym is the second half of the answer, not a detail. */
+  gboolean backward = (mods & GDK_SHIFT_MASK) != 0 ||
+                      keyval == GDK_KEY_ISO_Left_Tab;
+  if (base == GDK_CONTROL_MASK) {
+    if (backward) action_prev_project(w);
+    else          action_next_project(w);
+  } else {
+    if (backward) action_prev_tab(w);
+    else          action_next_tab(w);
+  }
+  return GDK_EVENT_STOP;
 }
 
 static void install_shortcuts(PtWindow *w) {
@@ -1968,13 +1989,14 @@ static void install_shortcuts(PtWindow *w) {
     ctxs[i].w = w;
     ctxs[i].id = shortcuts[i].id;
     ctxs[i].arg = shortcuts[i].arg;
-    if (shortcuts[i].accel != NULL)
-      add_shortcut(ctl, shortcuts[i].accel, shortcut_dispatch, &ctxs[i], NULL);
-    else
-      add_keyval_shortcut(ctl, shortcuts[i].keyval, shortcuts[i].mods,
-                          shortcut_dispatch, &ctxs[i], NULL);
+    add_shortcut(ctl, shortcuts[i].accel, shortcut_dispatch, &ctxs[i], NULL);
   }
   gtk_widget_add_controller(GTK_WIDGET(w), GTK_EVENT_CONTROLLER(ctl));
+
+  GtkEventController *keys = gtk_event_controller_key_new();
+  gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
+  g_signal_connect(keys, "key-pressed", G_CALLBACK(on_tab_chord), w);
+  gtk_widget_add_controller(GTK_WIDGET(w), keys);
 }
 
 /* ---------- persistence ---------- */
