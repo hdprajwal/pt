@@ -126,6 +126,13 @@ void pt_workspace_remove_project(PtWorkspace *ws, PtWsId project) {
   g_ptr_array_remove_index(ws->projects, index);   /* frees p and its tabs */
 }
 
+/* Lift the element at `from` out and put it back at `to`, both in range.
+ * Nothing else moves: every id, the active ones included, keeps its meaning. */
+static void array_move(GPtrArray *arr, guint from, guint to) {
+  gpointer p = g_ptr_array_steal_index(arr, from);
+  g_ptr_array_insert(arr, (gint)to, p);
+}
+
 void pt_workspace_move_project(PtWorkspace *ws, PtWsId project,
                                guint new_index) {
   WsProject *p = project_ref(ws, project);
@@ -134,9 +141,7 @@ void pt_workspace_move_project(PtWorkspace *ws, PtWsId project,
   if (!g_ptr_array_find(ws->projects, p, &from)) return;
   guint to = MIN(new_index, ws->projects->len - 1);
   if (from == to) return;
-  g_ptr_array_steal_index(ws->projects, from);
-  g_ptr_array_insert(ws->projects, (gint)to, p);
-  /* Nothing else moves: every id, active ones included, keeps its meaning. */
+  array_move(ws->projects, from, to);
 }
 
 /* ---------- tabs ---------- */
@@ -153,6 +158,37 @@ PtWsId pt_workspace_add_tab(PtWorkspace *ws, PtWsId project) {
   if (p->active_tab == PT_WS_ID_NONE)
     p->active_tab = t->id;
   return t->id;
+}
+
+void pt_workspace_move_tab(PtWorkspace *ws, PtWsId tab, guint new_index) {
+  WsTab *t = tab_ref(ws, tab);
+  if (t == NULL) return;
+  GPtrArray *tabs = t->owner->tabs;
+  guint from = 0;
+  if (!g_ptr_array_find(tabs, t, &from)) return;
+  guint to = MIN(new_index, tabs->len - 1);
+  if (from == to) return;
+  array_move(tabs, from, to);
+}
+
+gboolean pt_workspace_move_tab_beside(PtWorkspace *ws, PtWsId tab,
+                                      PtWsId dest, gboolean after) {
+  WsTab *t = tab_ref(ws, tab);
+  WsTab *d = tab_ref(ws, dest);
+  if (t == NULL || d == NULL || t == d || t->owner != d->owner) return FALSE;
+  GPtrArray *tabs = t->owner->tabs;
+  guint from = 0, base = 0;
+  if (!g_ptr_array_find(tabs, t, &from) ||
+      !g_ptr_array_find(tabs, d, &base))
+    return FALSE;   /* can't happen */
+  /* The slot named relative to `dest`, then shifted down one when lifting the
+   * tab out of `from` moved it — the same arithmetic a positional drop would
+   * have done up front, run here instead, against the order as it is now. */
+  guint want = after ? base + 1 : base;
+  guint to = want > from ? want - 1 : want;
+  if (to == from) return FALSE;
+  array_move(tabs, from, to);
+  return TRUE;
 }
 
 void pt_workspace_remove_tab(PtWorkspace *ws, PtWsId tab) {

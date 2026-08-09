@@ -55,6 +55,18 @@ void pt_terminal_set_font_size(int pts);    /* clamped; re-measures all panes */
 void pt_terminal_set_theme(const PtResolvedTheme *rt);
 /* Family+size together; NULL family keeps the current one. */
 void pt_terminal_set_font(const char *family, int pts);
+/* The `window-padding-x` / `window-padding-y` keys: pixels between a pane's
+ * edge and its cell grid, clamped to the range the config accepts and shared
+ * by every pane. A change re-lays out the live ones — the grid a pane holds is
+ * derived from its size and this — and reaches their cores, so hit-testing
+ * follows what is drawn. Unlike ghostty, where padding is a new-surface
+ * setting, this applies to panes already open. */
+void pt_terminal_set_padding(int x, int y);
+/* The `scrollback-limit` key: bytes of history a pane keeps. Read when a pane
+ * spawns its core — the library takes the limit at terminal creation and
+ * never after — so a change reaches the panes opened after it and leaves the
+ * running ones alone, as ghostty's scrollback-limit does. */
+void pt_terminal_set_scrollback_limit(gsize bytes);
 /* The `mouse-reporting` config key, pushed into every live terminal: a pane
  * toggled by hand follows the file again the next time the config is applied.
  * Nothing is remembered between calls, so a pane built later gets its value

@@ -536,3 +536,14 @@ paned > separator:hover { background-color: var(--pt-ok); }
 .pt-project-row.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }
 .pt-project-row.active.pt-drop-above { box-shadow: inset 0 2px 0 var(--pt-text); }
 .pt-project-row.active.pt-drop-below { box-shadow: inset 0 -2px 0 var(--pt-text); }
+
+/* The same marker for the tab strip, turned on its side: the strip runs
+   horizontally, so the edge a dragged tab arrives at is a left or a right one.
+   No .active variants, unlike the rows above: the shadow these must beat is
+   .pt-tab.active { box-shadow: none }, which is two classes like the rules
+   here — equal specificity, so the later rule wins, and that is these. (The
+   rows' opponent is the three-class accent edge, which is why only they need
+   the escalation.) A box-shadow again, because a border would widen the tab
+   and shove every tab after it sideways. */
+.pt-tab.pt-drop-left  { box-shadow: inset 2px 0 0 var(--pt-text); }
+.pt-tab.pt-drop-right { box-shadow: inset -2px 0 0 var(--pt-text); }

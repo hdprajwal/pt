@@ -36,6 +36,7 @@ struct PtTermCore {
   char *pane_token;         /* $PT_PANE_TOKEN; see pt_term_core_pane_token */
   guint16 cols, rows;
   int cell_w, cell_h;
+  int pad_x, pad_y;         /* grid inset; see pt_term_core_set_padding */
 
   gboolean eof;
   gboolean child_exited;
@@ -78,10 +79,6 @@ struct PtTermCore {
   PtTermCoreCallbacks cbs;
   gpointer cbs_user;
 };
-
-/* Inset around the grid; mirrors PT_PAD_X / PT_PAD_Y in pt-terminal.c. */
-#define PT_CORE_PAD_X 20
-#define PT_CORE_PAD_Y 18
 
 /* ---- pty write (non-blocking best effort, as in ghostling) ---- */
 static void pty_write_raw(int fd, const char *buf, size_t len) {
@@ -819,9 +816,12 @@ static int spawn_pty(const char *cwd, const char *const *argv,
 PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
                              const char *const *env_pairs,
                              guint16 cols, guint16 rows,
-                             int cell_w, int cell_h, GError **error) {
+                             int cell_w, int cell_h, gsize max_scrollback,
+                             GError **error) {
   PtTermCore *c = g_new0(PtTermCore, 1);
   c->cols = cols; c->rows = rows; c->cell_w = cell_w; c->cell_h = cell_h;
+  c->pad_x = PT_CONFIG_WINDOW_PADDING_X_DEFAULT;
+  c->pad_y = PT_CONFIG_WINDOW_PADDING_Y_DEFAULT;
   c->pty_fd = -1;
   c->last_exit = -1;
   c->osc52 = PT_CONFIG_OSC52_DEFAULT;
@@ -833,8 +833,11 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
   /* Before the spawn: the child is handed this as $PT_PANE_TOKEN. */
   c->pane_token = pt_agent_session_token_new();
 
+  /* max_scrollback is a byte budget, not a line count — the header's wording
+   * is wrong, terminal/Screen.zig is not. Read once, here: the library takes
+   * it at terminal creation and never after. */
   GhosttyTerminalOptions opts = { .cols = cols, .rows = rows,
-                                  .max_scrollback = 10000 };
+                                  .max_scrollback = max_scrollback };
   if (ghostty_terminal_new(NULL, &c->terminal, opts) != GHOSTTY_SUCCESS ||
       ghostty_render_state_new(NULL, &c->render_state) != GHOSTTY_SUCCESS ||
       ghostty_key_encoder_new(NULL, &c->key_encoder) != GHOSTTY_SUCCESS ||
@@ -900,6 +903,11 @@ void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
 
 void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode) {
   c->osc52 = mode;
+}
+
+void pt_term_core_set_padding(PtTermCore *c, int x, int y) {
+  c->pad_x = x;
+  c->pad_y = y;
 }
 
 void pt_term_core_set_color_scheme(PtTermCore *c, gboolean dark) {
@@ -1118,8 +1126,8 @@ guint64 pt_term_core_scrollbar_reads(PtTermCore *c) { return c->sb_reads; }
 
 static void sel_pixel_to_cell(PtTermCore *c, double px, double py,
                               uint16_t *col, uint16_t *row) {
-  double cx = (px - PT_CORE_PAD_X) / (double)c->cell_w;
-  double cy = (py - PT_CORE_PAD_Y) / (double)c->cell_h;
+  double cx = (px - c->pad_x) / (double)c->cell_w;
+  double cy = (py - c->pad_y) / (double)c->cell_h;
   int ic = cx < 0 ? 0 : (int)cx;
   int ir = cy < 0 ? 0 : (int)cy;
   if (ic > c->cols - 1) ic = c->cols - 1;
@@ -1308,8 +1316,8 @@ char *pt_term_core_hyperlink_at(PtTermCore *c, double px, double py) {
   /* Not clamped to the grid the way a selection drag is: the padding around it
    * is not part of any cell, and clamping there would make the edge column's
    * link openable from outside it. */
-  double cx = (px - PT_CORE_PAD_X) / (double)c->cell_w;
-  double cy = (py - PT_CORE_PAD_Y) / (double)c->cell_h;
+  double cx = (px - c->pad_x) / (double)c->cell_w;
+  double cy = (py - c->pad_y) / (double)c->cell_h;
   if (cx < 0 || cy < 0 || cx >= c->cols || cy >= c->rows) return NULL;
   return pt_term_core_link_at_cell(c, (int)cy, (int)cx);
 }
@@ -1332,12 +1340,12 @@ static void mouse_encoder_sync(PtTermCore *c, gboolean any_button_pressed) {
   ghostty_mouse_encoder_setopt_from_terminal(c->mouse_encoder, c->terminal);
 
   GhosttyMouseEncoderSize size = GHOSTTY_INIT_SIZED(GhosttyMouseEncoderSize);
-  size.screen_width = (uint32_t)(c->cols * c->cell_w + 2 * PT_CORE_PAD_X);
-  size.screen_height = (uint32_t)(c->rows * c->cell_h + 2 * PT_CORE_PAD_Y);
+  size.screen_width = (uint32_t)(c->cols * c->cell_w + 2 * c->pad_x);
+  size.screen_height = (uint32_t)(c->rows * c->cell_h + 2 * c->pad_y);
   size.cell_width = (uint32_t)c->cell_w;
   size.cell_height = (uint32_t)c->cell_h;
-  size.padding_left = size.padding_right = PT_CORE_PAD_X;
-  size.padding_top = size.padding_bottom = PT_CORE_PAD_Y;
+  size.padding_left = size.padding_right = c->pad_x;
+  size.padding_top = size.padding_bottom = c->pad_y;
   ghostty_mouse_encoder_setopt(c->mouse_encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE,
                                &size);
 
@@ -1382,6 +1390,18 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
     else if (action == GHOSTTY_MOUSE_ACTION_RELEASE)
       c->buttons_down &= ~(1u << button);
   }
+  /* A drag is motion *with* a button, and callers hand motion over without
+   * naming one: the pointer moved, and which button is held is the core's
+   * business, not the widget's. Ghostty answers it the same way — "we use the
+   * first mouse button we find pressed in order to report" (Surface.zig:4628),
+   * the spec naming none — and the answer is what separates a drag from a
+   * hover. Under mode 1002 the encoder drops buttonless motion outright
+   * (input/mouse_encode.zig shouldReport, `.button => event.button != null`)
+   * and under 1003 encodes it as code 35, so leaving the button off means an
+   * app on 1002 sees a press, a release, and nothing that ever selected. */
+  if (action == GHOSTTY_MOUSE_ACTION_MOTION &&
+      button == GHOSTTY_MOUSE_BUTTON_UNKNOWN && c->buttons_down != 0)
+    button = (GhosttyMouseButton)g_bit_nth_lsf(c->buttons_down, -1);
   mouse_encoder_sync(c, c->buttons_down != 0);
   mouse_event_fill(c, action, button, mods, px, py);
 
@@ -1393,6 +1413,22 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
     return FALSE;
   pty_write_raw(c->pty_fd, buf, written);
   return TRUE;
+}
+
+gboolean pt_term_core_mouse_cancel(PtTermCore *c, GhosttyMods mods,
+                                   double px, double py) {
+  gboolean reported = FALSE;
+  while (c->buttons_down != 0) {
+    GhosttyMouseButton button =
+        (GhosttyMouseButton)g_bit_nth_lsf(c->buttons_down, -1);
+    if (pt_term_core_mouse_report(c, GHOSTTY_MOUSE_ACTION_RELEASE, button,
+                                  mods, px, py))
+      reported = TRUE;
+    /* mouse_report clears the bit before encoding — but not on its dead-pty
+     * early return, so clear by hand too or that path never leaves the loop. */
+    c->buttons_down &= ~(1u << button);
+  }
+  return reported;
 }
 
 gboolean pt_term_core_wheel_report(PtTermCore *c, GhosttyMouseButton button,

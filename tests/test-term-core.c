@@ -43,12 +43,22 @@ static gboolean on_timeout(gpointer user) {
   return G_SOURCE_REMOVE;
 }
 
+/* The spawn every test shares: /tmp, 80x24 on 8x16 cells, the default
+ * scrollback. The scrollback limit is per core (pt_term_core_new takes it
+ * like cols/rows); the tests that care about another size or limit call the
+ * real constructor themselves. */
+static PtTermCore *core_new(const char *const *argv, const char *const *envp,
+                            GError **error) {
+  return pt_term_core_new("/tmp", argv, envp, 80, 24, 8, 16,
+                          PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT, error);
+}
+
 static void test_output_reaches_grid(void) {
   Ctx ctx = {0};
   ctx.loop = g_main_loop_new(NULL, FALSE);
   const char *argv[] = {"/bin/sh", "-c", "printf 'hello-from-pt\\n'; sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -64,7 +74,7 @@ static void test_exit_status_reported(void) {
   Ctx ctx = {0};
   ctx.loop = g_main_loop_new(NULL, FALSE);
   const char *argv[] = {"/bin/sh", "-c", "exit 7", NULL};
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  PtTermCore *core = core_new(argv, NULL, NULL);
   PtTermCoreCallbacks cbs = { .exited = on_exit_cb };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
   guint to = g_timeout_add_seconds(10, on_timeout, &ctx);
@@ -86,7 +96,7 @@ static void test_exit_status_reported(void) {
 static void test_shell_name(void) {
   const char *argv[] = {"/bin/sh", "-c", "exit 0", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
   pt_term_core_free(core);
@@ -94,7 +104,7 @@ static void test_shell_name(void) {
   /* NULL argv spawns the default shell; the name is $SHELL's basename. */
   char *old = g_strdup(g_getenv("SHELL"));
   g_setenv("SHELL", "/bin/sh", TRUE);
-  core = pt_term_core_new("/tmp", NULL, NULL, 80, 24, 8, 16, &err);
+  core = core_new(NULL, NULL, &err);
   g_assert_no_error(err);
   g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
   pt_term_core_free(core);   /* kills+reaps the interactive shell */
@@ -105,7 +115,7 @@ static void test_shell_name(void) {
    * would betray a parent-environment resolution as "fakesh"). */
   g_setenv("SHELL", "/bin/fakesh", TRUE);
   const char *envp[] = { "SHELL=/bin/sh", NULL };
-  core = pt_term_core_new("/tmp", NULL, envp, 80, 24, 8, 16, &err);
+  core = core_new(NULL, envp, &err);
   g_assert_no_error(err);
   g_assert_cmpstr(pt_term_core_shell_name(core), ==, "sh");
   pt_term_core_free(core);
@@ -120,7 +130,7 @@ static void test_key_send_echoes(void) {
   Ctx ctx = {0};
   ctx.loop = g_main_loop_new(NULL, FALSE);
   const char *argv[] = {"/bin/cat", NULL};
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  PtTermCore *core = core_new(argv, NULL, NULL);
   ctx.core = core;
   PtTermCoreCallbacks cbs = {0};
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -167,7 +177,7 @@ static void test_long_grapheme_cluster(void) {
     "\xCC\x8A\xCC\x8B\xCC\x8C\xCC\x8D\xCC\x8E\xCC\x8F\xCC\x90\xCC\x91\xCC\x92"
     "\xCC\x93 done-marker'; sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw_marker };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -187,15 +197,15 @@ static void test_long_grapheme_cluster(void) {
 static void test_selection(void) {
   /* Print a known word, then programmatically drag-select across it and assert
      pt_term_core_selection_text returns it. Cells are 8x16 with the grid
-     inset by PT_PAD_X=20 / PT_PAD_Y=18, so column N spans pixels
-     [20 + 8N, 20 + 8N + 8) and row 0 spans [18, 34). "SELECTME" lands at
-     row 0, columns 0..7. */
+     inset by the default 20/18, so column N spans pixels [20 + 8N,
+     20 + 8N + 8) and row 0 spans [18, 34). "SELECTME" lands at row 0,
+     columns 0..7. */
   Ctx ctx = {0};
   ctx.loop = g_main_loop_new(NULL, FALSE);
   const char *argv[] = {"/bin/sh", "-c",
     "printf 'SELECTME done-marker\\n'; sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw_marker };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -281,7 +291,7 @@ static void test_hyperlink_at(void) {
     "printf '\\033]8;;javascript:alert(1)\\033\\\\EVIL\\033]8;;\\033\\\\\\n'; "
     "printf 'done-marker\\n'; sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw_marker };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -331,7 +341,7 @@ static void test_foreground_command(void) {
   ctx.loop = g_main_loop_new(NULL, FALSE);
   const char *argv[] = {"/bin/sh", "-c", "sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .command = on_command_cb };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -406,7 +416,7 @@ static void test_running_state_idle(void) {
      from the 700ms foreground poll, so it is waited for, not read once. */
   const char *argv[] = {"/bin/cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_nonnull(core);
   g_assert_true(wait_until(fg_is_child, core));       /* tty settled on cat */
@@ -421,7 +431,7 @@ static void test_running_state_foreground_job(void) {
      own process group and hands it the tty. fg pgrp != shell pid → running. */
   const char *argv[] = {"/bin/sh", "-mc", "sleep 30; true", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_nonnull(core);
   g_assert_true(wait_until(fg_is_not_child, core));   /* sleep owns the tty */
@@ -435,7 +445,7 @@ static void test_running_state_cleared_on_exit(void) {
      for up to a poll interval after the shell died. */
   const char *argv[] = {"/bin/sh", "-mc", "sleep 30; true", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_nonnull(core);
   g_assert_true(wait_until(fg_is_not_child, core));   /* sleep owns the tty */
@@ -466,7 +476,7 @@ static void test_spawn_env(void) {
     "echo marker=$PT_PROJECT; sleep 30", NULL};
   const char *envp[] = {"PT_PROJECT=alphaproj", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, envp, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, envp, &err);
   g_assert_no_error(err);
   g_assert_nonnull(core);
   PtTermCoreCallbacks cbs = { .draw = on_draw_env };
@@ -502,7 +512,7 @@ static void test_exit_marker_from_title(void) {
     "printf '\\033]0;pt-exit:7;proj-title\\007'; printf 'done-marker\\n'; "
     "sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw_marker, .title = on_title_cb };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -527,7 +537,7 @@ static void test_program_title_not_from_prompt(void) {
     "printf '\\033]0;\\342\\240\\202 Claude Code\\007'; printf 'done-marker\\n'; "
     "sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw_marker, .title = on_title_cb };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -555,7 +565,7 @@ static void test_long_title_cut_on_boundary(void) {
     "\\303\\251\\303\\251\\303\\251\\303\\251\\303\\251\\007' \"$a\"; "
     "printf 'done-marker\\n'; sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw_marker, .title = on_title_cb };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -607,7 +617,7 @@ static void test_mouse_report_sgr(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_until(tracking_on, core));
 
@@ -634,6 +644,100 @@ static void test_mouse_report_sgr(void) {
   pt_term_core_free(core);
 }
 
+/* The inset is configurable (`window-padding-x` / `window-padding-y`) and the
+   widget pushes it here, so what the mouse encoder reports has to follow the
+   setter rather than the inset the core was built with. Same 1000+1006 harness
+   and the same 8x16 cells: pixel (21, 20) is column 0, row 0 under the default
+   20/18, and column 2, row 1 once the inset is gone. A pixel inside the grid
+   either way is the point — one out in the padding answers ";1;1" from the
+   encoder's own clamp whatever the inset is, and proves nothing. */
+static void test_mouse_report_padding(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(tracking_on, core));
+
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          21.0, 20.0));
+  g_assert_true(wait_for_text(core, "^[[<0;1;1M"));
+
+  pt_term_core_set_padding(core, 0, 0);
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          21.0, 20.0));
+  g_assert_true(wait_for_text(core, "^[[<0;3;2M"));
+
+  pt_term_core_free(core);
+}
+
+/* Mode 1002 (button-event tracking) + 1006, what Claude Code asks for. It
+   reports motion only while a button is held, and the encoder decides that
+   from the event's own button (input/mouse_encode.zig shouldReport), so the
+   core has to name the held button on a motion the caller left unnamed —
+   otherwise a drag arrives as press, release, and nothing in between, and the
+   app never selects anything to copy. */
+static void test_mouse_report_drag_button(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1002h\\033[?1006h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(tracking_on, core));
+
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          21.0, 20.0));
+  g_assert_true(wait_for_text(core, "^[[<0;1;1M"));
+
+  /* Motion into the next cell with no button named: button 0 plus the 32
+     motion bit, i.e. a left-button drag, not a hover. */
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_MOTION,
+                                          GHOSTTY_MOUSE_BUTTON_UNKNOWN, 0,
+                                          29.0, 36.0));
+  g_assert_true(wait_for_text(core, "^[[<32;2;2M"));
+
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_RELEASE,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          29.0, 36.0));
+  g_assert_true(wait_for_text(core, "^[[<0;2;2m"));
+
+  /* Nothing is held now, so the same unnamed motion is a hover, and mode 1002
+     reports none: no bytes at all, and in particular not the buttonless
+     motion code 35 that mode 1003 would have sent. The press after it proves
+     the pane was still listening. */
+  g_assert_false(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_MOTION,
+                                           GHOSTTY_MOUSE_BUTTON_UNKNOWN, 0,
+                                           37.0, 52.0));
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          37.0, 52.0));
+  g_assert_true(wait_for_text(core, "^[[<0;3;3M"));
+
+  /* That press is now stale: the widget's gesture was cancelled (a starting
+     drag, a popup's grab, an unmap), so no release event will ever name it.
+     Without the cancel, the substitution above turns every later hover into a
+     phantom drag report. The cancel is the release the app is owed — same
+     bytes — and after it the unnamed motion is a hover again. */
+  g_assert_true(pt_term_core_mouse_cancel(core, 0, 37.0, 52.0));
+  g_assert_true(wait_for_text(core, "^[[<0;3;3m"));
+  g_assert_false(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_MOTION,
+                                           GHOSTTY_MOUSE_BUTTON_UNKNOWN, 0,
+                                           45.0, 68.0));
+  /* Cancelling with nothing held reports nothing. */
+  g_assert_false(pt_term_core_mouse_cancel(core, 0, 45.0, 68.0));
+
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "^[[<35;"));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
 static void test_wheel_report_batches_notches(void) {
   /* A wheel event can carry several notches; the widget hands all of them to
      the core at once and the core makes one write of it. The bytes have to be
@@ -642,7 +746,7 @@ static void test_wheel_report_batches_notches(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_until(tracking_on, core));
 
@@ -666,7 +770,7 @@ static void test_wheel_report_batches_notches(void) {
 static void test_wheel_report_needs_tracking(void) {
   /* Same rule as a click: with no mouse mode set the wheel writes nothing. */
   const char *argv[] = {"/bin/cat", NULL};
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  PtTermCore *core = core_new(argv, NULL, NULL);
   g_assert_nonnull(core);
   g_assert_false(pt_term_core_wheel_report(core, GHOSTTY_MOUSE_BUTTON_FOUR, 0,
                                            21.0, 20.0, 3));
@@ -677,7 +781,7 @@ static void test_mouse_report_needs_tracking(void) {
   /* No mouse mode set: the encoder must produce nothing at all, so a click in
      a plain shell can never leak escape bytes into the command line. */
   const char *argv[] = {"/bin/cat", NULL};
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  PtTermCore *core = core_new(argv, NULL, NULL);
   g_assert_nonnull(core);
   g_assert_false(pt_term_core_mouse_tracking(core));
   g_assert_false(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
@@ -697,7 +801,7 @@ static void test_focus_report(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?1004hready'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   /* One write, so the parser has consumed 1004h by the time "ready" prints. */
   g_assert_true(wait_for_text(core, "ready"));
@@ -714,7 +818,7 @@ static void test_focus_report_needs_mode(void) {
   /* Without mode 1004 a focus change must not put a single byte on the pty:
      a shell would run it as typed input. */
   const char *argv[] = {"/bin/cat", NULL};
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  PtTermCore *core = core_new(argv, NULL, NULL);
   g_assert_nonnull(core);
   g_assert_false(pt_term_core_focus_report(core, TRUE, FALSE));
   g_assert_false(pt_term_core_focus_report(core, FALSE, FALSE));
@@ -751,7 +855,7 @@ static void test_focus_report_dedupes(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?1004hready'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -771,7 +875,7 @@ static void test_focus_report_forced(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?1004hready'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -791,7 +895,7 @@ static void test_focus_report_resent_on_mode_enable(void) {
     "stty -echo -icanon; printf ready; read x; printf '\\033[?1004h'; cat -v",
     NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -817,7 +921,7 @@ static void test_in_band_resize_report(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?2048h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   /* Waiting on the enable-time report is what proves the mode is on before the
      resize below; there is no getter, and racing it would pass vacuously. */
@@ -835,7 +939,7 @@ static void test_in_band_resize_needs_mode(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf ready; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -862,7 +966,7 @@ static void test_in_band_resize_unchanged_is_silent(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?2048h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, REPORT_80x24));
 
@@ -882,7 +986,7 @@ static void test_in_band_resize_on_mode_enable(void) {
     "stty -echo -icanon; printf ready; read x; printf '\\033[?2048h'; cat -v",
     NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -909,7 +1013,7 @@ static void test_color_scheme_query_dark(void) {
     "stty -echo -icanon; printf ready; read x; printf '\\033[?996n'; cat -v",
     NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -929,7 +1033,7 @@ static void test_color_scheme_query_light(void) {
     "stty -echo -icanon; printf ready; read x; printf '\\033[?996n'; cat -v",
     NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -946,7 +1050,7 @@ static void test_color_scheme_notifies_on_change(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?2031hready'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   /* One write, so the parser has consumed 2031h by the time "ready" prints. */
   g_assert_true(wait_for_text(core, "ready"));
@@ -969,7 +1073,7 @@ static void test_color_scheme_needs_mode(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf ready; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -996,7 +1100,7 @@ static void test_alt_screen_arrows(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?1049h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_until(alt_screen_on, core));
   g_assert_true(pt_term_core_alt_scroll(core));      /* default-on */
@@ -1021,7 +1125,7 @@ static void test_alt_screen_tracking_wheel(void) {
     "printf '\\033[?1049h\\033[?1000h\\033[?1002h\\033[?1003h\\033[?1006h'; "
     "cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_until(alt_screen_on, core));
   g_assert_true(wait_until(tracking_on, core));
@@ -1051,7 +1155,7 @@ static void test_scroll_bottom(void) {
     "i=1; while [ $i -le 60 ]; do echo line$i; i=$((i+1)); done; "
     "echo bottom-marker; sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "bottom-marker"));
 
@@ -1083,7 +1187,7 @@ static void test_reset_clears_mouse_tracking(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_until(tracking_on, core));
 
@@ -1102,7 +1206,7 @@ static void test_reset_clears_grid_and_scrollback(void) {
     "i=1; while [ $i -le 60 ]; do echo line$i; i=$((i+1)); done; "
     "echo bottom-marker; cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "bottom-marker"));
 
@@ -1136,7 +1240,7 @@ static void test_reset_keeps_the_child(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf ready; cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
   pid_t before = pt_term_core_shell_pid(core);
@@ -1162,7 +1266,7 @@ static void test_reset_clears_selection(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf 'SELECTME done-marker\\n'; cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "SELECTME"));
 
@@ -1199,7 +1303,7 @@ static void test_reset_rearms_mode_edges(void) {
     "stty -echo -icanon; printf '\\033[?1004hready'; read x; "
     "printf '\\033[?1004h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
   /* Returning TRUE only happens with 1004 on, so this is the proof the first
@@ -1232,7 +1336,7 @@ static void test_reset_rearms_in_band_resize(void) {
     "stty -echo -icanon; printf '\\033[?2048hready'; read x; "
     "[ -n \"$x\" ] && printf 'FIRST-REPORT-SEEN\\033[?2048h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -1254,7 +1358,7 @@ static void test_reset_keeps_color_scheme(void) {
     "stty -echo -icanon; printf ready; read x; printf '\\033[?996n'; cat -v",
     NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready"));
 
@@ -1293,7 +1397,7 @@ static void test_reset_clears_osc_scanner(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf ready; cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .osc = on_osc_count_cb };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -1334,7 +1438,7 @@ static void test_osc_reaches_callback(void) {
     "printf '\\033]9;a notification\\007'; printf 'done-marker\\n'; "
     "sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw_marker, .osc = on_osc_cb };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -1366,7 +1470,7 @@ static void test_osc_consumer_can_unregister(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "printf '\\033]9;one\\007\\033]9;two\\007done-marker\\n'; sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw_marker, .osc = on_osc_unregister };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -1504,7 +1608,7 @@ static void run_osc52(Ctx *ctx, const char *cmd, PtOsc52Mode mode) {
   ctx->loop = g_main_loop_new(NULL, FALSE);
   const char *argv[] = {"/bin/sh", "-c", cmd, NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = on_draw_marker,
                               .clipboard_write = on_clipboard_write };
@@ -1595,7 +1699,7 @@ static void test_osc52_query_is_never_answered(void) {
     "stty -echo -icanon; printf '\\033]52;c;?\\007'; printf 'sent-marker\\n'; "
     "cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .clipboard_write = on_clipboard_write };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -1632,7 +1736,7 @@ static void test_paste_bracketed_strips_end_sequence(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf '\\033[?2004h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_until(bracketed_on, core));
 
@@ -1672,7 +1776,7 @@ static void test_paste_unbracketed_newline_becomes_cr(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon -icrnl; printf 'ready-marker\\n'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready-marker"));
   g_assert_false(pt_term_core_bracketed_paste(core));
@@ -1720,7 +1824,7 @@ static void test_title_dedupes(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf ready-marker; cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .title = on_title_cb };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -1750,7 +1854,7 @@ static void test_last_nonempty_row(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready-marker"));
 
@@ -1776,7 +1880,7 @@ static void test_last_nonempty_row_empty_grid(void) {
   /* A fresh grid nothing has printed to: no row qualifies. */
   const char *argv[] = {"/bin/sh", "-c", "sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   pt_term_core_sync(core);
   char buf[64];
@@ -1792,7 +1896,7 @@ static void test_scrollbar_tracks_the_viewport(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "seq 1 500; echo bottom-marker; sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "bottom-marker"));
 
@@ -1827,7 +1931,7 @@ static void test_scrollbar_without_scrollback(void) {
      must be hidden, and it is the state every fresh pane starts in. */
   const char *argv[] = {"/bin/sh", "-c", "sleep 30", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
 
   guint64 total = 0, offset = 0, len = 0;
@@ -1839,6 +1943,33 @@ static void test_scrollbar_without_scrollback(void) {
   pt_term_core_free(core);
 }
 
+/* The limit is per core, taken at construction — not process state: two cores
+   alive at once keep different histories from the same output. Zero keeps
+   none, so the scrollable area never grows past the viewport, while the
+   default-sized sibling holds every line above its. */
+static void test_scrollback_limit_per_core(void) {
+  const char *argv[] = {"/bin/sh", "-c", "seq 1 100; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *none =
+      pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, 0, &err);
+  g_assert_no_error(err);
+  PtTermCore *deep = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(none, "100"));
+  g_assert_true(wait_for_text(deep, "100"));
+
+  guint64 total = 0, offset = 0, len = 0;
+  g_assert_true(pt_term_core_scrollbar(none, &total, &offset, &len));
+  g_assert_cmpuint(total, ==, len);
+  g_assert_cmpuint(total, ==, 24);
+  g_assert_true(pt_term_core_scrollbar(deep, &total, &offset, &len));
+  g_assert_cmpuint(len, ==, 24);
+  g_assert_cmpuint(total, >, 24);
+
+  pt_term_core_free(none);
+  pt_term_core_free(deep);
+}
+
 static void test_scrollbar_hidden_on_the_alt_screen(void) {
   /* The alt screen keeps no scrollback (Terminal.zig:2994 gives it
      max_scrollback 0), so the numbers themselves say there is no bar to draw
@@ -1846,7 +1977,7 @@ static void test_scrollbar_hidden_on_the_alt_screen(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "seq 1 500; stty -echo -icanon; printf '\\033[?1049h'; cat -v", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_true(wait_until(alt_screen_on, core));
 
@@ -1865,7 +1996,7 @@ static void test_scrollbar_read_is_cached(void) {
      dirty the cache is the call under test. */
   const char *argv[] = {"/bin/sh", "-c", "echo cached-marker; cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   g_assert_cmpuint(pt_term_core_scrollbar_reads(core), ==, 0);  /* never eager */
   g_assert_true(wait_for_text(core, "cached-marker"));
@@ -1943,7 +2074,7 @@ static PtTermCore *cursor_core_new(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   /* One write, so the tty is settled by the time the marker prints. */
   g_assert_true(wait_for_text(core, "ready-marker"));
@@ -1973,7 +2104,7 @@ static void test_cursor_style_defaults(void) {
      to restore, so its DECSCUSR default is a steady block
      (ghostty src/terminal/stream_terminal.zig:154). */
   const char *argv[] = {"/bin/cat", NULL};
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, NULL);
+  PtTermCore *core = core_new(argv, NULL, NULL);
   g_assert_nonnull(core);
   pt_term_core_sync(core);
   PtCursorInfo info;
@@ -2240,7 +2371,9 @@ static void test_rows_walk_wide_pane(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 600, 24, 8, 16, &err);
+  PtTermCore *core =
+      pt_term_core_new("/tmp", argv, NULL, 600, 24, 8, 16,
+                       PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "ready-marker"));
   /* Row 2, columns 591-594 (1-based): all beyond the old 512-cell clip. */
@@ -2526,7 +2659,7 @@ static void test_output_callback_is_output_only(void) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf 'ready-marker\\n'; exec cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .draw = count_draw, .output = count_output };
   pt_term_core_set_callbacks(core, &cbs, &ctx);
@@ -2576,7 +2709,7 @@ static PtTermCore *notify_core(Ctx *ctx) {
   const char *argv[] = {"/bin/sh", "-c",
     "stty -echo -icanon; printf ready-marker; cat", NULL};
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   PtTermCoreCallbacks cbs = { .notification = on_notification };
   pt_term_core_set_callbacks(core, &cbs, ctx);
@@ -2734,7 +2867,7 @@ static void test_pane_token_reaches_child(void) {
   const char *argv[] = { "/bin/sh", "-c", "echo tok=$PT_PANE_TOKEN; sleep 30",
                          NULL };
   GError *err = NULL;
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   const char *tok = pt_term_core_pane_token(core);
   g_assert_nonnull(tok);
@@ -2750,7 +2883,7 @@ static void test_pane_token_reaches_child(void) {
 static void test_free_unlinks_report(void) {
   GError *err = NULL;
   const char *argv[] = { "/bin/sh", "-c", "sleep 30", NULL };
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   char *path = pt_agent_session_report_path(pt_term_core_pane_token(core));
   g_assert_true(pt_agent_session_report_write(path, PT_AGENT_CLAUDE, "x",
@@ -2766,7 +2899,7 @@ static void test_free_unlinks_report(void) {
 static void test_free_without_report_is_quiet(void) {
   GError *err = NULL;
   const char *argv[] = { "/bin/sh", "-c", "sleep 30", NULL };
-  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *core = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   char *path = pt_agent_session_report_path(pt_term_core_pane_token(core));
   g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
@@ -2783,7 +2916,7 @@ static void test_free_without_report_is_quiet(void) {
 static void test_write_right_after_spawn_queues(void) {
   const char *argv[] = { "/bin/sh", "-c", "read line; echo got:$line", NULL };
   GError *err = NULL;
-  PtTermCore *c = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  PtTermCore *c = core_new(argv, NULL, &err);
   g_assert_no_error(err);
   pt_term_core_write(c, "hello-resume\n", -1);
   g_assert_true(wait_for_text(c, "got:hello-resume"));
@@ -2821,6 +2954,8 @@ int main(int argc, char *argv[]) {
                   test_long_title_cut_on_boundary);
   g_test_add_func("/termcore/title-dedupe", test_title_dedupes);
   g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
+  g_test_add_func("/termcore/mouse-report-padding", test_mouse_report_padding);
+  g_test_add_func("/termcore/mouse-report-drag", test_mouse_report_drag_button);
   g_test_add_func("/termcore/wheel-report-batch",
                   test_wheel_report_batches_notches);
   g_test_add_func("/termcore/wheel-report-off",
@@ -2857,6 +2992,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/scrollbar", test_scrollbar_tracks_the_viewport);
   g_test_add_func("/termcore/scrollbar-empty",
                   test_scrollbar_without_scrollback);
+  g_test_add_func("/termcore/scrollback-limit-per-core",
+                  test_scrollback_limit_per_core);
   g_test_add_func("/termcore/scrollbar-alt-screen",
                   test_scrollbar_hidden_on_the_alt_screen);
   g_test_add_func("/termcore/scrollbar-cached", test_scrollbar_read_is_cached);

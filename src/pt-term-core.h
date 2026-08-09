@@ -62,11 +62,19 @@ typedef struct {
 
 /* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh).
  * env_pairs: NULL-terminated "KEY=VALUE" strings set in the child before
- * exec (after TERM). NULL → none. Copied; caller keeps ownership. */
+ * exec (after TERM). NULL → none. Copied; caller keeps ownership.
+ * max_scrollback: how much history this core keeps, in bytes rather than
+ * lines — that is what libghostty's max_scrollback counts
+ * (terminal/Screen.zig), whatever its C header calls it. Per core and fixed
+ * for its life, like cols/rows: the caller reads its config at spawn, which
+ * is how a scrollback-limit change reaches the panes opened after it and
+ * leaves the running ones alone — in ghostty too it is a new-surface
+ * setting. */
 PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
                              const char *const *env_pairs,
                              guint16 cols, guint16 rows,
-                             int cell_w, int cell_h, GError **error);
+                             int cell_w, int cell_h, gsize max_scrollback,
+                             GError **error);
 void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
                                 gpointer user);
 /* A no-op when all four arguments match what the core already has. Otherwise
@@ -106,7 +114,8 @@ void pt_term_core_scroll_bottom(PtTermCore *c);
 gboolean pt_term_core_scrollbar(PtTermCore *c, guint64 *total, guint64 *offset,
                                 guint64 *len);
 
-/* ---- mouse selection (viewport-relative pixels; PT_PAD_X/PT_PAD_Y-inset) ---- */
+/* ---- mouse selection (viewport-relative pixels, inside the pane's grid
+ * inset — see pt_term_core_set_padding) ---- */
 void pt_term_core_selection_press(PtTermCore *c, double px, double py,
                                   guint64 time_ns);
 void pt_term_core_selection_drag(PtTermCore *c, double px, double py);
@@ -147,6 +156,17 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
 gboolean pt_term_core_wheel_report(PtTermCore *c, GhosttyMouseButton button,
                                    GhosttyMods mods, double px, double py,
                                    int notches);
+/* Release every button the core still thinks is held, as one release report
+ * each at (px, py). For the gesture endings that never reach the release path
+ * — GTK cancels a click gesture for a starting drag, a popup's grab or the
+ * widget's teardown, and no release event follows. The core keeps a held
+ * button substituted into unnamed motion (see mouse_report), so a press bit
+ * nobody clears turns every later hover into a phantom SGR drag under mode
+ * 1002 — the wheel-press variant of the same leak is documented at the
+ * buttons_down comment in pt_term_core_wheel_report. A no-op when nothing is
+ * held. Returns TRUE when any report reached the pty. */
+gboolean pt_term_core_mouse_cancel(PtTermCore *c, GhosttyMods mods,
+                                   double px, double py);
 gboolean pt_term_core_mouse_tracking(PtTermCore *c);
 
 /* ---- focus reporting (mode 1004) ----
@@ -178,6 +198,16 @@ void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count);
  * that some remote program is reading, which is exfiltration with extra steps.
  * A query is dropped in silence — no callback, and not one byte to the pty. */
 void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode);
+
+/* ---- grid inset ----
+ *
+ * Pixels between the pane's edge and the first cell, defaulting to
+ * PT_CONFIG_WINDOW_PADDING_{X,Y}_DEFAULT. The widget owns this value — it is
+ * the one drawing the grid — and pushes it here so the core's pixel-to-cell
+ * mapping (selection, links, the geometry the mouse encoder reports from)
+ * stays in step with what is on screen. Every pixel a caller passes is a pane
+ * coordinate, so a core told the wrong inset answers off by whole cells. */
+void pt_term_core_set_padding(PtTermCore *c, int x, int y);
 
 /* ---- color scheme (CSI ? 996 n, mode 2031) ----
  *

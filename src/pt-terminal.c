@@ -10,10 +10,6 @@
 #define PT_FONT_FAMILY_DEFAULT "JetBrains Mono"
 #define PT_FONT_SIZE_MIN 6
 #define PT_FONT_SIZE_MAX 32
-/* Inset between the pane edge and the character grid (mirrored by
- * PT_CORE_PAD_X / PT_CORE_PAD_Y in pt-term-core.c for hit-testing). */
-#define PT_PAD_X 20
-#define PT_PAD_Y 18
 
 /* Overlay scrollbar for the scrollback: a thumb on the right edge with no
  * gutter behind it, at full strength while the viewport is moving and faded
@@ -31,6 +27,20 @@
  * widgets register here so a size change can re-measure them all. */
 static int font_size_pts = PT_FONT_SIZE_DEFAULT;
 static GSList *live_terminals;
+
+/* Inset between the pane edge and the character grid, the `window-padding-x`
+ * and `window-padding-y` config keys. Shared like the font size, and mirrored
+ * into every core (pt_term_core_set_padding) so hit-testing lands on the cell
+ * the user is looking at. */
+static int pad_x = PT_CONFIG_WINDOW_PADDING_X_DEFAULT;
+static int pad_y = PT_CONFIG_WINDOW_PADDING_Y_DEFAULT;
+
+/* Bytes of history the next core is built with, the `scrollback-limit` key.
+ * Shared like the padding above, but read only at spawn: the library takes it
+ * at terminal creation and never after, so unlike the inset a change cannot
+ * reach a live core — it reaches the panes opened after it, as in ghostty,
+ * where scrollback-limit is a new-surface setting too. */
+static gsize scrollback_limit = PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT;
 
 /* Terminal colors from the active theme. Defaults mirror pt-dark so a
  * terminal created before the first set_theme call renders correctly. */
@@ -550,7 +560,7 @@ static void draw_row_underlines(PtTerminal *t, GtkSnapshot *snapshot,
                                 const PtCell *cells, int n, int y,
                                 PtColor bg_default, int span_a, int span_b) {
   int uy = MIN(y + t->baseline + 2, y + t->cell_h - 1);
-  int x = PT_PAD_X;
+  int x = pad_x;
   for (int i = 0; i < n; i++, x += t->cell_w) {
     const PtCell *cl = &cells[i];
     if (!cl->has_link && !(i >= span_a && i <= span_b)) continue;
@@ -600,8 +610,8 @@ static void apply_palette(PtTermCore *core) {
  * cell metrics. Two is the floor: a one-column terminal is not a terminal. */
 static void grid_for_size(PtTerminal *t, int width, int height,
                           int *cols, int *rows) {
-  *cols = (width - 2 * PT_PAD_X) / t->cell_w;
-  *rows = (height - 2 * PT_PAD_Y) / t->cell_h;
+  *cols = (width - 2 * pad_x) / t->cell_w;
+  *rows = (height - 2 * pad_y) / t->cell_h;
   if (*cols < 2) *cols = 2;
   if (*rows < 2) *rows = 2;
 }
@@ -624,7 +634,7 @@ static void ensure_core(PtTerminal *t) {
   t->core = pt_term_core_new(t->start_cwd, NULL,
                              (const char *const *)t->env,
                              (guint16)cols, (guint16)rows,
-                             t->cell_w, t->cell_h, &err);
+                             t->cell_w, t->cell_h, scrollback_limit, &err);
   if (t->core == NULL) {
     g_warning("pt: terminal spawn failed: %s",
               err != NULL ? err->message : "?");
@@ -644,6 +654,10 @@ static void ensure_core(PtTerminal *t) {
                               .notification = core_notification };
   pt_term_core_set_callbacks(t->core, &cbs, t);
   pt_term_core_set_osc52(t->core, t->osc52);
+  /* Same reason as the scheme below: a pane spawned after a config change has
+   * to start on the inset the widget is already drawing with, or its first
+   * click lands a cell away from where it looks. */
+  pt_term_core_set_padding(t->core, pad_x, pad_y);
   /* Cores are built lazily, long after the theme was applied globally, so the
    * scheme has to be seeded here or a pane opened later answers 996 with the
    * default instead of the active theme. Nothing is written: the child has not
@@ -858,7 +872,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   PangoFont *run_font = NULL;
   GdkRGBA run_color = { 0, 0, 0, 1 };
   int run_x = 0;
-  int y = PT_PAD_Y;
+  int y = pad_y;
   PtRowReader *rows = pt_term_core_rows_begin(t->core);
   int ncells;
   int row_i = -1;               /* the visible row the walk stands on */
@@ -873,7 +887,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     gboolean row_linked = FALSE;
     int bg_x = 0, bg_w = 0;
     GdkRGBA bg_color = { 0, 0, 0, 0 };
-    int x = PT_PAD_X;
+    int x = pad_x;
     for (int i = 0; i < ncells; i++, x += t->cell_w) {
       const PtCell *cl = &cells[i];
       row_linked |= cl->has_link;
@@ -905,7 +919,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
           &GRAPHENE_RECT_INIT(bg_x, y, bg_w, t->cell_h));
 
     /* Glyphs second, over the row's backgrounds. */
-    x = PT_PAD_X;
+    x = pad_x;
     for (int i = 0; i < ncells; i++, x += t->cell_w) {
       const PtCell *cl = &cells[i];
       /* Nothing to draw: an empty cell, or the spacer half of a wide one. */
@@ -995,8 +1009,8 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
      * already resolved both ways in (ghostty's order, renderer/generic.zig:
      * 3232): x is backed up off a spacer tail, and width says 2 on either
      * half — so this draws exactly what it is told. */
-    float x = PT_PAD_X + ci.x * t->cell_w;
-    float y_cur = PT_PAD_Y + ci.y * t->cell_h;
+    float x = pad_x + ci.x * t->cell_w;
+    float y_cur = pad_y + ci.y * t->cell_h;
     float w_cur = (float)(ci.width * t->cell_w);
     /* A filled block sits on top of its glyph, so it stays translucent enough
      * to read through. The thin shapes have nothing under them to preserve and
@@ -1091,7 +1105,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     pango_layout_set_text(t->layout, msg, -1);
     gtk_snapshot_save(snapshot);
     gtk_snapshot_translate(snapshot,
-                           &GRAPHENE_POINT_INIT(PT_PAD_X, h - t->cell_h - 4));
+                           &GRAPHENE_POINT_INIT(pad_x, h - t->cell_h - 4));
     gtk_snapshot_append_layout(snapshot, t->layout,
                                &(GdkRGBA){0.9f, 0.76f, 0.48f, 1});
     gtk_snapshot_restore(snapshot);
@@ -1100,8 +1114,8 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   if (pt_debug_enabled())
     g_debug("pt frame: %.2f ms (%dx%d cells)",
             (double)(g_get_monotonic_time() - frame_t0) / 1000.0,
-            t->cell_w > 0 ? (w - 2 * PT_PAD_X) / t->cell_w : 0,
-            t->cell_h > 0 ? (h - 2 * PT_PAD_Y) / t->cell_h : 0);
+            t->cell_w > 0 ? (w - 2 * pad_x) / t->cell_w : 0,
+            t->cell_h > 0 ? (h - 2 * pad_y) / t->cell_h : 0);
 }
 
 /* ---- input ---- */
@@ -1357,8 +1371,8 @@ static void update_link_cursor(PtTerminal *t) {
   /* Pixel -> cell, mirroring the core's own mapping. Everywhere outside the
    * grid shares one bucket (-1): every outside answer is "no link". */
   int col = -1, row = -1;
-  double cx = (t->mouse_x - PT_PAD_X) / (double)t->cell_w;
-  double cy = (t->mouse_y - PT_PAD_Y) / (double)t->cell_h;
+  double cx = (t->mouse_x - pad_x) / (double)t->cell_w;
+  double cy = (t->mouse_y - pad_y) / (double)t->cell_h;
   if (cx >= 0 && cy >= 0) { col = (int)cx; row = (int)cy; }
   guint serial = pt_term_core_content_serial(t->core);
   if (row == t->link_row && col == t->link_col && serial == t->link_serial)
@@ -1479,9 +1493,9 @@ static gboolean open_link_at(PtTerminal *t, double x, double y) {
     /* The bare URL the hover already resolved for this cell. Re-checked
      * against the click's own position rather than trusted: the pointer can
      * reach a cell the hover pass never answered for. */
-    int col = (int)((x - PT_PAD_X) / (double)t->cell_w);
-    int row = (int)((y - PT_PAD_Y) / (double)t->cell_h);
-    if (x < PT_PAD_X || y < PT_PAD_Y || !url_covers(t, row, col)) return FALSE;
+    int col = (int)((x - pad_x) / (double)t->cell_w);
+    int row = (int)((y - pad_y) / (double)t->cell_h);
+    if (x < pad_x || y < pad_y || !url_covers(t, row, col)) return FALSE;
     uri = g_strdup(t->url_uri);
   }
   GtkRoot *root = gtk_widget_get_root(GTK_WIDGET(t));
@@ -1639,6 +1653,34 @@ static void on_click_released(GtkGestureClick *g, int n, double x, double y,
   if (button != GDK_BUTTON_PRIMARY) return;
   /* The final selection install repaints through the core's draw callback. */
   pt_term_core_selection_release(t->core, x, y);
+}
+
+/* The endings "released" never sees. A held press the app owns has a bit set
+ * in the core's buttons_down, and the core substitutes a held button into
+ * unnamed motion (pt_term_core_mouse_report) — so a press bit nobody clears
+ * turns every later hover into a phantom SGR drag under mode 1002. pt has
+ * shipped that leak before, through the wheel (see the buttons_down note in
+ * pt_term_core_wheel_report). The app saw the press, so it is owed the
+ * release; the modifiers are read off the seat because these paths carry no
+ * event to read them from. */
+static void mouse_gesture_cancel(PtTerminal *t) {
+  t->button_down = FALSE;   /* ownership is open again */
+  link_cache_reset(t);
+  if (t->core != NULL && t->reporting_drag)
+    pt_term_core_mouse_cancel(t->core, pt_keymap_mods(live_mods()),
+                              t->mouse_x, t->mouse_y);
+  t->reporting_drag = FALSE;
+}
+
+/* GTK cancels the click gesture instead of releasing it when something takes
+ * the sequence away mid-press: a grab (a popup, a context menu, a drag
+ * elsewhere in the window) or the widget's own teardown. Ghostty's GTK apprt
+ * wires only press and release here; pt cannot afford to, for the reason
+ * above. */
+static void on_click_cancel(GtkGesture *g, GdkEventSequence *seq,
+                            gpointer user) {
+  (void)g; (void)seq;
+  mouse_gesture_cancel(PT_TERMINAL(user));
 }
 
 static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
@@ -1857,6 +1899,30 @@ void pt_terminal_set_font(const char *family, int pts) {
   }
 }
 
+/* ---- grid inset ---- */
+void pt_terminal_set_padding(int x, int y) {
+  x = CLAMP(x, PT_CONFIG_WINDOW_PADDING_MIN, PT_CONFIG_WINDOW_PADDING_MAX);
+  y = CLAMP(y, PT_CONFIG_WINDOW_PADDING_MIN, PT_CONFIG_WINDOW_PADDING_MAX);
+  if (x == pad_x && y == pad_y) return;
+  pad_x = x;
+  pad_y = y;
+  for (GSList *l = live_terminals; l != NULL; l = l->next) {
+    PtTerminal *t = l->data;
+    /* The core maps pixels to cells for selections, links and mouse reports,
+     * so it has to learn the new inset in the same pass that redraws with
+     * it. */
+    if (t->core != NULL) pt_term_core_set_padding(t->core, pad_x, pad_y);
+    /* size_allocate re-derives cols/rows from the new inset and resizes the
+     * PTY + vt (reflow), exactly as a font change does. */
+    gtk_widget_queue_resize(GTK_WIDGET(t));
+    gtk_widget_queue_draw(GTK_WIDGET(t));
+  }
+}
+
+void pt_terminal_set_scrollback_limit(gsize bytes) {
+  scrollback_limit = bytes;
+}
+
 void pt_terminal_set_pane_mouse_reporting(PtTerminal *t, gboolean on) {
   t->report_mouse = on;
   link_cache_reset(t);       /* who owns the pointer just changed under it */
@@ -1906,6 +1972,14 @@ gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t) {
 }
 
 /* ---- boilerplate ---- */
+/* A pane can leave the screen with a button still held (a tab switch over a
+ * held press); no release or gesture cancel can reach it once unmapped, so the
+ * press would strand exactly like a cancelled sequence. Same treatment. */
+static void pt_terminal_unmap(GtkWidget *widget) {
+  mouse_gesture_cancel(PT_TERMINAL(widget));
+  GTK_WIDGET_CLASS(pt_terminal_parent_class)->unmap(widget);
+}
+
 static void pt_terminal_dispose(GObject *obj) {
   PtTerminal *t = PT_TERMINAL(obj);
   live_terminals = g_slist_remove(live_terminals, t);
@@ -1933,6 +2007,7 @@ static void pt_terminal_class_init(PtTerminalClass *klass) {
   oc->dispose = pt_terminal_dispose;
   wc->snapshot = pt_terminal_snapshot;
   wc->size_allocate = pt_terminal_size_allocate;
+  wc->unmap = pt_terminal_unmap;
   gtk_widget_class_set_css_name(wc, "pt-terminal");
   signals[SIG_EXITED] = g_signal_new("exited", PT_TYPE_TERMINAL,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
@@ -1980,6 +2055,7 @@ static void pt_terminal_init(PtTerminal *t) {
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0);
   g_signal_connect(click, "pressed", G_CALLBACK(on_click_pressed), t);
   g_signal_connect(click, "released", G_CALLBACK(on_click_released), t);
+  g_signal_connect(click, "cancel", G_CALLBACK(on_click_cancel), t);
   gtk_widget_add_controller(GTK_WIDGET(t), GTK_EVENT_CONTROLLER(click));
 
   GtkEventController *motion = gtk_event_controller_motion_new();
