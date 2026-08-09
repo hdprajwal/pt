@@ -148,6 +148,17 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
 gboolean pt_term_core_wheel_report(PtTermCore *c, GhosttyMouseButton button,
                                    GhosttyMods mods, double px, double py,
                                    int notches);
+/* Release every button the core still thinks is held, as one release report
+ * each at (px, py). For the gesture endings that never reach the release path
+ * — GTK cancels a click gesture for a starting drag, a popup's grab or the
+ * widget's teardown, and no release event follows. The core keeps a held
+ * button substituted into unnamed motion (see mouse_report), so a press bit
+ * nobody clears turns every later hover into a phantom SGR drag under mode
+ * 1002 — the wheel-press variant of the same leak is documented at the
+ * buttons_down comment in pt_term_core_wheel_report. A no-op when nothing is
+ * held. Returns TRUE when any report reached the pty. */
+gboolean pt_term_core_mouse_cancel(PtTermCore *c, GhosttyMods mods,
+                                   double px, double py);
 gboolean pt_term_core_mouse_tracking(PtTermCore *c);
 
 /* ---- focus reporting (mode 1004) ----

@@ -1648,6 +1648,34 @@ static void on_click_released(GtkGestureClick *g, int n, double x, double y,
   pt_term_core_selection_release(t->core, x, y);
 }
 
+/* The endings "released" never sees. A held press the app owns has a bit set
+ * in the core's buttons_down, and the core substitutes a held button into
+ * unnamed motion (pt_term_core_mouse_report) — so a press bit nobody clears
+ * turns every later hover into a phantom SGR drag under mode 1002. pt has
+ * shipped that leak before, through the wheel (see the buttons_down note in
+ * pt_term_core_wheel_report). The app saw the press, so it is owed the
+ * release; the modifiers are read off the seat because these paths carry no
+ * event to read them from. */
+static void mouse_gesture_cancel(PtTerminal *t) {
+  t->button_down = FALSE;   /* ownership is open again */
+  link_cache_reset(t);
+  if (t->core != NULL && t->reporting_drag)
+    pt_term_core_mouse_cancel(t->core, pt_keymap_mods(live_mods()),
+                              t->mouse_x, t->mouse_y);
+  t->reporting_drag = FALSE;
+}
+
+/* GTK cancels the click gesture instead of releasing it when something takes
+ * the sequence away mid-press: a grab (a popup, a context menu, a drag
+ * elsewhere in the window) or the widget's own teardown. Ghostty's GTK apprt
+ * wires only press and release here; pt cannot afford to, for the reason
+ * above. */
+static void on_click_cancel(GtkGesture *g, GdkEventSequence *seq,
+                            gpointer user) {
+  (void)g; (void)seq;
+  mouse_gesture_cancel(PT_TERMINAL(user));
+}
+
 static void on_drag_update(GtkGestureDrag *g, double ox, double oy,
                            gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
@@ -1933,6 +1961,14 @@ gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t) {
 }
 
 /* ---- boilerplate ---- */
+/* A pane can leave the screen with a button still held (a tab switch over a
+ * held press); no release or gesture cancel can reach it once unmapped, so the
+ * press would strand exactly like a cancelled sequence. Same treatment. */
+static void pt_terminal_unmap(GtkWidget *widget) {
+  mouse_gesture_cancel(PT_TERMINAL(widget));
+  GTK_WIDGET_CLASS(pt_terminal_parent_class)->unmap(widget);
+}
+
 static void pt_terminal_dispose(GObject *obj) {
   PtTerminal *t = PT_TERMINAL(obj);
   live_terminals = g_slist_remove(live_terminals, t);
@@ -1960,6 +1996,7 @@ static void pt_terminal_class_init(PtTerminalClass *klass) {
   oc->dispose = pt_terminal_dispose;
   wc->snapshot = pt_terminal_snapshot;
   wc->size_allocate = pt_terminal_size_allocate;
+  wc->unmap = pt_terminal_unmap;
   gtk_widget_class_set_css_name(wc, "pt-terminal");
   signals[SIG_EXITED] = g_signal_new("exited", PT_TYPE_TERMINAL,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_INT);
@@ -2007,6 +2044,7 @@ static void pt_terminal_init(PtTerminal *t) {
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), 0);
   g_signal_connect(click, "pressed", G_CALLBACK(on_click_pressed), t);
   g_signal_connect(click, "released", G_CALLBACK(on_click_released), t);
+  g_signal_connect(click, "cancel", G_CALLBACK(on_click_cancel), t);
   gtk_widget_add_controller(GTK_WIDGET(t), GTK_EVENT_CONTROLLER(click));
 
   GtkEventController *motion = gtk_event_controller_motion_new();

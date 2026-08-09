@@ -706,6 +706,19 @@ static void test_mouse_report_drag_button(void) {
                                           37.0, 52.0));
   g_assert_true(wait_for_text(core, "^[[<0;3;3M"));
 
+  /* That press is now stale: the widget's gesture was cancelled (a starting
+     drag, a popup's grab, an unmap), so no release event will ever name it.
+     Without the cancel, the substitution above turns every later hover into a
+     phantom drag report. The cancel is the release the app is owed — same
+     bytes — and after it the unnamed motion is a hover again. */
+  g_assert_true(pt_term_core_mouse_cancel(core, 0, 37.0, 52.0));
+  g_assert_true(wait_for_text(core, "^[[<0;3;3m"));
+  g_assert_false(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_MOTION,
+                                           GHOSTTY_MOUSE_BUTTON_UNKNOWN, 0,
+                                           45.0, 68.0));
+  /* Cancelling with nothing held reports nothing. */
+  g_assert_false(pt_term_core_mouse_cancel(core, 0, 45.0, 68.0));
+
   pt_term_core_sync(core);
   char *text = pt_term_core_grid_text(core);
   g_assert_nonnull(text);

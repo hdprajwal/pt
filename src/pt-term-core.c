@@ -1422,6 +1422,22 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
   return TRUE;
 }
 
+gboolean pt_term_core_mouse_cancel(PtTermCore *c, GhosttyMods mods,
+                                   double px, double py) {
+  gboolean reported = FALSE;
+  while (c->buttons_down != 0) {
+    GhosttyMouseButton button =
+        (GhosttyMouseButton)g_bit_nth_lsf(c->buttons_down, -1);
+    if (pt_term_core_mouse_report(c, GHOSTTY_MOUSE_ACTION_RELEASE, button,
+                                  mods, px, py))
+      reported = TRUE;
+    /* mouse_report clears the bit before encoding — but not on its dead-pty
+     * early return, so clear by hand too or that path never leaves the loop. */
+    c->buttons_down &= ~(1u << button);
+  }
+  return reported;
+}
+
 gboolean pt_term_core_wheel_report(PtTermCore *c, GhosttyMouseButton button,
                                    GhosttyMods mods, double px, double py,
                                    int notches) {
