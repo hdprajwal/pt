@@ -297,9 +297,11 @@ osc52 = write
 claude-usage = false
 resume-agents = true
 scrollback-limit = 10000000
+window-padding-x = 20
+window-padding-y = 18
 ```
 
-Those ten keys plus `app-*` color-token overrides (e.g.
+Those twelve keys plus `app-*` color-token overrides (e.g.
 `app-background = #101010`) are the entire config surface. Booleans accept
 `true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`. `osc52` takes `write`, `ask`
 or `off` (see above). `claude-usage` is the info panel's Claude Code opt-in
@@ -308,7 +310,9 @@ turns the lookups off again. `resume-agents` is on by default and restores a
 pane's agent conversation (see above). `scrollback-limit` is how much history
 one pane keeps, in bytes rather than lines — ghostty's key, its semantics and
 its 10MB default — and it is read when a pane spawns, so a change applies to
-panes opened after it. Custom themes go in
+panes opened after it. `window-padding-x` and `window-padding-y` are the pixels
+between a pane's edge and its text, ghostty's keys of the same name, and they
+apply live to every open pane. Custom themes go in
 `~/.config/pt/themes/<name>`; both the config and the active theme are watched
 and applied live.
 

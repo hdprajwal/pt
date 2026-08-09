@@ -36,6 +36,7 @@ struct PtTermCore {
   char *pane_token;         /* $PT_PANE_TOKEN; see pt_term_core_pane_token */
   guint16 cols, rows;
   int cell_w, cell_h;
+  int pad_x, pad_y;         /* grid inset; see pt_term_core_set_padding */
 
   gboolean eof;
   gboolean child_exited;
@@ -78,10 +79,6 @@ struct PtTermCore {
   PtTermCoreCallbacks cbs;
   gpointer cbs_user;
 };
-
-/* Inset around the grid; mirrors PT_PAD_X / PT_PAD_Y in pt-terminal.c. */
-#define PT_CORE_PAD_X 20
-#define PT_CORE_PAD_Y 18
 
 /* Bytes of history a fresh core is built with; see
  * pt_term_core_set_scrollback_limit. */
@@ -826,6 +823,8 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
                              int cell_w, int cell_h, GError **error) {
   PtTermCore *c = g_new0(PtTermCore, 1);
   c->cols = cols; c->rows = rows; c->cell_w = cell_w; c->cell_h = cell_h;
+  c->pad_x = PT_CONFIG_WINDOW_PADDING_X_DEFAULT;
+  c->pad_y = PT_CONFIG_WINDOW_PADDING_Y_DEFAULT;
   c->pty_fd = -1;
   c->last_exit = -1;
   c->osc52 = PT_CONFIG_OSC52_DEFAULT;
@@ -911,6 +910,11 @@ void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode) {
 
 void pt_term_core_set_scrollback_limit(gsize bytes) {
   default_scrollback = bytes;
+}
+
+void pt_term_core_set_padding(PtTermCore *c, int x, int y) {
+  c->pad_x = x;
+  c->pad_y = y;
 }
 
 void pt_term_core_set_color_scheme(PtTermCore *c, gboolean dark) {
@@ -1129,8 +1133,8 @@ guint64 pt_term_core_scrollbar_reads(PtTermCore *c) { return c->sb_reads; }
 
 static void sel_pixel_to_cell(PtTermCore *c, double px, double py,
                               uint16_t *col, uint16_t *row) {
-  double cx = (px - PT_CORE_PAD_X) / (double)c->cell_w;
-  double cy = (py - PT_CORE_PAD_Y) / (double)c->cell_h;
+  double cx = (px - c->pad_x) / (double)c->cell_w;
+  double cy = (py - c->pad_y) / (double)c->cell_h;
   int ic = cx < 0 ? 0 : (int)cx;
   int ir = cy < 0 ? 0 : (int)cy;
   if (ic > c->cols - 1) ic = c->cols - 1;
@@ -1319,8 +1323,8 @@ char *pt_term_core_hyperlink_at(PtTermCore *c, double px, double py) {
   /* Not clamped to the grid the way a selection drag is: the padding around it
    * is not part of any cell, and clamping there would make the edge column's
    * link openable from outside it. */
-  double cx = (px - PT_CORE_PAD_X) / (double)c->cell_w;
-  double cy = (py - PT_CORE_PAD_Y) / (double)c->cell_h;
+  double cx = (px - c->pad_x) / (double)c->cell_w;
+  double cy = (py - c->pad_y) / (double)c->cell_h;
   if (cx < 0 || cy < 0 || cx >= c->cols || cy >= c->rows) return NULL;
   return pt_term_core_link_at_cell(c, (int)cy, (int)cx);
 }
@@ -1343,12 +1347,12 @@ static void mouse_encoder_sync(PtTermCore *c, gboolean any_button_pressed) {
   ghostty_mouse_encoder_setopt_from_terminal(c->mouse_encoder, c->terminal);
 
   GhosttyMouseEncoderSize size = GHOSTTY_INIT_SIZED(GhosttyMouseEncoderSize);
-  size.screen_width = (uint32_t)(c->cols * c->cell_w + 2 * PT_CORE_PAD_X);
-  size.screen_height = (uint32_t)(c->rows * c->cell_h + 2 * PT_CORE_PAD_Y);
+  size.screen_width = (uint32_t)(c->cols * c->cell_w + 2 * c->pad_x);
+  size.screen_height = (uint32_t)(c->rows * c->cell_h + 2 * c->pad_y);
   size.cell_width = (uint32_t)c->cell_w;
   size.cell_height = (uint32_t)c->cell_h;
-  size.padding_left = size.padding_right = PT_CORE_PAD_X;
-  size.padding_top = size.padding_bottom = PT_CORE_PAD_Y;
+  size.padding_left = size.padding_right = c->pad_x;
+  size.padding_top = size.padding_bottom = c->pad_y;
   ghostty_mouse_encoder_setopt(c->mouse_encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE,
                                &size);
 

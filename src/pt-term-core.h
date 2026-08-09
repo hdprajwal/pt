@@ -106,7 +106,8 @@ void pt_term_core_scroll_bottom(PtTermCore *c);
 gboolean pt_term_core_scrollbar(PtTermCore *c, guint64 *total, guint64 *offset,
                                 guint64 *len);
 
-/* ---- mouse selection (viewport-relative pixels; PT_PAD_X/PT_PAD_Y-inset) ---- */
+/* ---- mouse selection (viewport-relative pixels, inside the pane's grid
+ * inset — see pt_term_core_set_padding) ---- */
 void pt_term_core_selection_press(PtTermCore *c, double px, double py,
                                   guint64 time_ns);
 void pt_term_core_selection_drag(PtTermCore *c, double px, double py);
@@ -188,6 +189,16 @@ void pt_term_core_set_osc52(PtTermCore *c, PtOsc52Mode mode);
  * opened after it and leaves the running ones alone — as in ghostty, where
  * scrollback-limit is a new-surface setting too. */
 void pt_term_core_set_scrollback_limit(gsize bytes);
+
+/* ---- grid inset ----
+ *
+ * Pixels between the pane's edge and the first cell, defaulting to
+ * PT_CONFIG_WINDOW_PADDING_{X,Y}_DEFAULT. The widget owns this value — it is
+ * the one drawing the grid — and pushes it here so the core's pixel-to-cell
+ * mapping (selection, links, the geometry the mouse encoder reports from)
+ * stays in step with what is on screen. Every pixel a caller passes is a pane
+ * coordinate, so a core told the wrong inset answers off by whole cells. */
+void pt_term_core_set_padding(PtTermCore *c, int x, int y);
 
 /* ---- color scheme (CSI ? 996 n, mode 2031) ----
  *

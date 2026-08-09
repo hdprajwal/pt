@@ -56,6 +56,20 @@ typedef enum {
  * running with the limit they were built with. */
 #define PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT 10000000
 
+/* Pixels between a pane's edge and its character grid — ghostty's
+ * `window-padding-x` / `window-padding-y` (config/Config.zig), whose defaults
+ * are its own; these are the inset pt has always drawn. Applied live to every
+ * open pane rather than only to the next one: the widget and its core take the
+ * value together, so what is drawn and what pixel-to-cell mapping answers
+ * (selection, links, mouse reports) can never disagree. */
+#define PT_CONFIG_WINDOW_PADDING_X_DEFAULT 20
+#define PT_CONFIG_WINDOW_PADDING_Y_DEFAULT 18
+/* Range the parser accepts. The ceiling is well short of squeezing the grid
+ * out of a pane, which is the failure ghostty's docs warn its own users to
+ * avoid by hand. */
+#define PT_CONFIG_WINDOW_PADDING_MIN 0
+#define PT_CONFIG_WINDOW_PADDING_MAX 200
+
 typedef struct {
   char *theme;             /* never NULL */
   int font_size;           /* terminal, points */
@@ -63,6 +77,8 @@ typedef struct {
   double ui_font_size;     /* chrome base, px */
   char *ui_font_family;    /* never NULL */
   int scrollback_limit;    /* history a pane keeps, bytes */
+  int window_padding_x;    /* pane edge to cell grid, px, left and right */
+  int window_padding_y;    /* pane edge to cell grid, px, top and bottom */
   gboolean mouse_reporting;  /* forward mouse events to tracking apps */
   gboolean claude_usage;     /* fetch Claude Code plan usage from Anthropic */
   gboolean resume_agents;    /* resume a restored pane's agent session */

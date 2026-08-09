@@ -33,6 +33,8 @@ PtConfig *pt_config_new(void) {
   c->ui_font_size = PT_CONFIG_UI_FONT_SIZE_DEFAULT;
   c->ui_font_family = g_strdup(PT_CONFIG_UI_FONT_FAMILY_DEFAULT);
   c->scrollback_limit = PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT;
+  c->window_padding_x = PT_CONFIG_WINDOW_PADDING_X_DEFAULT;
+  c->window_padding_y = PT_CONFIG_WINDOW_PADDING_Y_DEFAULT;
   c->mouse_reporting = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
   c->claude_usage = PT_CONFIG_CLAUDE_USAGE_DEFAULT;
   c->resume_agents = PT_CONFIG_RESUME_AGENTS_DEFAULT;
@@ -101,6 +103,15 @@ static const PtConfigField config_fields[] = {
    * can fill. */
   { "scrollback-limit", G_STRUCT_OFFSET(PtConfig, scrollback_limit),
     FLD_INT,    0, G_MAXINT, NULL, "bytes, zero or more" },
+  /* Pixels of inset around the grid. Zero is a pane whose text starts at its
+   * own edge, which is a real taste; the ceiling stops a value that would
+   * leave nothing to put a grid in. */
+  { "window-padding-x", G_STRUCT_OFFSET(PtConfig, window_padding_x),
+    FLD_INT,    PT_CONFIG_WINDOW_PADDING_MIN, PT_CONFIG_WINDOW_PADDING_MAX,
+    NULL, "pixels, 0 to 200" },
+  { "window-padding-y", G_STRUCT_OFFSET(PtConfig, window_padding_y),
+    FLD_INT,    PT_CONFIG_WINDOW_PADDING_MIN, PT_CONFIG_WINDOW_PADDING_MAX,
+    NULL, "pixels, 0 to 200" },
 };
 
 static gpointer field_slot(PtConfig *c, const PtConfigField *f) {

@@ -187,9 +187,9 @@ static void test_long_grapheme_cluster(void) {
 static void test_selection(void) {
   /* Print a known word, then programmatically drag-select across it and assert
      pt_term_core_selection_text returns it. Cells are 8x16 with the grid
-     inset by PT_PAD_X=20 / PT_PAD_Y=18, so column N spans pixels
-     [20 + 8N, 20 + 8N + 8) and row 0 spans [18, 34). "SELECTME" lands at
-     row 0, columns 0..7. */
+     inset by the default 20/18, so column N spans pixels [20 + 8N,
+     20 + 8N + 8) and row 0 spans [18, 34). "SELECTME" lands at row 0,
+     columns 0..7. */
   Ctx ctx = {0};
   ctx.loop = g_main_loop_new(NULL, FALSE);
   const char *argv[] = {"/bin/sh", "-c",
@@ -630,6 +630,35 @@ static void test_mouse_report_sgr(void) {
                                           GHOSTTY_MOUSE_BUTTON_FIVE, 0,
                                           29.0, 36.0));
   g_assert_true(wait_for_text(core, "^[[<65;2;2M"));
+
+  pt_term_core_free(core);
+}
+
+/* The inset is configurable (`window-padding-x` / `window-padding-y`) and the
+   widget pushes it here, so what the mouse encoder reports has to follow the
+   setter rather than the inset the core was built with. Same 1000+1006 harness
+   and the same 8x16 cells: pixel (21, 20) is column 0, row 0 under the default
+   20/18, and column 2, row 1 once the inset is gone. A pixel inside the grid
+   either way is the point — one out in the padding answers ";1;1" from the
+   encoder's own clamp whatever the inset is, and proves nothing. */
+static void test_mouse_report_padding(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(tracking_on, core));
+
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          21.0, 20.0));
+  g_assert_true(wait_for_text(core, "^[[<0;1;1M"));
+
+  pt_term_core_set_padding(core, 0, 0);
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          21.0, 20.0));
+  g_assert_true(wait_for_text(core, "^[[<0;3;2M"));
 
   pt_term_core_free(core);
 }
@@ -2873,6 +2902,7 @@ int main(int argc, char *argv[]) {
                   test_long_title_cut_on_boundary);
   g_test_add_func("/termcore/title-dedupe", test_title_dedupes);
   g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
+  g_test_add_func("/termcore/mouse-report-padding", test_mouse_report_padding);
   g_test_add_func("/termcore/mouse-report-drag", test_mouse_report_drag_button);
   g_test_add_func("/termcore/wheel-report-batch",
                   test_wheel_report_batches_notches);

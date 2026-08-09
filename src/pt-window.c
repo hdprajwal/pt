@@ -225,6 +225,7 @@ static void render_config(PtWindow *w, const PtConfig *cfg) {
   pt_terminal_set_font(cfg->font_family, cfg->font_size);
   pt_terminal_set_mouse_reporting(cfg->mouse_reporting);
   pt_terminal_set_osc52(cfg->osc52);
+  pt_terminal_set_padding(cfg->window_padding_x, cfg->window_padding_y);
   /* Spawn-time, so editing this reaches the next pane rather than the open
    * ones; ghostty's scrollback-limit works the same way. */
   pt_term_core_set_scrollback_limit((gsize)cfg->scrollback_limit);

@@ -193,6 +193,58 @@ static void test_parse_scrollback_limit(void) {
   pt_config_free(back);
 }
 
+static void test_parse_window_padding(void) {
+  /* Absent: the inset pt has always drawn. */
+  PtConfig *c = pt_config_parse("");
+  g_assert_cmpint(c->window_padding_x, ==, PT_CONFIG_WINDOW_PADDING_X_DEFAULT);
+  g_assert_cmpint(c->window_padding_y, ==, PT_CONFIG_WINDOW_PADDING_Y_DEFAULT);
+  pt_config_free(c);
+
+  c = pt_config_parse("window-padding-x = 4\nwindow-padding-y = 6\n");
+  g_assert_cmpint(c->window_padding_x, ==, 4);
+  g_assert_cmpint(c->window_padding_y, ==, 6);
+  pt_config_free(c);
+
+  /* One axis set leaves the other on its own default: the two are separate
+     keys, as in ghostty. */
+  c = pt_config_parse("window-padding-x = 0\n");
+  g_assert_cmpint(c->window_padding_x, ==, 0);
+  g_assert_cmpint(c->window_padding_y, ==, PT_CONFIG_WINDOW_PADDING_Y_DEFAULT);
+  pt_config_free(c);
+
+  /* Junk and out-of-range keep the default. */
+  const char *bad[] = {
+    "window-padding-x = junk\n",
+    "window-padding-x = -1\n",
+    "window-padding-x = 201\n",
+    "window-padding-x = 8px\n",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
+    PtConfig *b = pt_config_parse(bad[i]);
+    g_assert_cmpint(b->window_padding_x, ==,
+                    PT_CONFIG_WINDOW_PADDING_X_DEFAULT);
+    pt_config_free(b);
+  }
+
+  /* Copy, equality and the rewrite carry both axes. */
+  PtConfig *a = pt_config_parse("window-padding-x = 12\nwindow-padding-y = 3\n");
+  PtConfig *b = pt_config_copy(a);
+  g_assert_cmpint(b->window_padding_x, ==, 12);
+  g_assert_cmpint(b->window_padding_y, ==, 3);
+  g_assert_true(pt_config_equal(a, b));
+  b->window_padding_y = 4;
+  g_assert_false(pt_config_equal(a, b));
+  char *out = pt_config_rewrite("theme = pt-dark\n", a);
+  g_assert_nonnull(strstr(out, "window-padding-x = 12\n"));
+  g_assert_nonnull(strstr(out, "window-padding-y = 3\n"));
+  PtConfig *back = pt_config_parse(out);
+  g_assert_true(pt_config_equal(a, back));
+  g_free(out);
+  pt_config_free(a);
+  pt_config_free(b);
+  pt_config_free(back);
+}
+
 static void test_parse(void) {
   PtConfig *c = pt_config_parse(
       "# a comment\n"
@@ -356,6 +408,7 @@ int main(void) {
   test_parse_osc52();
   test_rewrite_osc52();
   test_parse_scrollback_limit();
+  test_parse_window_padding();
   test_parse_out_of_range_font_size();
   test_parse_ui_font_size_not_a_number();
   test_copy_equal();
