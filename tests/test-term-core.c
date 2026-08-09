@@ -634,6 +634,58 @@ static void test_mouse_report_sgr(void) {
   pt_term_core_free(core);
 }
 
+/* Mode 1002 (button-event tracking) + 1006, what Claude Code asks for. It
+   reports motion only while a button is held, and the encoder decides that
+   from the event's own button (input/mouse_encode.zig shouldReport), so the
+   core has to name the held button on a motion the caller left unnamed —
+   otherwise a drag arrives as press, release, and nothing in between, and the
+   app never selects anything to copy. */
+static void test_mouse_report_drag_button(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?1002h\\033[?1006h'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(tracking_on, core));
+
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          21.0, 20.0));
+  g_assert_true(wait_for_text(core, "^[[<0;1;1M"));
+
+  /* Motion into the next cell with no button named: button 0 plus the 32
+     motion bit, i.e. a left-button drag, not a hover. */
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_MOTION,
+                                          GHOSTTY_MOUSE_BUTTON_UNKNOWN, 0,
+                                          29.0, 36.0));
+  g_assert_true(wait_for_text(core, "^[[<32;2;2M"));
+
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_RELEASE,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          29.0, 36.0));
+  g_assert_true(wait_for_text(core, "^[[<0;2;2m"));
+
+  /* Nothing is held now, so the same unnamed motion is a hover, and mode 1002
+     reports none: no bytes at all, and in particular not the buttonless
+     motion code 35 that mode 1003 would have sent. The press after it proves
+     the pane was still listening. */
+  g_assert_false(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_MOTION,
+                                           GHOSTTY_MOUSE_BUTTON_UNKNOWN, 0,
+                                           37.0, 52.0));
+  g_assert_true(pt_term_core_mouse_report(core, GHOSTTY_MOUSE_ACTION_PRESS,
+                                          GHOSTTY_MOUSE_BUTTON_LEFT, 0,
+                                          37.0, 52.0));
+  g_assert_true(wait_for_text(core, "^[[<0;3;3M"));
+
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(text);
+  g_assert_null(strstr(text, "^[[<35;"));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
 static void test_wheel_report_batches_notches(void) {
   /* A wheel event can carry several notches; the widget hands all of them to
      the core at once and the core makes one write of it. The bytes have to be
@@ -2821,6 +2873,7 @@ int main(int argc, char *argv[]) {
                   test_long_title_cut_on_boundary);
   g_test_add_func("/termcore/title-dedupe", test_title_dedupes);
   g_test_add_func("/termcore/mouse-report-sgr", test_mouse_report_sgr);
+  g_test_add_func("/termcore/mouse-report-drag", test_mouse_report_drag_button);
   g_test_add_func("/termcore/wheel-report-batch",
                   test_wheel_report_batches_notches);
   g_test_add_func("/termcore/wheel-report-off",

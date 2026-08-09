@@ -1393,6 +1393,18 @@ gboolean pt_term_core_mouse_report(PtTermCore *c, GhosttyMouseAction action,
     else if (action == GHOSTTY_MOUSE_ACTION_RELEASE)
       c->buttons_down &= ~(1u << button);
   }
+  /* A drag is motion *with* a button, and callers hand motion over without
+   * naming one: the pointer moved, and which button is held is the core's
+   * business, not the widget's. Ghostty answers it the same way — "we use the
+   * first mouse button we find pressed in order to report" (Surface.zig:4628),
+   * the spec naming none — and the answer is what separates a drag from a
+   * hover. Under mode 1002 the encoder drops buttonless motion outright
+   * (input/mouse_encode.zig shouldReport, `.button => event.button != null`)
+   * and under 1003 encodes it as code 35, so leaving the button off means an
+   * app on 1002 sees a press, a release, and nothing that ever selected. */
+  if (action == GHOSTTY_MOUSE_ACTION_MOTION &&
+      button == GHOSTTY_MOUSE_BUTTON_UNKNOWN && c->buttons_down != 0)
+    button = (GhosttyMouseButton)g_bit_nth_lsf(c->buttons_down, -1);
   mouse_encoder_sync(c, c->buttons_down != 0);
   mouse_event_fill(c, action, button, mods, px, py);
 
