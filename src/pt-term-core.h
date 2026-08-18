@@ -250,6 +250,19 @@ gboolean pt_term_core_paste_is_safe(const char *text, gssize len);
  * Fires the draw callback. */
 void pt_term_core_reset(PtTermCore *c);
 
+/* The five SGR underline shapes plus "none", mirroring GhosttySgrUnderline
+ * (build/_deps/ghostty-src/include/ghostty/vt/sgr.h:99-105) value for value —
+ * fill_cell copies style.underline into this straight, no translation table
+ * to keep in sync when libghostty adds one. */
+typedef enum {
+  PT_UNDERLINE_NONE   = 0,
+  PT_UNDERLINE_SINGLE = 1,
+  PT_UNDERLINE_DOUBLE = 2,
+  PT_UNDERLINE_CURLY  = 3,
+  PT_UNDERLINE_DOTTED = 4,
+  PT_UNDERLINE_DASHED = 5,
+} PtUnderline;
+
 /* ---- flat cell rows ----
  *
  * The renderer-facing view of one visible row, flattened into plain memory so
@@ -259,28 +272,42 @@ void pt_term_core_reset(PtTermCore *c);
 typedef struct {
   char     text[PT_CELL_TEXT_MAX]; /* full UTF-8 cluster, NUL-terminated; "" = blank */
   guint8   width;                  /* 1 or 2; 0 = spacer tail of a wide cell */
-  guint8   style;                  /* same bits the widget reads today (bold/italic/underline/strike/faint/inverse) */
+  guint16  style;                  /* PT_CELL_STYLE_* bits; the widget draws from bold/italic/inverse today, the rest await a renderer */
+  guint8   underline;              /* a PtUnderline value; PT_UNDERLINE_NONE when unset */
   gboolean selected;
   /* An OSC 8 hyperlink hangs off this cell — any link, openable or not, since
    * this is what the underline draws from and the underline is the only thing
    * telling the user the run is a link at all. Whether pt will *open* it is
-   * pt_term_core_link_at_cell's question, not this one's. */
+   * pt_term_core_link_at_cell's question, not this one's. Independent of
+   * `underline`: a linked cell with no SGR underline still gets pt's link
+   * underline, and an SGR-underlined cell that happens to be a link keeps
+   * both meanings on the same rule. */
   gboolean has_link;
   gboolean has_bg;
+  /* The color SGR 58 set for the underline itself, distinct from `fg` —
+   * ghostty's underline_color style field, resolved (palette or RGB) the way
+   * fg is, but unlike fg there is no libghostty default to fall back to, so
+   * FALSE here means "draw the underline in the cell's own fg", same as a
+   * plain terminal. */
+  gboolean has_underline_color;
+  PtColor  underline_color;        /* valid only when has_underline_color */
   PtColor  fg;
   PtColor  bg;                     /* valid only when has_bg */
 } PtCell;
 
 /* PtCell.style bits — the GhosttyStyle properties a renderer draws from.
- * `underline` collapses the five SGR underline styles into one bit. `inverse`
- * is reported, not applied: fg/bg hold the cell's own colors and the consumer
- * swaps them, exactly as the widget's snapshot loop does today. */
-#define PT_CELL_STYLE_BOLD      (1u << 0)
-#define PT_CELL_STYLE_ITALIC    (1u << 1)
-#define PT_CELL_STYLE_UNDERLINE (1u << 2)
-#define PT_CELL_STYLE_STRIKE    (1u << 3)
-#define PT_CELL_STYLE_FAINT     (1u << 4)
-#define PT_CELL_STYLE_INVERSE   (1u << 5)
+ * The five SGR underline styles live in PtCell.underline instead of a bit
+ * here, since "on" is not enough to draw one. `inverse` is reported, not
+ * applied: fg/bg hold the cell's own colors and the consumer swaps them,
+ * exactly as the widget's snapshot loop does today. */
+#define PT_CELL_STYLE_BOLD      ((guint16)(1u << 0))
+#define PT_CELL_STYLE_ITALIC    ((guint16)(1u << 1))
+#define PT_CELL_STYLE_STRIKE    ((guint16)(1u << 2))
+#define PT_CELL_STYLE_FAINT     ((guint16)(1u << 3))
+#define PT_CELL_STYLE_INVERSE   ((guint16)(1u << 4))
+#define PT_CELL_STYLE_BLINK     ((guint16)(1u << 5))
+#define PT_CELL_STYLE_INVISIBLE ((guint16)(1u << 6))
+#define PT_CELL_STYLE_OVERLINE  ((guint16)(1u << 7))
 
 /* Fills out[0..n) for visible row `row` (0-based). Returns number of cells
  * filled (min(cols, max)). One libghostty walk per call; caller owns the array.
@@ -288,8 +315,12 @@ typedef struct {
  * `fg` is already resolved: a cell with no color of its own reports the
  * default foreground the render state carries, so a renderer never has to ask
  * twice. `bg` is not — the default background is painted once for the whole
- * pane, so `has_bg` says whether this cell diverges from it. A row past the
- * viewport, or a walk the library refuses, fills nothing and returns 0. */
+ * pane, so `has_bg` says whether this cell diverges from it. `underline_color`
+ * is resolved the same way fg is when set (palette index or RGB, whichever
+ * the program used), but unlike fg has no default to fall back to, so a cell
+ * that never got an SGR 58 reports has_underline_color FALSE rather than a
+ * guessed color. A row past the viewport, or a walk the library refuses,
+ * fills nothing and returns 0. */
 int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max);
 
 /* ---- sequential row walk ----

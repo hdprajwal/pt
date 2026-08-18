@@ -2221,7 +2221,8 @@ static void test_row_cells_text_style_colors(void) {
   g_assert_cmpuint(cells[0].width, ==, 1);
   g_assert_cmpuint(cells[0].style, ==,
                    PT_CELL_STYLE_BOLD | PT_CELL_STYLE_ITALIC |
-                   PT_CELL_STYLE_UNDERLINE | PT_CELL_STYLE_STRIKE);
+                   PT_CELL_STYLE_STRIKE);
+  g_assert_cmpuint(cells[0].underline, ==, PT_UNDERLINE_SINGLE);
   g_assert_cmpuint(cells[0].fg.r, ==, 200);
   g_assert_cmpuint(cells[0].fg.g, ==, 10);
   g_assert_cmpuint(cells[0].fg.b, ==, 20);
@@ -2286,6 +2287,74 @@ static void test_row_cells_selected(void) {
   g_assert_true(cells[0].selected);
   g_assert_true(cells[2].selected);
   g_assert_false(cells[3].selected);
+  pt_term_core_free(core);
+}
+
+static void test_row_cells_underline_style(void) {
+  /* fill_cell must carry every SGR underline shape, the underline's own
+     color (both direct and palette forms) and the flags libghostty tracks
+     alongside it, none of which survived the old single UNDERLINE bit. Row 2
+     keeps clear of the ready marker; palette slot 1 is pinned so the SGR
+     58:5:1 case doesn't depend on libghostty's stock palette. */
+  PtTermCore *core = cursor_core_new();
+  PtTermColors colors = {
+    .bg = { 0, 0, 0, 1.0 },
+    .fg = { 255, 255, 255, 1.0 },
+    .cursor = { 255, 255, 255, 1.0 },
+  };
+  colors.palette[1] = (PtColor){ 90, 91, 92, 1.0 };
+  pt_term_core_set_colors(core, &colors);
+
+  pt_term_core_write(core,
+      "\033[2;1H"
+      "\033[4:1mA\033[0m"                     /* single */
+      "\033[4:2mB\033[0m"                     /* double */
+      "\033[4:3mC\033[0m"                     /* curly */
+      "\033[4:4mD\033[0m"                     /* dotted */
+      "\033[4:5mE\033[0m"                     /* dashed */
+      "\033[4mF\033[0m"                       /* bare 4 still means single */
+      "\033[4:1m\033[4:0mG\033[0m"            /* 4:0 clears back to none */
+      "\033[4:1m\033[24mH\033[0m"             /* 24 clears back to none */
+      "\033[58:2::10:20:30mI\033[0m"          /* direct RGB underline color */
+      "\033[58:5:1mJ\033[0m"                  /* palette-indexed, slot 1 */
+      "\033[58:2::10:20:30m\033[59mK\033[0m"  /* 59 clears the color */
+      "\033[5mL\033[0m"                       /* blink */
+      "\033[8mM\033[0m"                       /* invisible */
+      "\033[53mN\033[0m"                      /* overline */
+      "\033[9mO\033[0m",                      /* strikethrough */
+      -1);
+  g_assert_true(wait_for_text(core, "ABCDEFGHIJKLMNO"));
+  pt_term_core_sync(core);
+
+  PtCell cells[16];
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, cells, 16), ==, 16);
+
+  g_assert_cmpuint(cells[0].underline, ==, PT_UNDERLINE_SINGLE);
+  g_assert_cmpuint(cells[1].underline, ==, PT_UNDERLINE_DOUBLE);
+  g_assert_cmpuint(cells[2].underline, ==, PT_UNDERLINE_CURLY);
+  g_assert_cmpuint(cells[3].underline, ==, PT_UNDERLINE_DOTTED);
+  g_assert_cmpuint(cells[4].underline, ==, PT_UNDERLINE_DASHED);
+  g_assert_cmpuint(cells[5].underline, ==, PT_UNDERLINE_SINGLE);
+  g_assert_cmpuint(cells[6].underline, ==, PT_UNDERLINE_NONE);
+  g_assert_cmpuint(cells[7].underline, ==, PT_UNDERLINE_NONE);
+
+  g_assert_true(cells[8].has_underline_color);
+  g_assert_cmpuint(cells[8].underline_color.r, ==, 10);
+  g_assert_cmpuint(cells[8].underline_color.g, ==, 20);
+  g_assert_cmpuint(cells[8].underline_color.b, ==, 30);
+
+  g_assert_true(cells[9].has_underline_color);
+  g_assert_cmpuint(cells[9].underline_color.r, ==, 90);
+  g_assert_cmpuint(cells[9].underline_color.g, ==, 91);
+  g_assert_cmpuint(cells[9].underline_color.b, ==, 92);
+
+  g_assert_false(cells[10].has_underline_color);
+
+  g_assert_cmpuint(cells[11].style & PT_CELL_STYLE_BLINK, ==, PT_CELL_STYLE_BLINK);
+  g_assert_cmpuint(cells[12].style & PT_CELL_STYLE_INVISIBLE, ==, PT_CELL_STYLE_INVISIBLE);
+  g_assert_cmpuint(cells[13].style & PT_CELL_STYLE_OVERLINE, ==, PT_CELL_STYLE_OVERLINE);
+  g_assert_cmpuint(cells[14].style & PT_CELL_STYLE_STRIKE, ==, PT_CELL_STYLE_STRIKE);
+
   pt_term_core_free(core);
 }
 
@@ -3048,6 +3117,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/row-cells", test_row_cells_text_style_colors);
   g_test_add_func("/termcore/row-cells-wide", test_row_cells_wide);
   g_test_add_func("/termcore/row-cells-selected", test_row_cells_selected);
+  g_test_add_func("/termcore/row-cells-underline-style",
+                  test_row_cells_underline_style);
   g_test_add_func("/termcore/rows-walk", test_rows_walk_matches_row_cells);
   g_test_add_func("/termcore/rows-walk-wide", test_rows_walk_wide_pane);
   g_test_add_func("/termcore/row-link-helpers", test_row_link_helpers);

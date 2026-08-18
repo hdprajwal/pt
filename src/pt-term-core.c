@@ -1933,12 +1933,16 @@ char *pt_term_core_grid_text(PtTermCore *c) {
 }
 
 /* One PtCell from the walk's current cell. `fg_default` is the render state's
- * default foreground, resolved here so a consumer never asks twice. Zeroed
- * first, so every byte of the struct — padding and the text tail past the NUL
- * included — is deterministic and two fills of the same cell compare equal
- * bytewise, whatever the buffer held before. */
+ * default foreground, resolved here so a consumer never asks twice. `palette`
+ * is the render state's 256-color table, read once per row walk by the
+ * caller and handed down rather than re-read per cell — NULL when that read
+ * failed, in which case a palette-indexed underline color resolves to none
+ * rather than a guess. Zeroed first, so every byte of the struct — padding
+ * and the text tail past the NUL included — is deterministic and two fills
+ * of the same cell compare equal bytewise, whatever the buffer held before. */
 static void fill_cell(PtCell *out, GhosttyRenderStateRowCells cells,
-                      GhosttyColorRgb fg_default) {
+                      GhosttyColorRgb fg_default,
+                      const GhosttyColorRgb *palette) {
   memset(out, 0, sizeof *out);
   uint32_t glen = 0;
   ghostty_render_state_row_cells_get(cells,
@@ -1978,16 +1982,48 @@ static void fill_cell(PtCell *out, GhosttyRenderStateRowCells cells,
              : wide == GHOSTTY_CELL_WIDE_NARROW   ? 1
                                                   : 0;
 
+  /* GhosttyStyle (ghostty/vt/style.h:92-108) carries far more than the old
+   * six bits: the underline shape is its own int (matching GhosttySgrUnderline,
+   * ghostty/vt/sgr.h:99-105, value for value with PtUnderline, so no mapping
+   * table needed), and blink/invisible/overline had no home in PtCell.style
+   * at all. */
   GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
   ghostty_render_state_row_cells_get(cells,
       GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
-  out->style = (guint8)((style.bold ? PT_CELL_STYLE_BOLD : 0) |
+  out->style = (guint16)((style.bold ? PT_CELL_STYLE_BOLD : 0) |
                         (style.italic ? PT_CELL_STYLE_ITALIC : 0) |
-                        (style.underline != GHOSTTY_SGR_UNDERLINE_NONE
-                             ? PT_CELL_STYLE_UNDERLINE : 0) |
                         (style.strikethrough ? PT_CELL_STYLE_STRIKE : 0) |
                         (style.faint ? PT_CELL_STYLE_FAINT : 0) |
-                        (style.inverse ? PT_CELL_STYLE_INVERSE : 0));
+                        (style.inverse ? PT_CELL_STYLE_INVERSE : 0) |
+                        (style.blink ? PT_CELL_STYLE_BLINK : 0) |
+                        (style.invisible ? PT_CELL_STYLE_INVISIBLE : 0) |
+                        (style.overline ? PT_CELL_STYLE_OVERLINE : 0));
+  out->underline = (guint8)style.underline;
+
+  /* style.underline_color is a tagged union (GHOSTTY_STYLE_COLOR_NONE /
+   * _PALETTE / _RGB) with no render-state data enum of its own to resolve it
+   * the way GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR resolves fg, so this
+   * does that resolution by hand. has_underline_color and underline_color
+   * are already zeroed by the memset above, so NONE — and a PALETTE index
+   * with no palette to look it up in — both fall out as "no color" for free. */
+  switch (style.underline_color.tag) {
+    case GHOSTTY_STYLE_COLOR_RGB: {
+      GhosttyColorRgb rgb = style.underline_color.value.rgb;
+      out->has_underline_color = TRUE;
+      out->underline_color = (PtColor){ rgb.r, rgb.g, rgb.b, 1.0 };
+      break;
+    }
+    case GHOSTTY_STYLE_COLOR_PALETTE:
+      if (palette != NULL) {
+        GhosttyColorRgb rgb = palette[style.underline_color.value.palette];
+        out->has_underline_color = TRUE;
+        out->underline_color = (PtColor){ rgb.r, rgb.g, rgb.b, 1.0 };
+      }
+      break;
+    case GHOSTTY_STYLE_COLOR_NONE:
+    default:
+      break;
+  }
 
   bool selected = false;
   ghostty_render_state_row_cells_get(cells,
@@ -2016,8 +2052,15 @@ int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max) {
     ghostty_render_state_get(c->render_state,
                              GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
                              &fg_default);
+    /* Read once for the whole row, not once per cell — 256 colors is cheap
+     * once and wasteful per glyph. A failed read (NULL below) just means
+     * palette-indexed underline colors on this row resolve to none. */
+    GhosttyColorRgb palette[256];
+    gboolean has_palette = ghostty_render_state_get(c->render_state,
+                             GHOSTTY_RENDER_STATE_DATA_COLOR_PALETTE,
+                             palette) == GHOSTTY_SUCCESS;
     while (n < max && ghostty_render_state_row_cells_next(w.cells))
-      fill_cell(&out[n++], w.cells, fg_default);
+      fill_cell(&out[n++], w.cells, fg_default, has_palette ? palette : NULL);
   }
   row_walk_end(&w);
   return n;
@@ -2028,7 +2071,8 @@ int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max) {
  * The frame-shaped read: one iterator pair for the whole pass instead of the
  * per-call seek row_cells pays, so a full repaint is O(rows) iterator steps
  * rather than O(rows²). Each next() fills exactly what row_cells would for
- * that row — both go through fill_cell with the same resolved default fg.
+ * that row — both go through fill_cell with the same resolved default fg
+ * and the same once-per-walk palette read.
  *
  * The reader owns the row buffer and grows it to the widest row it meets, so
  * no caller ever guesses a column count and no width is ever truncated — an
@@ -2037,6 +2081,8 @@ int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max) {
 struct PtRowReader {
   PtRowWalk w;
   GhosttyColorRgb fg_default;
+  GhosttyColorRgb palette[256]; /* valid only when has_palette */
+  gboolean has_palette;
   PtCell *cells;              /* owned; handed out by rows_next */
   int cap;
 };
@@ -2050,6 +2096,11 @@ PtRowReader *pt_term_core_rows_begin(PtTermCore *c) {
   ghostty_render_state_get(c->render_state,
                            GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
                            &r->fg_default);
+  /* One read for the whole pass, same reasoning as row_cells: the walk
+   * covers every visible row, but the palette does not change mid-frame. */
+  r->has_palette = ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_COLOR_PALETTE,
+                           r->palette) == GHOSTTY_SUCCESS;
   /* Seeded from the pty size so the common case never reallocates; the walk
    * below still grows past it whenever a row turns out wider. */
   r->cap = MAX(c->cols, 1);
@@ -2070,7 +2121,8 @@ int pt_term_core_rows_next(PtRowReader *r, const PtCell **out) {
       r->cap *= 2;
       r->cells = g_renew(PtCell, r->cells, r->cap);
     }
-    fill_cell(&r->cells[n++], r->w.cells, r->fg_default);
+    fill_cell(&r->cells[n++], r->w.cells, r->fg_default,
+             r->has_palette ? r->palette : NULL);
   }
   *out = r->cells;            /* again: the grow may have moved the buffer */
   return n;
