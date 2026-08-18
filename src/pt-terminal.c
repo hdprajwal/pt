@@ -270,8 +270,20 @@ static void core_output(PtTermCore *core, gpointer user) {
 }
 
 static void core_draw(PtTermCore *core, gpointer user) {
-  (void)core;
   PtTerminal *t = PT_TERMINAL(user);
+  /* A synchronized-output frame is not done yet: painting now would show the
+   * half of it the app has written so far, then tear again when the rest
+   * lands. Ghostty's renderer stops entirely for the same reason and the
+   * same window (renderer/generic.zig:1176-1180); pt just skips the queue
+   * here rather than the eventual draw call, since nothing has changed to
+   * paint until the flag drops.
+   *
+   * This also delays repaints this callback fires for reasons that have
+   * nothing to do with the pty — scrollback scrolling and selection clears
+   * both route through cbs.draw — for as long as the sync window holds. That
+   * matches ghostty, whose whole renderer freezes the same way, and is not a
+   * bug to "fix" by carving out an exception for them. */
+  if (pt_term_core_sync_output(core)) return;
   gtk_widget_queue_draw(GTK_WIDGET(t));
   update_link_cursor(t);       /* the grid just moved under the pointer */
 }
@@ -1208,8 +1220,19 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   }
   /* Sync only when the core says a frame would differ. Focus, scrim, blink
    * and bar-fade repaints redraw from what the last sync left in place, which
-   * is byte-identical — the state only moves when the serial does. */
-  if (pt_term_core_take_render_dirty(t->core))
+   * is byte-identical — the state only moves when the serial does.
+   *
+   * While synchronized output is held, skip the sync even if the dirty flag
+   * is set. core_draw already stopped queuing repaints for this reason, but
+   * one of those same focus/blink/bar-fade paths can still reach a snapshot
+   * on its own, and syncing here would pull the child's half-drawn frame
+   * onto the screen despite core_draw's refusal to ask for it. Critically,
+   * the flag must be left unconsumed rather than taken and discarded — it
+   * has to still be there for pt_term_core_take_render_dirty to see when the
+   * real ESU lands and calls back into core_draw, or that first post-hold
+   * frame would sync nothing. Mirrors ghostty's renderer bailing out of the
+   * whole frame under the same condition (renderer/generic.zig:1176-1180). */
+  if (!pt_term_core_sync_output(t->core) && pt_term_core_take_render_dirty(t->core))
     pt_term_core_sync(t->core);
 
   /* The effective default background: the theme's, unless a program moved it
