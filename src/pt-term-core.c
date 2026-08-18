@@ -58,6 +58,13 @@ struct PtTermCore {
   gboolean was_focus_event; /* mode 1004 as of the last read, for the 0->1 edge */
   gboolean was_in_band_resize; /* mode 2048, same, for the enable-time report */
 
+  /* synchronized output (mode 2026); see poll_mode_edges and
+   * pt_term_core_sync_output */
+  gboolean sync_output;      /* mode 2026 as of the last poll */
+  guint sync_reset_source;   /* re-armed on every poll that sees it true */
+  gint64 sync_rising_edge_us; /* g_get_monotonic_time() at the 0->1 edge, for
+                                * the 5s ceiling that ignores re-arming */
+
   PtOscScan osc;            /* OSC scanner state, carried across reads */
   PtOsc52Mode osc52;        /* what OSC 52 may do to the clipboard */
 
@@ -686,6 +693,83 @@ static void send_size_report(PtTermCore *c) {
   pty_write_raw(c->pty_fd, buf, written);
 }
 
+/* ---- synchronized output (mode 2026) ----
+ *
+ * Claude Code and most modern TUIs wrap every frame in BSU (`CSI ? 2026 h`)
+ * and ESU (`CSI ? 2026 l`) so the terminal can hold a torn frame off the
+ * screen until it is whole. pt answers DECRQM for this mode as "recognised",
+ * which is a promise to do exactly that; this is where the promise is kept.
+ * There is no repaint logic here — the widget gates its own draw on
+ * pt_term_core_sync_output() — this only maintains the flag, the same way
+ * poll_mode_edges already tracks modes 1004 and 2048: sampled once per read
+ * dispatch, because terminal.h gives pt no hook that fires on every
+ * transition, only ghostty_terminal_mode_get's snapshot of where things stand.
+ *
+ * Ghostty does not have this problem, because it does have that hook: it runs
+ * its VT parser on a dedicated thread and hangs a callback off the mode
+ * itself, so startSynchronizedOutput (termio/Thread.zig:364) re-arms its
+ * 1000ms `sync_reset_ms` timer (:37) on *every* `?2026h`, including one that
+ * finds the mode already on. pt cannot see that transition; it can only see
+ * that the mode is on right now. An edge-only timer — armed once when the
+ * mode first goes true — would be fine if BSU/ESU pairs always landed inside
+ * one read, but PT_READ_MAX_PER_DISPATCH ends a dispatch at an arbitrary 256
+ * KB boundary, so a fast enough stream of frames can leave the mode
+ * continuously true with no further 0->1 edge to arm anything. The timer from
+ * the *first* BSU would then fire mid-frame and force-clear it — a periodic
+ * tear in exactly the app this feature exists to stop.
+ *
+ * So the timer re-arms on every poll that observes the mode true, not only
+ * the rising edge: "1s since sync activity was last seen", which never fires
+ * against an app that is still actively wrapping frames. That alone trades
+ * one failure for its opposite — an app that sends one BSU and then never
+ * sends ESU would hold the frame forever — so a second, non-re-arming bound
+ * rides alongside it: the monotonic time of the rising edge is recorded once,
+ * and the mode is force-cleared the instant it has been continuously true for
+ * 5s, however recently the 1s timer was last re-armed. No legitimate frame is
+ * held for five seconds; this only bounds the pathological app. Both timers
+ * are a deliberate divergence from ghostty, forced by pt polling the mode
+ * instead of hooking its setter — ghostty needs neither bound, because its
+ * timer only ever runs against a real edge.
+ *
+ * The whole scheme leans on one invariant in on_pty_readable: poll_mode_edges
+ * runs after the whole read buffer has reached the parser and before
+ * c->cbs.draw fires. A frame whose BSU and ESU arrive in the same chunk — the
+ * common case — is therefore never held at all, since the falling edge is
+ * seen before any draw happens; and a frame that *is* held gets repainted by
+ * that same draw call the moment this poll clears it, with no extra hook. */
+#define PT_SYNC_OUTPUT_RESET_MS 1000            /* ghostty's sync_reset_ms,
+                                                  * termio/Thread.zig:37 */
+#define PT_SYNC_OUTPUT_CEILING_US (5 * G_USEC_PER_SEC) /* pt's own bound; see
+                                                          * the block above */
+
+/* Force the mode off: cancels the re-arm timer and writes the library mode,
+ * which is a no-op when the app's own ESU already got there first. Shared by
+ * the falling edge below, the two timeouts that override the app, and resize
+ * and reset, which both have their own reasons (ghostty's, and the library's
+ * own fullReset) to drop synchronized output outright. */
+static void sync_output_clear(PtTermCore *c) {
+  ghostty_terminal_mode_set(c->terminal, GHOSTTY_MODE_SYNC_OUTPUT, false);
+  c->sync_output = FALSE;
+  if (c->sync_reset_source != 0) {
+    g_source_remove(c->sync_reset_source);
+    c->sync_reset_source = 0;
+  }
+}
+
+/* The 1s "activity stopped" bound: reached only when a poll has not re-armed
+ * it in time, i.e. the app went quiet mid-frame (or the app never sends ESU
+ * at all — the common way for that to happen is a program that dies with the
+ * mode on). No draw follows this one for free the way it does inside
+ * on_pty_readable, so it fires its own. */
+static gboolean sync_output_timeout(gpointer ud) {
+  PtTermCore *c = ud;
+  c->sync_reset_source = 0;      /* GLib is already tearing this source down */
+  ghostty_terminal_mode_set(c->terminal, GHOSTTY_MODE_SYNC_OUTPUT, false);
+  c->sync_output = FALSE;
+  if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
+  return G_SOURCE_REMOVE;
+}
+
 static void poll_mode_edges(PtTermCore *c) {
   bool focus_event = false;
   ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_FOCUS_EVENT,
@@ -700,7 +784,31 @@ static void poll_mode_edges(PtTermCore *c) {
                             &in_band_resize);
   if (in_band_resize && !c->was_in_band_resize) send_size_report(c);
   c->was_in_band_resize = in_band_resize;
+
+  bool sync_output = false;
+  ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_SYNC_OUTPUT,
+                            &sync_output);
+  if (sync_output) {
+    gint64 now = g_get_monotonic_time();
+    if (!c->sync_output) c->sync_rising_edge_us = now;   /* the 0->1 edge */
+    if (now - c->sync_rising_edge_us >= PT_SYNC_OUTPUT_CEILING_US) {
+      sync_output_clear(c);     /* the pathological-app bound; see above */
+    } else {
+      c->sync_output = TRUE;
+      if (c->sync_reset_source != 0) g_source_remove(c->sync_reset_source);
+      c->sync_reset_source = g_timeout_add(PT_SYNC_OUTPUT_RESET_MS,
+                                           sync_output_timeout, c);
+    }
+  } else if (c->sync_output || c->sync_reset_source != 0) {
+    sync_output_clear(c);       /* the common case: BSU and ESU in one read */
+  }
 }
+
+/* TRUE means the running program has asked the terminal to hold the current
+ * frame off the screen until it says otherwise (mode 2026 / BSU-ESU); see the
+ * block comment above poll_mode_edges for how long pt is willing to wait. As
+ * of the last read dispatch, like the other mode shadows above it. */
+gboolean pt_term_core_sync_output(PtTermCore *c) { return c->sync_output; }
 
 /* How much one dispatch may drain before handing the main loop back. A child
  * flooding the pty (`cat bigfile`) can otherwise hold this callback for as
@@ -1017,6 +1125,15 @@ void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
   /* A reflow rewrites the row count and the visible area both. */
   c->sb_dirty = TRUE;
   c->content_serial++;
+
+  /* ghostty_terminal_resize() already turns synchronized output off inside the
+   * library (terminal/c/terminal.zig:502, matching Termio.zig:490-492: "show
+   * changes immediately for a resize" is explicitly allowed by the spec). What
+   * it cannot do is update pt's own shadow flag and cancel pt's re-arm timer —
+   * those only self-correct on the next poll, and a caller asking
+   * pt_term_core_sync_output() before any more bytes arrive would still be
+   * told the frame is held. Clear them here, synchronously with the resize. */
+  sync_output_clear(c);
 }
 
 void pt_term_core_write(PtTermCore *c, const char *buf, gssize len) {
@@ -1646,6 +1763,12 @@ void pt_term_core_reset(PtTermCore *c) {
    * report for an app that turns either mode on again. */
   c->was_focus_event = FALSE;
   c->was_in_band_resize = FALSE;
+
+  /* fullReset() resets every mode to its default, synchronized output
+   * included, so the library's own copy is already off; this only follows
+   * suit in pt's shadow and cancels the re-arm timer, the same gap
+   * ghostty_terminal_resize() leaves above in pt_term_core_resize. */
+  sync_output_clear(c);
 
   /* The color scheme is deliberately *not* cleared: it mirrors the theme pt is
    * painting, which a reset does not touch (colors survive fullReset), so the
@@ -2337,6 +2460,7 @@ void pt_term_core_free(PtTermCore *c) {
   if (c->fd_source != 0) g_source_remove(c->fd_source);
   if (c->child_source != 0) g_source_remove(c->child_source);
   if (c->cmd_timer != 0) g_source_remove(c->cmd_timer);
+  if (c->sync_reset_source != 0) g_source_remove(c->sync_reset_source);
   pt_osc_scan_clear(&c->osc);
   if (c->pty_fd >= 0) close(c->pty_fd);
   if (c->child > 0 && !c->child_exited) {

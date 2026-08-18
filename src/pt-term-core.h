@@ -188,6 +188,18 @@ gboolean pt_term_core_alt_scroll(PtTermCore *c);   /* mode 1007, default on */
  * application or normal form per DECCKM. */
 void pt_term_core_send_arrows(PtTermCore *c, gboolean up, int count);
 
+/* ---- synchronized output (mode 2026, BSU/ESU) ----
+ *
+ * TRUE means the running program has asked the terminal to hold the frame it
+ * is currently drawing off the screen until it says otherwise — pt answers
+ * DECRQM for this mode as "recognised", so this is where that promise gets
+ * kept. The core tracks the mode itself, on the same one-poll-per-read-batch
+ * basis as focus and in-band-resize above; it does not repaint anything.
+ * Answered from a shadow that self-clears on a real ESU, a safety timer if the
+ * app goes quiet mid-frame, or an absolute ceiling if it never stops — see the
+ * block comment above poll_mode_edges in the .c file for why both exist. */
+gboolean pt_term_core_sync_output(PtTermCore *c);
+
 /* ---- clipboard writes from programs (OSC 52) ----
  *
  * PT_OSC52_OFF drops them; every other mode decodes and hands them to the
