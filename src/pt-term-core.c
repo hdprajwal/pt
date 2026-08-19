@@ -141,9 +141,36 @@ static bool effect_color_scheme(GhosttyTerminal t, void *ud,
   return true;
 }
 
+/* ---- identity ----
+ *
+ * pt tells the programs it runs that it is ghostty, and that is a decision,
+ * not a leftover. pt's whole VT layer is libghostty-vt, the same code ghostty
+ * itself runs, and pt now implements the capability set the xterm-ghostty
+ * terminfo entry advertises: the SGR attributes it lists, synchronized output,
+ * and the kitty keyboard protocol. Plenty of programs branch on the terminal
+ * they find and take a cruder path when they do not recognise it, and calling
+ * itself xterm-256color was buying pt those cruder paths while it behaved like
+ * the terminal being looked for.
+ *
+ * The version is the libghostty this build is pinned to. That tree calls
+ * itself 1.3.2-dev; the suffix is dropped because what reads this parses it as
+ * a version number and a pre-release tag is a common thing to get wrong.
+ *
+ * Three answers have to agree or a program that reads one and checks another
+ * concludes pt is lying: $TERM_PROGRAM, $TERM_PROGRAM_VERSION and the XTVERSION
+ * reply. They are all built from the two strings below. */
+#define PT_TERM_PROGRAM "ghostty"
+#define PT_TERM_PROGRAM_VERSION "1.3.2"
+
+/* CSI > q, which the library answers as `ESC P > | <this string> ESC \`. A
+ * program that did not spawn the shell cannot read the environment pt set for
+ * it, so it asks over the wire instead, and the two have to say the same
+ * thing. */
 static GhosttyString effect_xtversion(GhosttyTerminal t, void *ud) {
   (void)t; (void)ud;
-  return (GhosttyString){ .ptr = (const uint8_t *)"pt", .len = 2 };
+  static const char name[] = PT_TERM_PROGRAM " " PT_TERM_PROGRAM_VERSION;
+  return (GhosttyString){ .ptr = (const uint8_t *)name,
+                          .len = sizeof name - 1 };
 }
 
 static void effect_title_changed(GhosttyTerminal t, void *ud) {
@@ -1006,6 +1033,33 @@ gboolean pt_term_core_terminfo_available(const char *term) {
   return found;
 }
 
+/* What the child's $TERM will say: the ghostty name when its entry can be
+ * resolved, and xterm-256color when it cannot. See the identity section at the
+ * top of this file for why pt claims the ghostty name at all.
+ *
+ * The fallback exists because a $TERM with no entry behind it is worse than a
+ * modest one. ncurses programs that cannot look their terminal up either fall
+ * back to something far poorer than xterm-256color or refuse to start, so a pt
+ * whose shipped entry did not make it through packaging would break every pane
+ * rather than lose a few attributes.
+ *
+ * Only $TERM falls back. $TERM_PROGRAM, $TERM_PROGRAM_VERSION and the XTVERSION
+ * reply stay as they are on this path, and should not be "fixed" to follow it:
+ * they describe what pt implements, which is the same either way, and nothing
+ * that reads them goes through the terminfo database. All that is missing here
+ * is a compiled file to look the capabilities up in.
+ *
+ * Resolved once and remembered, like the two lookups above it: this walks the
+ * filesystem, the answer cannot change while pt runs, and a spawn needs it
+ * before the fork, where none of that work would be safe. */
+static const char *term_name(void) {
+  static const char *name;
+  if (name == NULL)
+    name = pt_term_core_terminfo_available("xterm-ghostty") ? "xterm-ghostty"
+                                                            : "xterm-256color";
+  return name;
+}
+
 /* ---- spawn ---- */
 /* The shell a NULL-argv spawn execs, as the *child* will see it: the inherited
  * $SHELL with any env_pairs "SHELL=" override applied on top (last one wins,
@@ -1039,6 +1093,7 @@ static int spawn_pty(const char *cwd, const char *const *argv,
    * before the fork: getenv/getpwuid/allocation are not async-signal-safe,
    * so the child branch only follows precomputed pointers. */
   const char *terminfo_dirs = terminfo_dirs_env();
+  const char *term = term_name();
   const char *shell_argv0 = NULL;
   if (shell != NULL) {
     shell_argv0 = strrchr(shell, '/');
@@ -1049,8 +1104,10 @@ static int spawn_pty(const char *cwd, const char *const *argv,
   if (child < 0) return -1;
   if (child == 0) {
     if (cwd != NULL) { if (chdir(cwd) != 0) { /* fall through to $HOME */ chdir(g_get_home_dir()); } }
-    setenv("TERM", "xterm-256color", 1);
+    setenv("TERM", term, 1);
     setenv("COLORTERM", "truecolor", 1);
+    setenv("TERM_PROGRAM", PT_TERM_PROGRAM, 1);
+    setenv("TERM_PROGRAM_VERSION", PT_TERM_PROGRAM_VERSION, 1);
     /* putenv rather than setenv because the string was built before the fork,
      * and before env_pairs so a caller can still override it. NULL only when
      * pt could not find its own terminfo directory, and then the child keeps

@@ -3336,6 +3336,45 @@ static void test_terminfo_available_for_ghostty(void) {
   g_assert_false(pt_term_core_terminfo_available("pt-no-such-terminal"));
 }
 
+/* ---- identity ----
+ *
+ * What a child is told it is running under. $TERM is the ghostty name here
+ * because this build stages its compiled entry beside the test binary, which
+ * is the same thing test_terminfo_available_for_ghostty pins; the other three
+ * are unconditional. One child prints all four in one line, so a variable that
+ * went missing cannot pass on the strength of its neighbours. */
+static void test_spawn_identity_env(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "echo term=$TERM prog=$TERM_PROGRAM ver=$TERM_PROGRAM_VERSION "
+    "color=$COLORTERM; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "term=xterm-ghostty "));
+  g_assert_true(wait_for_text(core, "prog=ghostty "));
+  /* A prefix, not the whole value: the point is which libghostty pt is built
+     on, and a later pin may carry a suffix. */
+  g_assert_true(wait_for_text(core, "ver=1.3.2"));
+  g_assert_true(wait_for_text(core, "color=truecolor"));
+  pt_term_core_free(core);
+}
+
+/* CSI > q, answered as `ESC P > | <name> ESC \`. Same `cat -v` recipe as the
+ * mouse tests, and for the same reason: only what the child writes reaches the
+ * parser, so the child sends the query and prints back what pt replied.
+ *
+ * The reply has to name ghostty because a program that cannot read the
+ * environment of a shell it did not spawn asks this way instead. */
+static void test_xtversion_names_ghostty(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[>q'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "^[P>|ghostty 1.3.2^[\\"));
+  pt_term_core_free(core);
+}
+
 int main(int argc, char *argv[]) {
   /* Report paths come off $XDG_STATE_HOME, and the pane-token tests write real
      files: point them at a temp dir so a test run never touches the state of
@@ -3508,6 +3547,9 @@ int main(int argc, char *argv[]) {
                   test_terminfo_available_for_ghostty);
   g_test_add_func("/termcore/terminfo-dirs-child",
                   test_terminfo_dirs_reaches_child);
+  g_test_add_func("/termcore/identity-env", test_spawn_identity_env);
+  g_test_add_func("/termcore/identity-xtversion",
+                  test_xtversion_names_ghostty);
   int rc = g_test_run();
   char *sessions = g_build_filename(state_dir, "pt", "agent-sessions", NULL);
   char *pt_dir = g_build_filename(state_dir, "pt", NULL);
