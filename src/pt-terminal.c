@@ -1612,9 +1612,18 @@ static gboolean keys_held_mark(PtTerminal *t, guint keycode) {
   return was_down;
 }
 
-static void keys_held_release(PtTerminal *t, guint keycode) {
-  if (keycode < PT_KEYS_HELD_MAX)
-    t->keys_held[keycode / 32] &= ~(1u << (keycode % 32));
+/* Clearing answers the other question the set can settle: whether pt saw the
+ * press this release belongs to, since the only thing that ever sets a bit is a
+ * press that reached key_event. A keycode too large for the bitmap was never
+ * marked either, so it answers yes rather than have every release for it read
+ * as an orphan; the range covers every keycode X11 and Wayland produce, whose
+ * keycodes stop at 255 and at 775. */
+static gboolean keys_held_release(PtTerminal *t, guint keycode) {
+  if (keycode >= PT_KEYS_HELD_MAX) return TRUE;
+  guint32 bit = 1u << (keycode % 32);
+  gboolean was_down = (t->keys_held[keycode / 32] & bit) != 0;
+  t->keys_held[keycode / 32] &= ~bit;
+  return was_down;
 }
 
 static void keys_held_clear(PtTerminal *t) {
@@ -1783,15 +1792,26 @@ static void on_key_released(GtkEventControllerKey *ctl, guint keyval,
                             guint keycode, GdkModifierType state,
                             gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
-  keys_held_release(t, keycode);
+  gboolean was_held = keys_held_release(t, keycode);
   /* A dead pane keeps its core, so without this every key let go of under the
    * exited banner would still be encoded and written to a pty whose child is
-   * gone. It does not catch the Enter that restarts the shell: restart_shell
-   * clears t->exited on the press, so that release reaches the fresh core with
-   * no press behind it. Nothing comes of it, because a fresh shell is in
-   * legacy mode where a release encodes nothing, and catching it would need
-   * state the pane keeps for no other reason. */
+   * gone. */
   if (t->exited) return;
+  /* A release pt has no press for is not pt's to send. pt's own keybindings sit
+   * on window-level GtkShortcutControllers in the capture phase
+   * (pt-window.c:2004 and :2020), so they take the press of every chord before
+   * this widget's controller is offered it, and GtkShortcutController has no
+   * notion of a release at all: the release bubbles all the way down here alone.
+   * Without this an app in kitty's report-event-types mode would be handed a
+   * release for every one of pt's chords with no press in front of it. Ghostty
+   * drops exactly these, off the hash of the binding the press triggered
+   * (Surface.zig:2844-2858).
+   *
+   * The held set is the whole test, because a bit is only ever set by a press
+   * that reached key_event: a clear bit means the press went somewhere else.
+   * That also covers a key pressed before this pane had focus, and the Enter
+   * that restarts a dead shell, whose press the banner above consumed. */
+  if (!was_held) return;
   key_event(t, ctl, keyval, keycode, state, GHOSTTY_KEY_ACTION_RELEASE);
 }
 
