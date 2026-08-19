@@ -102,6 +102,7 @@ add_library(ptcore STATIC
   src/pt-status-parse.c
   src/pt-style-css.c
   src/pt-split-tree.c
+  src/pt-sprite.c
   src/pt-theme.c
   src/pt-session.c
   src/pt-term-core.c
@@ -175,6 +176,10 @@ add_test(NAME style COMMAND test-style)
 add_executable(test-block tests/test-block.c)
 target_link_libraries(test-block PRIVATE ptcore)
 add_test(NAME block COMMAND test-block)
+
+add_executable(test-sprite tests/test-sprite.c)
+target_link_libraries(test-sprite PRIVATE ptcore)
+add_test(NAME sprite COMMAND test-sprite)
 
 add_executable(test-osc-scan tests/test-osc-scan.c)
 target_link_libraries(test-osc-scan PRIVATE ptcore)
