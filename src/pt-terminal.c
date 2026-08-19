@@ -1625,7 +1625,7 @@ static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
 static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
                                guint keycode, GdkModifierType state,
                                gpointer user) {
-  (void)ctl; (void)keycode;
+  (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   if (t->exited) {
     if (keyval == GDK_KEY_Return) { restart_shell(t); return TRUE; }
@@ -1633,7 +1633,7 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
   }
   if (t->core == NULL) return FALSE;
 
-  GhosttyKey key = pt_keymap_from_keyval(keyval);
+  GhosttyKey key = pt_keymap_physical_key(keycode, keyval);
   GhosttyMods mods = pt_keymap_mods(state);
   guint32 unshifted = pt_keymap_unshifted_codepoint(keyval);
 

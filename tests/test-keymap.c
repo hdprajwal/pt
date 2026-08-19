@@ -4,7 +4,9 @@
 
 static void test_letters(void) {
   g_assert_cmpint(pt_keymap_from_keyval(GDK_KEY_a), ==, GHOSTTY_KEY_A);
-  g_assert_cmpint(pt_keymap_from_keyval(GDK_KEY_Z), ==, GHOSTTY_KEY_Z);
+  /* The keyval table matches exactly, as ghostty's does, so the shifted keysym
+   * is not a key. Shift+z resolves through the keycode instead. */
+  g_assert_cmpint(pt_keymap_from_keyval(GDK_KEY_Z), ==, GHOSTTY_KEY_UNIDENTIFIED);
   g_assert_cmpint(pt_keymap_unshifted_codepoint(GDK_KEY_A), ==, 'a');
 }
 
@@ -25,10 +27,71 @@ static void test_mods(void) {
   g_assert_cmpint(pt_keymap_mods(GDK_SUPER_MASK), ==, GHOSTTY_MODS_SUPER);
 }
 
+/* The keycodes below are xkb keycodes taken from the table in pt-keymap.c, not
+ * from memory, and GDK reports xkb keycodes on both X11 and Wayland. A row
+ * with GDK_KEY_VoidSymbol as its keyval is a key whose keysym we do not care
+ * about, which pins the answer to the keycode table alone. */
+typedef struct {
+  const char *name;
+  guint keycode;
+  guint keyval;
+  GhosttyKey expected;
+} PhysicalKeyCase;
+
+static const PhysicalKeyCase physical_key_cases[] = {
+    {"a", 0x026, GDK_KEY_a, GHOSTTY_KEY_A},
+    /* Shift changes the keysym and nothing else, so every shifted row here has
+     * to come back with the same key its unshifted twin does. */
+    {"shift+a", 0x026, GDK_KEY_A, GHOSTTY_KEY_A},
+    {"shift+3", 0x00C, GDK_KEY_numbersign, GHOSTTY_KEY_DIGIT_3},
+    {"shift+semicolon", 0x02F, GDK_KEY_colon, GHOSTTY_KEY_SEMICOLON},
+    /* AZERTY puts q where a US board puts a. Both are writing system keys, so
+     * neither may be remapped and the physical key wins. */
+    {"azerty q", 0x026, GDK_KEY_q, GHOSTTY_KEY_A},
+    /* caps:swapescape, which is the case the keyval table exists to serve.
+     * Caps lock is not a writing system key, so the remap is honoured. */
+    {"caps as escape", 0x042, GDK_KEY_Escape, GHOSTTY_KEY_ESCAPE},
+    /* No keycode at all, as with a synthetic event, falls back to the keyval. */
+    {"no keycode", 0x000, GDK_KEY_Escape, GHOSTTY_KEY_ESCAPE},
+
+    {"f13", 0x0BF, GDK_KEY_VoidSymbol, GHOSTTY_KEY_F13},
+    {"numpad 5", 0x054, GDK_KEY_VoidSymbol, GHOSTTY_KEY_NUMPAD_5},
+    {"print screen", 0x06B, GDK_KEY_VoidSymbol, GHOSTTY_KEY_PRINT_SCREEN},
+    {"scroll lock", 0x04E, GDK_KEY_VoidSymbol, GHOSTTY_KEY_SCROLL_LOCK},
+    {"pause", 0x07F, GDK_KEY_VoidSymbol, GHOSTTY_KEY_PAUSE},
+    {"context menu", 0x087, GDK_KEY_VoidSymbol, GHOSTTY_KEY_CONTEXT_MENU},
+
+    /* Without these eight, kitty's report-all-keys mode can never tell an app
+     * that a modifier went down. */
+    {"left shift", 0x032, GDK_KEY_Shift_L, GHOSTTY_KEY_SHIFT_LEFT},
+    {"right shift", 0x03E, GDK_KEY_Shift_R, GHOSTTY_KEY_SHIFT_RIGHT},
+    {"left control", 0x025, GDK_KEY_Control_L, GHOSTTY_KEY_CONTROL_LEFT},
+    {"right control", 0x069, GDK_KEY_Control_R, GHOSTTY_KEY_CONTROL_RIGHT},
+    {"left alt", 0x040, GDK_KEY_Alt_L, GHOSTTY_KEY_ALT_LEFT},
+    {"right alt", 0x06C, GDK_KEY_Alt_R, GHOSTTY_KEY_ALT_RIGHT},
+    {"left meta", 0x085, GDK_KEY_Super_L, GHOSTTY_KEY_META_LEFT},
+    {"right meta", 0x086, GDK_KEY_Super_R, GHOSTTY_KEY_META_RIGHT},
+};
+
+static void test_physical_key(void) {
+  for (gsize i = 0; i < G_N_ELEMENTS(physical_key_cases); i++) {
+    const PhysicalKeyCase *c = &physical_key_cases[i];
+    g_test_message("case: %s", c->name);
+    g_assert_cmpint(pt_keymap_physical_key(c->keycode, c->keyval), ==, c->expected);
+  }
+}
+
+static void test_unknown_keycode(void) {
+  g_assert_cmpint(pt_keymap_from_keycode(0), ==, GHOSTTY_KEY_UNIDENTIFIED);
+  g_assert_cmpint(pt_keymap_from_keycode(0xFFFF), ==, GHOSTTY_KEY_UNIDENTIFIED);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/keymap/letters", test_letters);
   g_test_add_func("/keymap/specials", test_digits_and_specials);
   g_test_add_func("/keymap/mods", test_mods);
+  g_test_add_func("/keymap/physical-key", test_physical_key);
+  g_test_add_func("/keymap/unknown-keycode", test_unknown_keycode);
   return g_test_run();
 }
