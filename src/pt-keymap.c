@@ -472,3 +472,11 @@ GhosttyMods pt_keymap_mods_for_key(GhosttyMods mods, GhosttyKey key,
     return mods;
   }
 }
+
+/* Ghostty's key.modifier() (input/key.zig:422-436). Derived from the switch
+ * above rather than written out again, so the eight keys are listed once and
+ * the two answers cannot drift apart: a key is a modifier exactly when pressing
+ * it puts a bit into a state that had none. */
+gboolean pt_keymap_is_modifier(GhosttyKey key) {
+  return pt_keymap_mods_for_key(0, key, GHOSTTY_KEY_ACTION_PRESS) != 0;
+}

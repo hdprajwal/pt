@@ -29,7 +29,10 @@ GhosttyKey pt_keymap_from_keyval(guint keyval);
  * ctest. Zero when the display knows no mapping for the keycode. */
 guint32 pt_keymap_unshifted_codepoint(GdkDisplay *display, GdkEvent *event,
                                       guint keycode);
-/* GDK modifier state → GhosttyMods. */
+/* GDK modifier state → GhosttyMods, including caps lock: GDK reports one lock
+ * mask without saying which lock set it, and ghostty reads that as caps. Num
+ * lock is not in here, because it comes off the event's device rather than the
+ * state, so the caller with a device adds it. */
 GhosttyMods pt_keymap_mods(guint state); /* pass GdkModifierType */
 /* The fixups a key event needs on top of the live modifier state. GTK reports
  * the modifiers as they were *before* the key was struck, so pressing shift
@@ -40,3 +43,7 @@ GhosttyMods pt_keymap_mods(guint state); /* pass GdkModifierType */
  * bit the matching press set. */
 GhosttyMods pt_keymap_mods_for_key(GhosttyMods mods, GhosttyKey key,
                                    GhosttyKeyAction action);
+/* Is this one of the eight modifier keys? Ghostty asks the same question to
+ * decide what does not count as typing: a bare shift must not clear a
+ * selection, even in a mode where bytes are encoded for it. */
+gboolean pt_keymap_is_modifier(GhosttyKey key);

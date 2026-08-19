@@ -70,10 +70,20 @@ static const ModsForKeyCase mods_for_key_cases[] = {
     /* The left key struck while the right one is already down, which is the
      * only way in: the side bit arrives set and the left key has to clear it,
      * where every row above starts from a state where it was clear already and
-     * so cannot tell writing the bit from leaving it alone. */
+     * so cannot tell writing the bit from leaving it alone. One per modifier,
+     * because each has its own side bit and its own arm of the switch. */
     {"press left shift while right shift is held", GHOSTTY_KEY_SHIFT_LEFT,
      GHOSTTY_KEY_ACTION_PRESS, GHOSTTY_MODS_SHIFT | GHOSTTY_MODS_SHIFT_SIDE,
      GHOSTTY_MODS_SHIFT},
+    {"press left control while right control is held", GHOSTTY_KEY_CONTROL_LEFT,
+     GHOSTTY_KEY_ACTION_PRESS, GHOSTTY_MODS_CTRL | GHOSTTY_MODS_CTRL_SIDE,
+     GHOSTTY_MODS_CTRL},
+    {"press left alt while right alt is held", GHOSTTY_KEY_ALT_LEFT,
+     GHOSTTY_KEY_ACTION_PRESS, GHOSTTY_MODS_ALT | GHOSTTY_MODS_ALT_SIDE,
+     GHOSTTY_MODS_ALT},
+    {"press left meta while right meta is held", GHOSTTY_KEY_META_LEFT,
+     GHOSTTY_KEY_ACTION_PRESS, GHOSTTY_MODS_SUPER | GHOSTTY_MODS_SUPER_SIDE,
+     GHOSTTY_MODS_SUPER},
 
     /* The release of the last modifier held: GTK still reports it, and the bit
      * has to go, or an app in report-all-keys mode is told the key went up
@@ -156,15 +166,18 @@ static const PhysicalKeyCase physical_key_cases[] = {
     {"context menu", 0x087, GDK_KEY_VoidSymbol, GHOSTTY_KEY_CONTEXT_MENU},
 
     /* Without these eight, kitty's report-all-keys mode can never tell an app
-     * that a modifier went down. */
-    {"left shift", 0x032, GDK_KEY_Shift_L, GHOSTTY_KEY_SHIFT_LEFT},
-    {"right shift", 0x03E, GDK_KEY_Shift_R, GHOSTTY_KEY_SHIFT_RIGHT},
-    {"left control", 0x025, GDK_KEY_Control_L, GHOSTTY_KEY_CONTROL_LEFT},
-    {"right control", 0x069, GDK_KEY_Control_R, GHOSTTY_KEY_CONTROL_RIGHT},
-    {"left alt", 0x040, GDK_KEY_Alt_L, GHOSTTY_KEY_ALT_LEFT},
-    {"right alt", 0x06C, GDK_KEY_Alt_R, GHOSTTY_KEY_ALT_RIGHT},
-    {"left meta", 0x085, GDK_KEY_Super_L, GHOSTTY_KEY_META_LEFT},
-    {"right meta", 0x086, GDK_KEY_Super_R, GHOSTTY_KEY_META_RIGHT},
+     * that a modifier went down. They carry no keyval on purpose: the sided
+     * keysyms would answer for them as well, so a row that passed both would
+     * still pass with its keycode deleted, and it is the keycode table this
+     * branch is named after. */
+    {"left shift", 0x032, GDK_KEY_VoidSymbol, GHOSTTY_KEY_SHIFT_LEFT},
+    {"right shift", 0x03E, GDK_KEY_VoidSymbol, GHOSTTY_KEY_SHIFT_RIGHT},
+    {"left control", 0x025, GDK_KEY_VoidSymbol, GHOSTTY_KEY_CONTROL_LEFT},
+    {"right control", 0x069, GDK_KEY_VoidSymbol, GHOSTTY_KEY_CONTROL_RIGHT},
+    {"left alt", 0x040, GDK_KEY_VoidSymbol, GHOSTTY_KEY_ALT_LEFT},
+    {"right alt", 0x06C, GDK_KEY_VoidSymbol, GHOSTTY_KEY_ALT_RIGHT},
+    {"left meta", 0x085, GDK_KEY_VoidSymbol, GHOSTTY_KEY_META_LEFT},
+    {"right meta", 0x086, GDK_KEY_VoidSymbol, GHOSTTY_KEY_META_RIGHT},
 };
 
 static void test_physical_key(void) {
@@ -173,6 +186,29 @@ static void test_physical_key(void) {
     g_test_message("case: %s", c->name);
     g_assert_cmpint(pt_keymap_physical_key(c->keycode, c->keyval), ==, c->expected);
   }
+}
+
+/* The predicate the terminal asks before it lets a keystroke clear a selection.
+ * It is derived from pt_keymap_mods_for_key rather than listing the eight keys
+ * again, so this pins the derivation as much as the answer. */
+static void test_is_modifier(void) {
+  static const GhosttyKey mods[] = {
+      GHOSTTY_KEY_SHIFT_LEFT,   GHOSTTY_KEY_SHIFT_RIGHT,
+      GHOSTTY_KEY_CONTROL_LEFT, GHOSTTY_KEY_CONTROL_RIGHT,
+      GHOSTTY_KEY_ALT_LEFT,     GHOSTTY_KEY_ALT_RIGHT,
+      GHOSTTY_KEY_META_LEFT,    GHOSTTY_KEY_META_RIGHT,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(mods); i++)
+    g_assert_true(pt_keymap_is_modifier(mods[i]));
+
+  /* Caps lock and num lock set modifier bits in a GDK state, but they are not
+   * modifier keys: striking one is typing as far as the pane is concerned. */
+  static const GhosttyKey not_mods[] = {
+      GHOSTTY_KEY_A, GHOSTTY_KEY_ENTER, GHOSTTY_KEY_ESCAPE,
+      GHOSTTY_KEY_CAPS_LOCK, GHOSTTY_KEY_NUM_LOCK, GHOSTTY_KEY_UNIDENTIFIED,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(not_mods); i++)
+    g_assert_false(pt_keymap_is_modifier(not_mods[i]));
 }
 
 static void test_unknown_keycode(void) {
@@ -187,6 +223,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/keymap/mods", test_mods);
   g_test_add_func("/keymap/mods-for-key", test_mods_for_key);
   g_test_add_func("/keymap/physical-key", test_physical_key);
+  g_test_add_func("/keymap/is-modifier", test_is_modifier);
   g_test_add_func("/keymap/unknown-keycode", test_unknown_keycode);
   return g_test_run();
 }

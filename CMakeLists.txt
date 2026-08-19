@@ -50,17 +50,18 @@ endif()
 # xterm-ghostty from whatever ghostty the developer happens to have installed
 # system-wide, and a pt install that shipped no entry at all would still look
 # fine here. tic writes both x/xterm-ghostty and g/ghostty, since the entry
-# declares `ghostty` as an alias; the first one stands in for the pair as the
-# output CMake tracks.
+# declares `ghostty` as an alias, so both are listed as outputs: pt resolves
+# either name and a build that produced only one is a broken build.
 set(PT_TERMINFO_DIR ${CMAKE_BINARY_DIR}/share/pt/terminfo)
 add_custom_command(
-  OUTPUT ${PT_TERMINFO_DIR}/x/xterm-ghostty
+  OUTPUT ${PT_TERMINFO_DIR}/x/xterm-ghostty ${PT_TERMINFO_DIR}/g/ghostty
   COMMAND ${CMAKE_COMMAND} -E make_directory ${PT_TERMINFO_DIR}
   COMMAND ${PT_TIC} -x -o ${PT_TERMINFO_DIR}
           ${CMAKE_SOURCE_DIR}/share/terminfo/xterm-ghostty.src
   DEPENDS share/terminfo/xterm-ghostty.src
   COMMENT "Compiling terminfo")
-add_custom_target(pt-terminfo ALL DEPENDS ${PT_TERMINFO_DIR}/x/xterm-ghostty)
+add_custom_target(pt-terminfo ALL
+  DEPENDS ${PT_TERMINFO_DIR}/x/xterm-ghostty ${PT_TERMINFO_DIR}/g/ghostty)
 
 # Compile CSS into the binary as a GResource.
 find_program(GLIB_COMPILE_RESOURCES glib-compile-resources REQUIRED)

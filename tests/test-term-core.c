@@ -3474,6 +3474,10 @@ int main(int argc, char *argv[]) {
      cached at the first spawn, which happens several tests earlier. */
   g_unsetenv("TERMINFO");
   g_unsetenv("TERMINFO_DIRS");
+  /* And PT_TERMINFO_DIR, which moves pt's own directory somewhere else
+     entirely: a developer with that exported would be testing whatever is in
+     there rather than what this build compiled. */
+  g_unsetenv("PT_TERMINFO_DIR");
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
   g_test_add_func("/termcore/exit", test_exit_status_reported);

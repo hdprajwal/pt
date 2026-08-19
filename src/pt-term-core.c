@@ -1134,9 +1134,22 @@ static int spawn_pty(const char *cwd, const char *const *argv,
     .ws_xpixel = (unsigned short)(cols * cell_w),
     .ws_ypixel = (unsigned short)(rows * cell_h),
   };
-  /* Everything the child touches between fork and exec is computed here,
-   * before the fork: getenv/getpwuid/allocation are not async-signal-safe,
-   * so the child branch only follows precomputed pointers. */
+  /* Everything the child needs is worked out here, before the fork. getenv,
+   * getpwuid and anything that walks the filesystem or builds a path are not
+   * async-signal-safe, and pt has GLib's worker threads in it, so a child that
+   * called them could block on a lock another thread was holding at the moment
+   * of the fork.
+   *
+   * The child branch is not free of that, and the five setenv calls below are
+   * the exception: setenv reaches the allocator whenever the variable is new or
+   * its value has grown, which on a first spawn is all of them. The way out
+   * would be assembling the whole environment by hand and calling execve, and
+   * that is not worth it for this. What the pre-computation buys is the width
+   * of the window rather than its absence: the child does a handful of short
+   * environment writes and an exec, with no path resolution, no environment
+   * reads and no filesystem work in between. Even the chdir fallback's
+   * g_get_home_dir is a one-time lookup that term_name's terminfo search has
+   * already made. */
   const char *terminfo_dirs = terminfo_dirs_env();
   const char *term = term_name();
   const char *shell_argv0 = NULL;
@@ -1420,7 +1433,10 @@ gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
     pty_write_raw(c->pty_fd, buf, written);
     return TRUE;
   }
-  /* Fallback: raw text (e.g. IM-composed input with no matching key).
+  /* Fallback: the text the keyval carried, for an event the encoder declined
+   * to encode at all. Nothing an input method composed reaches this, whatever
+   * the shape of the branch suggests: pt builds no GtkIMContext anywhere, so a
+   * pane only ever sees text that came with a key event.
    *
    * This cannot strip a modifier off a combination and send the bare letter.
    * With ctrl held the encoder writes the C0 byte from ctrlSeq, or, where that

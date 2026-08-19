@@ -94,8 +94,7 @@ static gboolean pt_debug_enabled(void) {
  * 64-bit counter incremented once per pane cannot wrap in any session. */
 static guint64 next_terminal_id = 1;
 
-/* 1024 keycodes of held-key bitmap, 128 bytes on the pane. The keys_held field
- * below says what it is for. */
+/* See the keys_held field below. */
 #define PT_KEYS_HELD_WORDS 32
 #define PT_KEYS_HELD_MAX (PT_KEYS_HELD_WORDS * 32)
 
@@ -191,13 +190,16 @@ struct _PtTerminal {
    * separately would not be. */
   gboolean text_blink;
 
-  /* Which hardware keycodes are physically down, one bit each. GDK puts no
-   * repeat flag on a key event, so this is the only way to tell a held key's
-   * second press from a fresh one, and the kitty protocol reports the two as
-   * different event types. Indexed by the keycode itself: GDK reports evdev
-   * codes offset by eight on Wayland and xkb keycodes on X11, and neither
-   * reaches 1024. Anything past the end is simply never recorded as held, so
-   * it reports every press as a press, which is what pt did before. */
+  /* Which hardware keycodes are physically down, one bit each, 128 bytes of
+   * them. GDK puts no repeat flag on a key event, so this is the only way to
+   * tell a held key's second press from a fresh one, and the kitty protocol
+   * reports the two as different event types. It also answers whether a release
+   * has a press behind it, which is how on_key_released drops the releases of
+   * chords pt's own keybindings swallowed. Indexed by the keycode itself: GDK
+   * reports evdev codes offset by eight on Wayland and xkb keycodes on X11, and
+   * neither reaches 1024. A keycode past the end is never recorded as held, so
+   * both readers fall back to the safe answer: every press reports as a press,
+   * as pt did before this, and every release is sent. */
   guint32 keys_held[PT_KEYS_HELD_WORDS];
 };
 
@@ -1670,27 +1672,6 @@ static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
   keys_held_clear(t);
 }
 
-/* The eight modifier keys (input/key.zig:422-436). Ghostty holds the selection
- * and the viewport still for these two (Surface.zig:2818), and pt needs the
- * same rule now that it reports modifiers as physical keys: an app in kitty's
- * report-all-keys mode has bytes encoded for them, so without this a user
- * reaching for shift would tear their own selection down. */
-static gboolean key_is_modifier(GhosttyKey key) {
-  switch (key) {
-  case GHOSTTY_KEY_SHIFT_LEFT:
-  case GHOSTTY_KEY_SHIFT_RIGHT:
-  case GHOSTTY_KEY_CONTROL_LEFT:
-  case GHOSTTY_KEY_CONTROL_RIGHT:
-  case GHOSTTY_KEY_ALT_LEFT:
-  case GHOSTTY_KEY_ALT_RIGHT:
-  case GHOSTTY_KEY_META_LEFT:
-  case GHOSTTY_KEY_META_RIGHT:
-    return TRUE;
-  default:
-    return FALSE;
-  }
-}
-
 /* One key event of any action. Press, repeat and release differ only in what
  * the encoder is told and in whether the pane treats the event as typing, so
  * the two GTK handlers below are thin wrappers over this. */
@@ -1703,27 +1684,29 @@ static gboolean key_event(PtTerminal *t, GtkEventControllerKey *ctl,
    * four arguments GTK unpacked for us: the layout, the device and the
    * consumed modifiers are only on there. There is an event for every key
    * event GTK delivers here; the guard is for the getter's own contract, which
-   * returns NULL whenever the controller is not dispatching one. */
+   * returns NULL whenever the controller is not dispatching one. Ghostty gives
+   * up on the same NULL rather than carry on without it
+   * (apprt/gtk/class/surface.zig:1243), and so does pt: an event encoded with
+   * no consumed modifiers and no unshifted codepoint is a wrong answer sent
+   * confidently, where handling nothing leaves the key for something else. */
   GdkEvent *event =
       gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(ctl));
+  if (event == NULL) return FALSE;
 
   GhosttyKey key = pt_keymap_physical_key(keycode, keyval);
   GhosttyMods mods = pt_keymap_mods(state);
-  GhosttyMods consumed_mods = 0;
-  guint32 unshifted = 0;
-  if (event != NULL) {
-    GdkDevice *device = gdk_event_get_device(event);
-    if (device != NULL && gdk_device_get_num_lock_state(device))
-      mods |= GHOSTTY_MODS_NUM_LOCK;
-    /* GDK reports which modifiers the layout already spent on producing the
-     * keyval, and the encoder subtracts them before deciding what to send, so
-     * that Shift+1 encodes as a plain `!` rather than as Shift+!.
-     * (surface.zig:1386-1393.) */
-    consumed_mods = pt_keymap_mods(gdk_key_event_get_consumed_modifiers(event) &
-                                   GDK_MODIFIER_MASK);
-    unshifted = pt_keymap_unshifted_codepoint(
-        gtk_widget_get_display(GTK_WIDGET(t)), event, keycode);
-  }
+  GdkDevice *device = gdk_event_get_device(event);
+  if (device != NULL && gdk_device_get_num_lock_state(device))
+    mods |= GHOSTTY_MODS_NUM_LOCK;
+  /* GDK reports which modifiers the layout already spent on producing the
+   * keyval, and the encoder subtracts them before deciding what to send, so
+   * that Shift+1 encodes as a plain `!` rather than as Shift+!.
+   * (surface.zig:1386-1393.) */
+  GhosttyMods consumed_mods =
+      pt_keymap_mods(gdk_key_event_get_consumed_modifiers(event) &
+                     GDK_MODIFIER_MASK);
+  guint32 unshifted = pt_keymap_unshifted_codepoint(
+      gtk_widget_get_display(GTK_WIDGET(t)), event, keycode);
   mods = pt_keymap_mods_for_key(mods, key, action);
 
   /* Text for the event, taken straight off the keyval. GTK will not turn
@@ -1743,7 +1726,7 @@ static gboolean key_event(PtTerminal *t, GtkEventControllerKey *ctl,
       pt_term_core_send_key(t->core, key, action, mods, consumed_mods,
                             unshifted, utf8, utf8_len);
   if (consumed && action != GHOSTTY_KEY_ACTION_RELEASE &&
-      !key_is_modifier(key)) {
+      !pt_keymap_is_modifier(key)) {
     /* any keypress that writes to the pty drops the selection, and snaps the
      * viewport back to the prompt: typing into scrollback you can't see is how
      * you run a command without noticing it ran. Both calls fire the core's
