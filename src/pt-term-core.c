@@ -953,11 +953,17 @@ static const char *terminfo_own_dir(void) {
  * directory first so the shipped entry resolves even where the system database
  * has never heard of xterm-ghostty.
  *
- * The trailing colon is load-bearing. ncurses reads an empty element of
- * TERMINFO_DIRS as "the compiled-in system database", so ending the list with
- * one keeps /usr/share/terminfo and the rest reachable; without it pt's
- * directory would be the whole database and every other TERM a child cares
- * about would stop resolving.
+ * The list ends in an empty element whenever this process inherited no
+ * TERMINFO_DIRS of its own, and ncurses reads an empty element as "the
+ * compiled-in system database", so that names /usr/share/terminfo and the rest
+ * explicitly and puts them directly behind pt's own directory.
+ *
+ * It is not what keeps them reachable. ncurses walks its compiled-in list after
+ * the roots it read from the environment whatever those say (db_iterator.c,
+ * dbdCfgList after dbdEnvList), so `infocmp xterm` answers with pt's directory
+ * alone on TERMINFO_DIRS, and answers with a path that does not exist there.
+ * What the empty element buys is a defined position in the search order rather
+ * than last place.
  *
  * Built once and kept, for the same two reasons as terminfo_own_dir: neither
  * input changes while pt runs, and the string has to exist before the fork

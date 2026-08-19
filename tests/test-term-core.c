@@ -5,6 +5,7 @@
 #include <glib/gstdio.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>              /* realpath */
 #include <string.h>
 
 typedef struct { GMainLoop *loop; PtTermCore *core;
@@ -3288,24 +3289,39 @@ static void test_terminfo_missing_from_empty_dir(void) {
 }
 
 /* What the shipped entry is for: a child spawned by this build is pointed at
- * the directory the build compiled it into. The two patterns are the two
- * halves of the promise — pt's directory comes first, so its entry wins, and
- * the list still ends in an empty element, which is how ncurses is told to
- * keep reading the system database for every other TERM. That second half
- * only holds when this process inherited no TERMINFO_DIRS of its own, which
- * is why main clears it. */
+ * the directory the build compiled it into. The whole value is pinned, not a
+ * prefix, so both halves of the promise are covered at once — pt's directory
+ * comes first, so its entry wins, and the list ends in an empty element, which
+ * names the system database and puts it directly behind pt's own directory
+ * instead of leaving it to be searched last.
+ *
+ * Two things this assumes, both true and neither obvious. The process must have
+ * inherited no TERMINFO_DIRS of its own, or there would be more on the end;
+ * main clears it. And the build directory has to be compared in the form the
+ * code produces, which is symlink-resolved, because the runtime value is built
+ * from readlink("/proc/self/exe") and the kernel resolves that. CMake's binary
+ * dir is whatever path the developer typed, so realpath brings the two to the
+ * same form.
+ *
+ * The comparison is a string equality on a value handed to the child in its
+ * environment, rather than a `case` glob with a path interpolated into the
+ * pattern: a build directory holding a glob character would quietly change what
+ * the pattern matches. */
 static void test_terminfo_dirs_reaches_child(void) {
-  char *cmd = g_strdup_printf(
-      "case \"$TERMINFO_DIRS\" in \"%s\":*) "
-      "case \"$TERMINFO_DIRS\" in *:) echo dirs-ok ;; esac ;; esac; sleep 30",
-      PT_TERMINFO_BUILD_DIR);
-  const char *argv[] = { "/bin/sh", "-c", cmd, NULL };
+  char *real = realpath(PT_TERMINFO_BUILD_DIR, NULL);
+  g_assert_nonnull(real);
+  char *expect = g_strdup_printf("PT_EXPECT_DIRS=%s:", real);
+  const char *envp[] = { expect, NULL };
+  const char *argv[] = { "/bin/sh", "-c",
+    "[ \"$TERMINFO_DIRS\" = \"$PT_EXPECT_DIRS\" ] && echo dirs-ok; sleep 30",
+    NULL };
   GError *err = NULL;
-  PtTermCore *core = core_new(argv, NULL, &err);
+  PtTermCore *core = core_new(argv, envp, &err);
   g_assert_no_error(err);
   g_assert_true(wait_for_text(core, "dirs-ok"));
   pt_term_core_free(core);
-  g_free(cmd);
+  g_free(expect);
+  free(real);
 }
 
 /* The public guard, over the roots it gathers for itself.
