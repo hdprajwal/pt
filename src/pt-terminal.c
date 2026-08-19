@@ -1,5 +1,4 @@
 #include "pt-terminal.h"
-#include "pt-block.h"
 #include "pt-config.h"       /* mouse-reporting and osc52 defaults */
 #include "pt-keymap.h"
 #include "pt-link.h"         /* bare URLs in plain output, matched on hover */
@@ -1476,7 +1475,12 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
        * ghostty's resolver, which checks its sprite face ahead of every
        * loaded font (font/CodepointResolver.zig:139-145). pt_sprite_has is
        * asked first so that ordinary text does not have to break its shaped
-       * run just to find out the sprite does not want the cell. */
+       * run just to find out the sprite does not want the cell.
+       *
+       * Block elements come through here too. They are drawn from the cell
+       * for a different reason: the font's ink is narrower than the rounded
+       * cell width, which seams every boundary between adjacent block
+       * cells. */
       if (single && pt_sprite_has(cp)) {
         flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
         PtSpriteMetrics sm = { t->cell_w, t->cell_h, t->underline_thickness };
@@ -1484,24 +1488,6 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
                          { fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, alpha },
                          x, y };
         if (pt_sprite_draw(cp, &sm, &sprite_sink, &sc)) continue;
-      }
-
-      /* Block elements are drawn from the cell metrics, never shaped: the
-       * font's ink is narrower than the rounded cell width, which seams every
-       * boundary between adjacent block cells. */
-      PtBlockRect rects[4];
-      int nrects = single ? pt_block_glyph_rects(cp, rects) : 0;
-      if (nrects > 0) {
-        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
-        for (int r = 0; r < nrects; r++)
-          gtk_snapshot_append_color(snapshot,
-              &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f,
-                         rects[r].alpha * alpha},
-              &GRAPHENE_RECT_INIT(x + rects[r].x * t->cell_w,
-                                  y + rects[r].y * t->cell_h,
-                                  rects[r].w * t->cell_w,
-                                  rects[r].h * t->cell_h));
-        continue;
       }
 
       const GlyphEntry *ge =

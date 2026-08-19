@@ -1,4 +1,5 @@
 #include "pt-sprite.h"
+#include <math.h>
 
 /* Ported from build/_deps/ghostty-src/src/font/sprite/draw/{common,box}.zig.
  *
@@ -27,12 +28,17 @@ static int sat_sub(int a, int b) { return a > b ? a - b : 0; }
  * min/max of the two points, so a reversed pair draws the same rectangle
  * rather than nothing (canvas.zig:23-42). Zero-area boxes paint no pixels
  * there, so they emit no sink call here. */
-static void emit_box(const PtSpriteSink *sink, void *user,
-                     int x0, int y0, int x1, int y1) {
+static void emit_box_shade(const PtSpriteSink *sink, void *user,
+                           int x0, int y0, int x1, int y1, float alpha) {
   int x = MIN(x0, x1), y = MIN(y0, y1);
   int w = MAX(x0, x1) - x, h = MAX(y0, y1) - y;
   if (w <= 0 || h <= 0) return;
-  sink->rect(user, x, y, w, h, 1.0f);
+  sink->rect(user, x, y, w, h, alpha);
+}
+
+static void emit_box(const PtSpriteSink *sink, void *user,
+                     int x0, int y0, int x1, int y1) {
+  emit_box_shade(sink, user, x0, y0, x1, y1, 1.0f);
 }
 
 /* Horizontal line with its top edge at `y`, between `x1` and `x2`. */
@@ -383,6 +389,123 @@ static void diagonal(const PtSpriteMetrics *m, const PtSpriteSink *sink,
   sink->stroke(user, &p, (float)thick_light(m->thickness));
 }
 
+/* ---- block elements ---- */
+
+/* Ghostty uses two different integer schemes in this range and they do not
+ * agree, so both are here. The eighths and halves go through blockShade, which
+ * rounds the fraction to whole pixels and then parks the result against an
+ * edge or the centre. The quadrants go through fill, which rounds each edge
+ * separately with Fraction.min and Fraction.max. */
+
+typedef enum { ALIGN_MIN, ALIGN_MID, ALIGN_MAX } SpriteAlign;
+
+/* block.zig blockShade (:121-152). */
+static void block_shade(const PtSpriteMetrics *m, const PtSpriteSink *sink,
+                        void *user, SpriteAlign halign, SpriteAlign valign,
+                        double wfrac, double hfrac, float alpha) {
+  const int w = (int)round(m->cell_w * wfrac);
+  const int h = (int)round(m->cell_h * hfrac);
+  /* An eighth of a small enough cell rounds to nothing. Ghostty's pixel loop
+   * draws nothing in that case rather than a hairline, so neither does this. */
+  if (w <= 0 || h <= 0) return;
+  const int x = halign == ALIGN_MIN   ? 0
+                : halign == ALIGN_MAX ? m->cell_w - w
+                                      : (m->cell_w - w) / 2;
+  const int y = valign == ALIGN_MIN   ? 0
+                : valign == ALIGN_MAX ? m->cell_h - h
+                                      : (m->cell_h - h) / 2;
+  sink->rect(user, x, y, w, h, alpha);
+}
+
+/* common.zig Fraction.min and Fraction.max (:211-233). The two are asymmetric
+ * on purpose. A min edge rounds the complementary fraction in from the far
+ * side, so at an odd cell width both halves come out the same number of
+ * pixels and overlap by one in the middle. Rounding both edges the obvious way
+ * instead leaves the halves different widths, and a seam at the join. */
+static int frac_min(double f, int size) {
+  return (int)(size - round((1.0 - f) * size));
+}
+
+static int frac_max(double f, int size) {
+  return (int)round(f * size);
+}
+
+#define Q_TL 0x1
+#define Q_TR 0x2
+#define Q_BL 0x4
+#define Q_BR 0x8
+
+/* The quadrants each glyph fills, indexed by cp - 0x2596. There is no ordering
+ * the geometry can derive, so block.zig tabulates them and so does this. */
+static const guint8 quadrants[] = {
+  Q_BL,                      /* U+2596 ▖ */
+  Q_BR,                      /* U+2597 ▗ */
+  Q_TL,                      /* U+2598 ▘ */
+  Q_TL | Q_BL | Q_BR,        /* U+2599 ▙ */
+  Q_TL | Q_BR,               /* U+259A ▚ */
+  Q_TL | Q_TR | Q_BL,        /* U+259B ▛ */
+  Q_TL | Q_TR | Q_BR,        /* U+259C ▜ */
+  Q_TR,                      /* U+259D ▝ */
+  Q_TR | Q_BL,               /* U+259E ▞ */
+  Q_TR | Q_BL | Q_BR,        /* U+259F ▟ */
+};
+
+static void quadrant(const PtSpriteMetrics *m, const PtSpriteSink *sink,
+                     void *user, guint8 quads) {
+  const int w = m->cell_w, h = m->cell_h;
+  const int mid_x_min = frac_min(0.5, w), mid_x_max = frac_max(0.5, w);
+  const int mid_y_min = frac_min(0.5, h), mid_y_max = frac_max(0.5, h);
+  if (quads & Q_TL) emit_box(sink, user, 0, 0, mid_x_max, mid_y_max);
+  if (quads & Q_TR) emit_box(sink, user, mid_x_min, 0, w, mid_y_max);
+  if (quads & Q_BL) emit_box(sink, user, 0, mid_y_min, mid_x_max, h);
+  if (quads & Q_BR) emit_box(sink, user, mid_x_min, mid_y_min, w, h);
+}
+
+/* block.zig draw2580_259F (:30-109). The shade alphas are ghostty's own
+ * Shade values, 0x40, 0x80 and 0xc0 out of 0xff (common.zig:43-51). */
+static void block_glyph(const PtSpriteMetrics *m, const PtSpriteSink *sink,
+                        void *user, gunichar cp) {
+  const double eighth = 0.125, quarter = 0.25, three_eighths = 0.375;
+  const double half = 0.5, five_eighths = 0.625, three_quarters = 0.75;
+  const double seven_eighths = 0.875;
+
+  if (cp >= 0x2596) {
+    quadrant(m, sink, user, quadrants[cp - 0x2596]);
+    return;
+  }
+
+  switch (cp) {
+    /* upper: full width against the top of the cell */
+    case 0x2580: block_shade(m, sink, user, ALIGN_MID, ALIGN_MIN, 1.0, half, 1.0f); break;
+    case 0x2594: block_shade(m, sink, user, ALIGN_MID, ALIGN_MIN, 1.0, eighth, 1.0f); break;
+    /* lower: full width against the floor, growing upward */
+    case 0x2581: block_shade(m, sink, user, ALIGN_MID, ALIGN_MAX, 1.0, eighth, 1.0f); break;
+    case 0x2582: block_shade(m, sink, user, ALIGN_MID, ALIGN_MAX, 1.0, quarter, 1.0f); break;
+    case 0x2583: block_shade(m, sink, user, ALIGN_MID, ALIGN_MAX, 1.0, three_eighths, 1.0f); break;
+    case 0x2584: block_shade(m, sink, user, ALIGN_MID, ALIGN_MAX, 1.0, half, 1.0f); break;
+    case 0x2585: block_shade(m, sink, user, ALIGN_MID, ALIGN_MAX, 1.0, five_eighths, 1.0f); break;
+    case 0x2586: block_shade(m, sink, user, ALIGN_MID, ALIGN_MAX, 1.0, three_quarters, 1.0f); break;
+    case 0x2587: block_shade(m, sink, user, ALIGN_MID, ALIGN_MAX, 1.0, seven_eighths, 1.0f); break;
+    /* left: full height against the left edge, shrinking rightward */
+    case 0x2589: block_shade(m, sink, user, ALIGN_MIN, ALIGN_MID, seven_eighths, 1.0, 1.0f); break;
+    case 0x258a: block_shade(m, sink, user, ALIGN_MIN, ALIGN_MID, three_quarters, 1.0, 1.0f); break;
+    case 0x258b: block_shade(m, sink, user, ALIGN_MIN, ALIGN_MID, five_eighths, 1.0, 1.0f); break;
+    case 0x258c: block_shade(m, sink, user, ALIGN_MIN, ALIGN_MID, half, 1.0, 1.0f); break;
+    case 0x258d: block_shade(m, sink, user, ALIGN_MIN, ALIGN_MID, three_eighths, 1.0, 1.0f); break;
+    case 0x258e: block_shade(m, sink, user, ALIGN_MIN, ALIGN_MID, quarter, 1.0, 1.0f); break;
+    case 0x258f: block_shade(m, sink, user, ALIGN_MIN, ALIGN_MID, eighth, 1.0, 1.0f); break;
+    /* right */
+    case 0x2590: block_shade(m, sink, user, ALIGN_MAX, ALIGN_MID, half, 1.0, 1.0f); break;
+    case 0x2595: block_shade(m, sink, user, ALIGN_MAX, ALIGN_MID, eighth, 1.0, 1.0f); break;
+    /* the whole cell, solid or shaded */
+    case 0x2588: emit_box(sink, user, 0, 0, m->cell_w, m->cell_h); break;
+    case 0x2591: emit_box_shade(sink, user, 0, 0, m->cell_w, m->cell_h, 0x40 / 255.0f); break;
+    case 0x2592: emit_box_shade(sink, user, 0, 0, m->cell_w, m->cell_h, 0x80 / 255.0f); break;
+    case 0x2593: emit_box_shade(sink, user, 0, 0, m->cell_w, m->cell_h, 0xc0 / 255.0f); break;
+    default: g_assert_not_reached();
+  }
+}
+
 /* ---- dispatch ---- */
 
 /* The arm styles for every intersection glyph in U+2500..U+257F, transcribed
@@ -535,7 +658,7 @@ static const guint8 box_lines[0x80] = {
 #undef LN
 
 gboolean pt_sprite_has(gunichar cp) {
-  return cp >= 0x2500 && cp <= 0x257f;
+  return cp >= 0x2500 && cp <= 0x259f;
 }
 
 gboolean pt_sprite_draw(gunichar cp, const PtSpriteMetrics *m,
@@ -553,6 +676,11 @@ gboolean pt_sprite_draw(gunichar cp, const PtSpriteMetrics *m,
    * as solid; the closer-spaced U+254C..U+254F ask for a thickness-sized gap
    * instead. Both are ghostty's literals. */
   const int wide_gap = MAX(4, light);
+
+  if (cp >= 0x2580) {
+    block_glyph(&mm, sink, user, cp);
+    return TRUE;
+  }
 
   switch (cp) {
     case 0x2504: dash_h(&mm, sink, user, 3, light, wide_gap); return TRUE;

@@ -88,7 +88,6 @@ add_library(ptcore STATIC
   src/pt-agent.c
   src/pt-agent-report.c
   src/pt-agent-session.c
-  src/pt-block.c
   src/pt-claude-usage.c
   src/pt-codex-usage.c
   src/pt-config.c
@@ -172,10 +171,6 @@ add_test(NAME theme COMMAND test-theme)
 add_executable(test-style tests/test-style.c)
 target_link_libraries(test-style PRIVATE ptcore)
 add_test(NAME style COMMAND test-style)
-
-add_executable(test-block tests/test-block.c)
-target_link_libraries(test-block PRIVATE ptcore)
-add_test(NAME block COMMAND test-block)
 
 add_executable(test-sprite tests/test-sprite.c)
 target_link_libraries(test-sprite PRIVATE ptcore)
