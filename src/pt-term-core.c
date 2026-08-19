@@ -1169,10 +1169,18 @@ gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
    * does not match, the CSI u form, which asks for nothing beyond ctrl and one
    * codepoint of text (input/key_encode.zig:383-397 and :480-521), and a
    * keyval never gives us more than one codepoint. With alt held it writes the
-   * esc prefix and the text, or the text alone when alt-as-esc is off. The
-   * presses it declines to encode at all are a dead key mid composition, which
-   * pt never reports, and a lone modifier key in kitty mode (:233), whose
-   * keyval carries no text for this branch to write. */
+   * esc prefix and the text, or the text alone when alt-as-esc is off.
+   *
+   * Three things it declines to encode at all. A dead key mid composition,
+   * which pt never reports. A lone modifier key in kitty mode (:233), whose
+   * keyval carries no text for this branch to write. And a backspace holding
+   * non-control text, which it drops so that an input method can delete one
+   * preedit character instead (:371, and :171 in kitty mode). The last of
+   * those is reachable: that carve-out is keyed off the physical key, so a
+   * Backspace remapped to a keysym pt's keyval table does not list stays a
+   * backspace and arrives here carrying the remapped character, which this
+   * branch then writes. No code guards it, because writing the character the
+   * user's own layout produced is the answer they asked for. */
   if (utf8_len > 0 && action != GHOSTTY_KEY_ACTION_RELEASE) {
     pty_write_raw(c->pty_fd, utf8, utf8_len);
     return TRUE;

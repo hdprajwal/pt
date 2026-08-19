@@ -67,6 +67,14 @@ static const ModsForKeyCase mods_for_key_cases[] = {
     {"press right meta", GHOSTTY_KEY_META_RIGHT, GHOSTTY_KEY_ACTION_PRESS, 0,
      GHOSTTY_MODS_SUPER | GHOSTTY_MODS_SUPER_SIDE},
 
+    /* The left key struck while the right one is already down, which is the
+     * only way in: the side bit arrives set and the left key has to clear it,
+     * where every row above starts from a state where it was clear already and
+     * so cannot tell writing the bit from leaving it alone. */
+    {"press left shift while right shift is held", GHOSTTY_KEY_SHIFT_LEFT,
+     GHOSTTY_KEY_ACTION_PRESS, GHOSTTY_MODS_SHIFT | GHOSTTY_MODS_SHIFT_SIDE,
+     GHOSTTY_MODS_SHIFT},
+
     /* The release of the last modifier held: GTK still reports it, and the bit
      * has to go, or an app in report-all-keys mode is told the key went up
      * while being handed mods saying it is still down. The side bit is written

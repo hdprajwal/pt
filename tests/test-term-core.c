@@ -917,6 +917,44 @@ static void test_focus_report_resent_on_mode_enable(void) {
   pt_term_core_free(core);
 }
 
+/* ---- kitty keyboard event types ----
+ *
+ * `CSI > 10 u` pushes kitty flags 0b1010: report event types, which is what
+ * makes a release encode anything at all, and report all keys as escape codes,
+ * so that press and release both come back as sequences rather than as the
+ * letter itself. Same `stty -echo -icanon` and `cat -v` recipe as the mouse
+ * tests above. The flags are pushed before the marker is printed, so a grid
+ * holding the marker is a grid whose parser has already seen them. */
+static void test_kitty_key_event_types(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[>10u'; printf ready; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  /* The three encodings below were read off the grid rather than derived from
+     the spec. A bare press carries neither field: kitty's defaults are modifier
+     1 and event type 1, and both are left off when they hold. Repeat and
+     release each add the event type as a sub-parameter of the modifier field
+     (`:2` and `:3`), which forces the modifier field itself to be spelled out
+     as the 1 it was already assumed to be. */
+  g_assert_true(pt_term_core_send_key(core, GHOSTTY_KEY_A,
+                                      GHOSTTY_KEY_ACTION_PRESS, 0, 0, 'a',
+                                      "a", 1));
+  g_assert_true(wait_for_text(core, "^[[97u"));
+  g_assert_true(pt_term_core_send_key(core, GHOSTTY_KEY_A,
+                                      GHOSTTY_KEY_ACTION_REPEAT, 0, 0, 'a',
+                                      "a", 1));
+  g_assert_true(wait_for_text(core, "^[[97u^[[97;1:2u"));
+  g_assert_true(pt_term_core_send_key(core, GHOSTTY_KEY_A,
+                                      GHOSTTY_KEY_ACTION_RELEASE, 0, 0, 'a',
+                                      "a", 1));
+  g_assert_true(wait_for_text(core, "^[[97u^[[97;1:2u^[[97;1:3u"));
+
+  pt_term_core_free(core);
+}
+
 /* ---- in-band resize reports (mode 2048) ----
  *
  * Same `cat -v` recipe again. The report is
@@ -3269,6 +3307,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/focus-report-forced", test_focus_report_forced);
   g_test_add_func("/termcore/focus-report-on-enable",
                   test_focus_report_resent_on_mode_enable);
+  g_test_add_func("/termcore/kitty-key-event-types", test_kitty_key_event_types);
   g_test_add_func("/termcore/in-band-resize", test_in_band_resize_report);
   g_test_add_func("/termcore/in-band-resize-off",
                   test_in_band_resize_needs_mode);
