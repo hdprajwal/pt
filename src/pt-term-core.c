@@ -1795,6 +1795,23 @@ gboolean pt_term_core_take_render_dirty(PtTermCore *c) {
   return dirty;
 }
 
+/* The whole question a repaint has to answer, in one call: is there anything
+ * new to show, and is the program willing to have it shown yet? A widget that
+ * has stopped queuing repaints for the duration of a hold can still be reached
+ * by a repaint it never asked for — focus, blink, a fading bar — and syncing on
+ * one of those would put the child's half-drawn frame on the screen, which is
+ * the tear synchronized output exists to prevent. Ghostty's renderer bails out
+ * of the whole frame under the same condition (renderer/generic.zig:1176-1180).
+ *
+ * The short circuit is the load-bearing part. While the frame is held the
+ * dirty flag has to be left alone rather than taken and discarded, because it
+ * is the only record that anything happened during the hold: take it here and
+ * the first frame after the ESU would sync nothing and the finished frame
+ * would sit there unseen until the child happened to write again. */
+gboolean pt_term_core_take_frame(PtTermCore *c) {
+  return !c->sync_output && pt_term_core_take_render_dirty(c);
+}
+
 guint pt_term_core_content_serial(PtTermCore *c) { return c->content_serial; }
 
 /* ---- row walks ----

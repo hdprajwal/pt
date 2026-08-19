@@ -602,6 +602,15 @@ static gboolean wait_for_text(PtTermCore *core, const char *needle) {
   return FALSE;
 }
 
+/* Let any in-flight pty reads land so a take-and-clear assertion cannot race
+   a byte that was already on its way. */
+static void drain_reads(void) {
+  for (int i = 0; i < 20; i++) {
+    g_main_context_iteration(NULL, FALSE);
+    g_usleep(2000);
+  }
+}
+
 static gboolean tracking_on(PtTermCore *c) {
   return pt_term_core_mouse_tracking(c);
 }
@@ -1108,6 +1117,121 @@ static void test_sync_output_rearm_survives_past_1s_then_hits_ceiling(void) {
   /* Past the 5s ceiling from the rising edge: force-cleared regardless of the
      stream still running. */
   g_assert_true(wait_until(sync_output_off, core));
+
+  pt_term_core_free(core);
+}
+
+/* ---- the frame gate (pt_term_core_take_frame) ----
+ *
+ * The rule the widget's snapshot pass runs on, tested where it lives. The
+ * widget itself is a GtkWidget with no test binary, so the reason the gate
+ * exists — a focus or blink repaint reaching a snapshot in the middle of a
+ * held frame — is reproduced here by simply calling take_frame during a hold,
+ * which is all such a repaint would do. */
+static guint frame_serial_before;      /* the serial as of the last handshake */
+
+static gboolean frame_serial_moved(PtTermCore *c) {
+  return pt_term_core_content_serial(c) != frame_serial_before;
+}
+
+static void test_take_frame(void) {
+  /* Nothing holding anything: take_frame is the dirty flag and no more. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+  drain_reads();
+
+  g_assert_true(pt_term_core_take_frame(core));
+  g_assert_false(pt_term_core_take_frame(core));
+  g_assert_false(pt_term_core_take_frame(core));
+
+  /* Bytes from the child set it again, exactly once. */
+  pt_term_core_write(core, "probe\n", -1);
+  g_assert_true(wait_for_text(core, "probe"));
+  drain_reads();
+  g_assert_true(pt_term_core_take_frame(core));
+  g_assert_false(pt_term_core_take_frame(core));
+
+  pt_term_core_free(core);
+}
+
+static void test_take_frame_refuses_while_held(void) {
+  /* BSU and the frame the child is drawing arrive together, and the ESU waits
+     on `read` so the hold is a real one rather than a race with a sleep. The
+     text is deliberately never asked for through wait_for_text while the hold
+     is on: that helper syncs, which is the very thing under test here, so the
+     serial is what says the child's bytes have landed. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; read x; printf '\\033[?2026hHELD'; "
+    "read y; printf '\\033[?2026l'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+  drain_reads();
+  g_assert_true(pt_term_core_take_frame(core));    /* start from a clean flag */
+  g_assert_false(pt_term_core_take_frame(core));
+
+  frame_serial_before = pt_term_core_content_serial(core);
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_until(sync_output_on, core));
+  g_assert_true(wait_until(frame_serial_moved, core));
+
+  /* Held, with something to draw: every one of these stands for a repaint the
+     widget never asked for, and not one of them may sync. */
+  g_assert_true(pt_term_core_sync_output(core));
+  for (int i = 0; i < 5; i++) g_assert_false(pt_term_core_take_frame(core));
+
+  pt_term_core_write(core, "\n", 1);               /* the child's ESU */
+  g_assert_true(wait_until(sync_output_off, core));
+  g_assert_true(pt_term_core_take_frame(core));
+
+  /* And the frame the child drew under the hold reaches the visible grid on
+     that first sync after the ESU, which is the point of keeping the flag. */
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(strstr(text, "HELD"));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
+static void test_take_frame_keeps_the_flag_through_a_hold(void) {
+  /* The same shape as above with the ESU taken away, which is what makes it
+     an honest test of the short circuit: a real ESU arrives as bytes, and
+     those bytes would set the dirty flag again all by themselves, so the TRUE
+     that follows one proves nothing about what the refusals did to the flag.
+     Here nothing arrives after the held write at all — the 1s safety timer is
+     what ends the hold — so the only thing left to make take_frame answer
+     TRUE is the flag those five refusals were careful not to consume. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; read x; printf '\\033[?2026hLATE'; "
+    "sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+  drain_reads();
+  g_assert_true(pt_term_core_take_frame(core));
+  g_assert_false(pt_term_core_take_frame(core));
+
+  frame_serial_before = pt_term_core_content_serial(core);
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_until(sync_output_on, core));
+  g_assert_true(wait_until(frame_serial_moved, core));
+
+  g_assert_true(pt_term_core_sync_output(core));
+  for (int i = 0; i < 5; i++) g_assert_false(pt_term_core_take_frame(core));
+
+  g_assert_true(wait_until(sync_output_off, core));   /* no bytes, just time */
+  g_assert_true(pt_term_core_take_frame(core));
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(strstr(text, "LATE"));
+  g_free(text);
 
   pt_term_core_free(core);
 }
@@ -2753,15 +2877,6 @@ static void test_cursor_info(void) {
 
 /* ---- render dirty ---- */
 
-/* Let any in-flight pty reads land so a take-and-clear assertion cannot race
-   a byte that was already on its way. */
-static void drain_reads(void) {
-  for (int i = 0; i < 20; i++) {
-    g_main_context_iteration(NULL, FALSE);
-    g_usleep(2000);
-  }
-}
-
 static void test_take_render_dirty(void) {
   PtTermCore *core = cursor_core_new();   /* output has arrived already */
   drain_reads();
@@ -3167,6 +3282,10 @@ int main(int argc, char *argv[]) {
                   test_sync_output_resize_clears);
   g_test_add_func("/termcore/sync-output-rearm-then-ceiling",
                   test_sync_output_rearm_survives_past_1s_then_hits_ceiling);
+  g_test_add_func("/termcore/take-frame", test_take_frame);
+  g_test_add_func("/termcore/take-frame-held", test_take_frame_refuses_while_held);
+  g_test_add_func("/termcore/take-frame-held-flag",
+                  test_take_frame_keeps_the_flag_through_a_hold);
   g_test_add_func("/termcore/alt-screen-arrows", test_alt_screen_arrows);
   g_test_add_func("/termcore/alt-screen-tracking-wheel",
                   test_alt_screen_tracking_wheel);

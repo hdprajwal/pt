@@ -1220,20 +1220,12 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   }
   /* Sync only when the core says a frame would differ. Focus, scrim, blink
    * and bar-fade repaints redraw from what the last sync left in place, which
-   * is byte-identical — the state only moves when the serial does.
-   *
-   * While synchronized output is held, skip the sync even if the dirty flag
-   * is set. core_draw already stopped queuing repaints for this reason, but
-   * one of those same focus/blink/bar-fade paths can still reach a snapshot
-   * on its own, and syncing here would pull the child's half-drawn frame
-   * onto the screen despite core_draw's refusal to ask for it. Critically,
-   * the flag must be left unconsumed rather than taken and discarded — it
-   * has to still be there for pt_term_core_take_render_dirty to see when the
-   * real ESU lands and calls back into core_draw, or that first post-hold
-   * frame would sync nothing. Mirrors ghostty's renderer bailing out of the
-   * whole frame under the same condition (renderer/generic.zig:1176-1180). */
-  if (!pt_term_core_sync_output(t->core) && pt_term_core_take_render_dirty(t->core))
-    pt_term_core_sync(t->core);
+   * is byte-identical — the state only moves when the serial does. The core
+   * owns the rule because it also owns the other half of it: those same
+   * repaint paths reach a snapshot on their own, without going through
+   * core_draw, so this is where a frame held by synchronized output would
+   * otherwise leak onto the screen. See pt_term_core_take_frame. */
+  if (pt_term_core_take_frame(t->core)) pt_term_core_sync(t->core);
 
   /* The effective default background: the theme's, unless a program moved it
    * with OSC 11. Seeded so a refused read still paints something sane. */

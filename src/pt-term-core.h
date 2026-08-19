@@ -442,6 +442,13 @@ gboolean pt_term_core_cursor_info(PtTermCore *c, PtCursorInfo *out); /* one row 
 /* TRUE exactly once after terminal content/viewport changed since the last call. */
 gboolean pt_term_core_take_render_dirty(PtTermCore *c);
 
+/* TRUE when the caller should call pt_term_core_sync(): the render state has
+ * moved since the last frame and no program is holding this one back with
+ * synchronized output. The dirty flag is consumed only when the answer is
+ * TRUE — a flag taken during a hold would be thrown away, and the first frame
+ * after the ESU would find nothing left to pick up. */
+gboolean pt_term_core_take_frame(PtTermCore *c);
+
 /* The counter behind take_render_dirty: bumped on every content, viewport,
  * color or selection change, never by readers (take included). Two equal
  * reads mean nothing to re-derive in between; monotonic, wraps at G_MAXUINT. */
