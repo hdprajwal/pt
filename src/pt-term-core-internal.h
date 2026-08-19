@@ -141,6 +141,24 @@ void pt_notify_gate_reset(void);   /* tests only: the state is process-wide */
 char *pt_osc52_decode(const char *payload, gsize len, gboolean *primary,
                       gsize *out_len);
 
+/* ---- terminfo lookup ----
+ *
+ * The search behind pt_term_core_terminfo_available, with the roots handed in
+ * rather than gathered from the environment. A test can point it at a
+ * directory it staged itself and get a real answer; on a machine that has
+ * ghostty installed system-wide, that is the only way to see the not-found
+ * branch the fallback depends on. Checks both layouts ncurses uses,
+ * <root>/<first letter>/<name> and <root>/<hex of the first byte>/<name>. */
+gboolean pt_terminfo_in_roots(const char *const *roots, const char *term);
+
+/* The roots pt_term_core_terminfo_available searches, in order and NULL
+ * terminated; caller g_strfreev's it. pt's own shipped directory is first, and
+ * that is the only position a test may rely on. Exposed because the public
+ * guard on its own proves nothing about what pt ships: /usr/share/terminfo is
+ * one of the fixed roots, so on any machine with ghostty installed it answers
+ * TRUE regardless. A test takes the first root and asks it alone. */
+char **pt_terminfo_roots(void);
+
 /* The visible grid of a bare terminal, as pt_term_core_grid_text() renders it
  * for a live core. Lets a test compare grids without spawning anything. */
 char *pt_term_grid_text_raw(GhosttyTerminal t);

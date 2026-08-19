@@ -60,6 +60,34 @@ typedef struct {
                        gpointer user);
 } PtTermCoreCallbacks;
 
+/* ---- terminfo ----
+ *
+ * TRUE when a compiled terminfo entry named `term` exists somewhere ncurses
+ * will look: pt's own shipped directory first, then $TERMINFO, $TERMINFO_DIRS,
+ * ~/.terminfo and the system database. pt ships the xterm-ghostty entry and
+ * puts its directory on the child's TERMINFO_DIRS, so on a correct install
+ * this is TRUE; it is a safety net against an install that lost the data
+ * directory, not a way to turn the shipped entry off. A caller that gets FALSE
+ * should fall back to a TERM every machine has.
+ *
+ * A filesystem check, not a terminfo read — pt does not link ncurses. So it
+ * answers whether ncurses would find a file, not whether that file parses.
+ *
+ * $PT_TERMINFO_DIR overrides where pt believes its own directory is, for a
+ * binary that has been moved away from the data it shipped with. */
+gboolean pt_term_core_terminfo_available(const char *term);
+
+/* The `term` config key: what a pane's child is told $TERM is. Process-wide
+ * and read at spawn, so a config edit reaches panes opened after it and leaves
+ * the running ones with the name they were started with, as ghostty's own
+ * `term` does. NULL or "" means PT_CONFIG_TERM_DEFAULT.
+ *
+ * The guard above still has the last word. A name with no entry ncurses can
+ * find is replaced by xterm-256color at spawn, whether it came from here or
+ * from the default. Nothing else about pt's identity moves with it: see
+ * term_name() in pt-term-core.c. */
+void pt_term_core_set_term(const char *term);
+
 /* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh).
  * env_pairs: NULL-terminated "KEY=VALUE" strings set in the child before
  * exec (after TERM). NULL → none. Copied; caller keeps ownership.
@@ -85,10 +113,17 @@ void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
 void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
                          int cell_w, int cell_h);
 void pt_term_core_write(PtTermCore *c, const char *buf, gssize len);
-/* Returns TRUE if the encoder produced bytes (event was consumed). */
+/* Returns TRUE if the encoder produced bytes (event was consumed).
+ *
+ * `consumed_mods` is the subset of `mods` the keyboard layout already spent on
+ * producing `utf8`, and only the toolkit knows it, so it is a parameter rather
+ * than something guessed here. On a US layout Shift+1 gives "!" and consumes
+ * shift, and the encoder subtracts consumed mods from the event before it
+ * encodes, so the app is told "!" and not Shift+!. Pass 0 when there is no
+ * layout in the picture, as a synthetic event has none. */
 gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
                                GhosttyKeyAction action, GhosttyMods mods,
-                               guint32 unshifted_cp,
+                               GhosttyMods consumed_mods, guint32 unshifted_cp,
                                const char *utf8, gsize utf8_len);
 void pt_term_core_scroll_delta(PtTermCore *c, int rows);
 /* Snap the viewport back to the active area (what typing should do). */
@@ -441,6 +476,13 @@ gboolean pt_term_core_cursor_info(PtTermCore *c, PtCursorInfo *out); /* one row 
 
 /* TRUE exactly once after terminal content/viewport changed since the last call. */
 gboolean pt_term_core_take_render_dirty(PtTermCore *c);
+
+/* TRUE when the caller should call pt_term_core_sync(): the render state has
+ * moved since the last frame and no program is holding this one back with
+ * synchronized output. The dirty flag is consumed only when the answer is
+ * TRUE — a flag taken during a hold would be thrown away, and the first frame
+ * after the ESU would find nothing left to pick up. */
+gboolean pt_term_core_take_frame(PtTermCore *c);
 
 /* The counter behind take_render_dirty: bumped on every content, viewport,
  * color or selection change, never by readers (take included). Two equal

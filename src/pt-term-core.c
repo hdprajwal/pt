@@ -115,16 +115,33 @@ static bool effect_size(GhosttyTerminal t, void *ud,
   return true;
 }
 
+/* CSI c and CSI > c, the other two answers a program fingerprints a terminal
+ * with. Ghostty writes them as fixed strings, `?62;22;52c` and `>1;10;0c`, and
+ * pt says the same through the library's struct
+ * (termio/stream_handler.zig:812-834). It quacks as a VT220 rather than a VT420
+ * because it implements no DCS sequences, which is ghostty's own note there.
+ *
+ * Feature 52 is clipboard access, and it follows the osc52 setting exactly as
+ * ghostty's follows `clipboard-write`: a pane that will not write the clipboard
+ * must not advertise that it will. The terminfo entry pt ships declares Ms for
+ * the same capability, so the two would otherwise disagree at the default.
+ *
+ * DA2's second field is the firmware version, and 10 is ghostty's number. It
+ * has nothing to do with PT_TERM_PROGRAM_VERSION below and does not track it:
+ * this field is what a program that knows ghostty compares against. */
 static bool effect_device_attributes(GhosttyTerminal t, void *ud,
                                      GhosttyDeviceAttributes *out) {
-  (void)t; (void)ud;
+  (void)t;
+  PtTermCore *c = ud;
   out->primary.conformance_level = GHOSTTY_DA_CONFORMANCE_VT220;
-  out->primary.features[0] = GHOSTTY_DA_FEATURE_COLUMNS_132;
-  out->primary.features[1] = GHOSTTY_DA_FEATURE_SELECTIVE_ERASE;
-  out->primary.features[2] = GHOSTTY_DA_FEATURE_ANSI_COLOR;
-  out->primary.num_features = 3;
+  out->primary.features[0] = GHOSTTY_DA_FEATURE_ANSI_COLOR;
+  out->primary.num_features = 1;
+  if (c->osc52 != PT_OSC52_OFF) {
+    out->primary.features[1] = GHOSTTY_DA_FEATURE_CLIPBOARD;
+    out->primary.num_features = 2;
+  }
   out->secondary.device_type = GHOSTTY_DA_DEVICE_TYPE_VT220;
-  out->secondary.firmware_version = 1;
+  out->secondary.firmware_version = 10;
   out->secondary.rom_cartridge = 0;
   out->tertiary.unit_id = 0;
   return true;
@@ -141,9 +158,36 @@ static bool effect_color_scheme(GhosttyTerminal t, void *ud,
   return true;
 }
 
+/* ---- identity ----
+ *
+ * pt tells the programs it runs that it is ghostty, and that is a decision,
+ * not a leftover. pt's whole VT layer is libghostty-vt, the same code ghostty
+ * itself runs, and pt now implements the capability set the xterm-ghostty
+ * terminfo entry advertises: the SGR attributes it lists, synchronized output,
+ * and the kitty keyboard protocol. Plenty of programs branch on the terminal
+ * they find and take a cruder path when they do not recognise it, and calling
+ * itself xterm-256color was buying pt those cruder paths while it behaved like
+ * the terminal being looked for.
+ *
+ * The version is the libghostty this build is pinned to. That tree calls
+ * itself 1.3.2-dev; the suffix is dropped because what reads this parses it as
+ * a version number and a pre-release tag is a common thing to get wrong.
+ *
+ * Three answers have to agree or a program that reads one and checks another
+ * concludes pt is lying: $TERM_PROGRAM, $TERM_PROGRAM_VERSION and the XTVERSION
+ * reply. They are all built from the two strings below. */
+#define PT_TERM_PROGRAM "ghostty"
+#define PT_TERM_PROGRAM_VERSION "1.3.2"
+
+/* CSI > q, which the library answers as `ESC P > | <this string> ESC \`. A
+ * program that did not spawn the shell cannot read the environment pt set for
+ * it, so it asks over the wire instead, and the two have to say the same
+ * thing. */
 static GhosttyString effect_xtversion(GhosttyTerminal t, void *ud) {
   (void)t; (void)ud;
-  return (GhosttyString){ .ptr = (const uint8_t *)"pt", .len = 2 };
+  static const char name[] = PT_TERM_PROGRAM " " PT_TERM_PROGRAM_VERSION;
+  return (GhosttyString){ .ptr = (const uint8_t *)name,
+                          .len = sizeof name - 1 };
 }
 
 static void effect_title_changed(GhosttyTerminal t, void *ud) {
@@ -856,6 +900,211 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
   return G_SOURCE_CONTINUE;
 }
 
+/* ---- terminfo ----
+ *
+ * pt compiles and ships the xterm-ghostty entry itself
+ * (share/terminfo/xterm-ghostty.src), because a TERM whose entry cannot be
+ * resolved is worse than a plain one: ncurses programs degrade or refuse to
+ * start. Two things need the shipped copy. The child gets pt's directory on
+ * TERMINFO_DIRS, and the guard at the bottom of this section answers whether
+ * a given TERM resolves at all, so a broken install can fall back instead of
+ * handing panes a name nothing understands. */
+
+/* Where this build or install put the compiled entry, or NULL if it cannot be
+ * found. pt has no prefix baked in and must not gain one: install.sh puts it
+ * under ~/.local, release-local.sh under $PT_PREFIX, and a distro package
+ * somewhere else again. The one thing that always points at the right data is
+ * the running binary, read the way pt_binary_path does it in pt-integration.c,
+ * and two layouts hang off its directory: <dir>/../share/pt/terminfo for an
+ * install, where the binary is <prefix>/bin/pt, and <dir>/share/pt/terminfo
+ * for the build tree, where it is build/pt and every test binary sits beside
+ * it. $PT_TERMINFO_DIR overrides both, for the case neither layout covers: a
+ * binary that has been moved away from the data it shipped with.
+ *
+ * Resolved once and remembered. This walks the filesystem, the answer cannot
+ * change while pt runs, and a pane spawn needs it before the fork, where none
+ * of this work would be safe to do. */
+static const char *terminfo_own_dir(void) {
+  static const char *dir;
+  static gboolean resolved;
+  if (resolved) return dir;
+  resolved = TRUE;
+  const char *override = g_getenv("PT_TERMINFO_DIR");
+  if (override != NULL && override[0] != '\0') {
+    dir = g_strdup(override);
+    return dir;
+  }
+  char *exe = g_file_read_link("/proc/self/exe", NULL);
+  if (exe == NULL) return NULL;
+  char *bin = g_path_get_dirname(exe);
+  char *installed = g_build_filename(bin, "..", "share", "pt", "terminfo",
+                                     NULL);
+  char *in_tree = g_build_filename(bin, "share", "pt", "terminfo", NULL);
+  if (g_file_test(installed, G_FILE_TEST_IS_DIR)) dir = installed;
+  else if (g_file_test(in_tree, G_FILE_TEST_IS_DIR)) dir = in_tree;
+  if (dir != installed) g_free(installed);
+  if (dir != in_tree) g_free(in_tree);
+  g_free(bin);
+  g_free(exe);
+  return dir;
+}
+
+/* The child's TERMINFO_DIRS, as one ready-to-putenv string with pt's own
+ * directory first so the shipped entry resolves even where the system database
+ * has never heard of xterm-ghostty.
+ *
+ * The list ends in an empty element whenever this process inherited no
+ * TERMINFO_DIRS of its own, and ncurses reads an empty element as "the
+ * compiled-in system database", so that names /usr/share/terminfo and the rest
+ * explicitly and puts them directly behind pt's own directory.
+ *
+ * It is not what keeps them reachable. ncurses walks its compiled-in list after
+ * the roots it read from the environment whatever those say (db_iterator.c,
+ * dbdCfgList after dbdEnvList), so `infocmp xterm` still answers when
+ * TERMINFO_DIRS holds only pt's directory, and still answers when it holds only
+ * a path that does not exist. What the empty element buys is a defined position
+ * in the search order rather than last place.
+ *
+ * Built once and kept, for the same two reasons as terminfo_own_dir: neither
+ * input changes while pt runs, and the string has to exist before the fork
+ * because the child branch may neither allocate nor read the environment. */
+static const char *terminfo_dirs_env(void) {
+  static const char *env;
+  static gboolean built;
+  if (built) return env;
+  built = TRUE;
+  const char *own = terminfo_own_dir();
+  if (own == NULL) return NULL;
+  const char *inherited = g_getenv("TERMINFO_DIRS");
+  env = g_strdup_printf("TERMINFO_DIRS=%s:%s", own,
+                        inherited != NULL ? inherited : "");
+  return env;
+}
+
+/* Is there a compiled entry for `term` under any of `roots`? ncurses files an
+ * entry under the first letter of its name, and on filesystems where that
+ * letter is not a usable directory name under the hex of its first byte
+ * instead, so both forms are tried in every root.
+ *
+ * This stats paths rather than reading terminfo, which keeps pt from linking
+ * ncurses for a question that is only ever "will ncurses find something".
+ *
+ * The roots are a parameter so tests can point the search at a directory of
+ * their own. On a machine with ghostty installed system-wide there is no other
+ * way to reach the not-found branch. */
+gboolean pt_terminfo_in_roots(const char *const *roots, const char *term) {
+  if (roots == NULL || term == NULL || term[0] == '\0') return FALSE;
+  const char letter[2] = { term[0], '\0' };
+  char hex[3];
+  g_snprintf(hex, sizeof hex, "%02x", (unsigned char)term[0]);
+  const char *forms[2] = { letter, hex };
+  for (int i = 0; roots[i] != NULL; i++) {
+    if (roots[i][0] == '\0') continue;
+    for (int form = 0; form < 2; form++) {
+      char *path = g_build_filename(roots[i], forms[form], term, NULL);
+      gboolean found = g_file_test(path, G_FILE_TEST_EXISTS);
+      g_free(path);
+      if (found) return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/* pt's own directory first, then the places ncurses looks. This is not
+ * ncurses' own order (db_iterator.c reads $TERMINFO, then ~/.terminfo, then
+ * $TERMINFO_DIRS) and does not need to be: the answer is one yes or no over
+ * the whole set, so which root produces it cannot change it. Only the first
+ * entry is deliberate, and it is pt's, so that a test can ask whether the
+ * shipped copy alone would answer.
+ *
+ * Split out for that test. The public guard below cannot show that pt ships
+ * anything: /usr/share/terminfo is a fixed root, so on a machine with ghostty
+ * installed it answers TRUE for xterm-ghostty whether or not pt shipped an
+ * entry, and no amount of clearing the environment removes it. Handing the
+ * roots back lets a test take the first one on its own. */
+char **pt_terminfo_roots(void) {
+  GPtrArray *roots = g_ptr_array_new_with_free_func(g_free);
+  const char *own = terminfo_own_dir();
+  if (own != NULL) g_ptr_array_add(roots, g_strdup(own));
+  const char *terminfo = g_getenv("TERMINFO");
+  if (terminfo != NULL && terminfo[0] != '\0')
+    g_ptr_array_add(roots, g_strdup(terminfo));
+  const char *dirs = g_getenv("TERMINFO_DIRS");
+  if (dirs != NULL) {
+    char **parts = g_strsplit(dirs, ":", -1);
+    /* An empty element stands for the system database, which the fixed roots
+     * below cover already, so it is dropped rather than turned into a path. */
+    for (int i = 0; parts[i] != NULL; i++)
+      if (parts[i][0] != '\0') g_ptr_array_add(roots, g_strdup(parts[i]));
+    g_strfreev(parts);
+  }
+  g_ptr_array_add(roots, g_build_filename(g_get_home_dir(), ".terminfo", NULL));
+  static const char *const system_roots[] = {
+    "/usr/share/terminfo", "/etc/terminfo", "/lib/terminfo",
+    "/usr/lib/terminfo",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(system_roots); i++)
+    g_ptr_array_add(roots, g_strdup(system_roots[i]));
+  g_ptr_array_add(roots, NULL);
+  return (char **)g_ptr_array_free(roots, FALSE);
+}
+
+gboolean pt_term_core_terminfo_available(const char *term) {
+  char **roots = pt_terminfo_roots();
+  gboolean found = pt_terminfo_in_roots((const char *const *)roots, term);
+  g_strfreev(roots);
+  return found;
+}
+
+/* The `term` config key, held for the whole process rather than per core: it
+ * comes from one config file, and a pane reads it at spawn, so ghostty's rule
+ * applies here too — a change reaches panes opened after it and leaves the ones
+ * already running alone. NULL until something sets it, which means the
+ * default. */
+static char *configured_term;
+/* term_name's answer for the term above, or NULL when it has to be worked out
+ * again. Cleared by the setter, so a config edit is re-resolved once at the
+ * next spawn rather than on every one. */
+static char *resolved_term;
+
+void pt_term_core_set_term(const char *term) {
+  if (term == NULL || term[0] == '\0') term = PT_CONFIG_TERM_DEFAULT;
+  if (g_strcmp0(term, configured_term) == 0) return;
+  g_free(configured_term);
+  configured_term = g_strdup(term);
+  g_clear_pointer(&resolved_term, g_free);
+}
+
+/* What the child's $TERM will say: the configured name when its entry can be
+ * resolved, and xterm-256color when it cannot. See the identity section at the
+ * top of this file for why the default is ghostty's name.
+ *
+ * The fallback exists because a $TERM with no entry behind it is worse than a
+ * modest one. ncurses programs that cannot look their terminal up either fall
+ * back to something far poorer than xterm-256color or refuse to start, so a pt
+ * whose shipped entry did not make it through packaging would break every pane
+ * rather than lose a few attributes. It applies to a configured name as well,
+ * so a typo in the config costs the user a name, not their panes.
+ *
+ * Only $TERM falls back, and only $TERM is configurable. $TERM_PROGRAM,
+ * $TERM_PROGRAM_VERSION and the XTVERSION reply stay as they are on both
+ * paths, and should not be "fixed" to follow either: they describe what pt
+ * implements, which is the same whatever the terminfo entry is called, and
+ * nothing that reads them goes through the terminfo database.
+ *
+ * Resolved once per configured name and remembered, like the two lookups above
+ * it: this walks the filesystem, and a spawn needs the answer before the fork,
+ * where none of that work would be safe. */
+static const char *term_name(void) {
+  if (resolved_term == NULL) {
+    const char *want = configured_term != NULL ? configured_term
+                                               : PT_CONFIG_TERM_DEFAULT;
+    resolved_term = pt_term_core_terminfo_available(want)
+                        ? g_strdup(want) : g_strdup("xterm-256color");
+  }
+  return resolved_term;
+}
+
 /* ---- spawn ---- */
 /* The shell a NULL-argv spawn execs, as the *child* will see it: the inherited
  * $SHELL with any env_pairs "SHELL=" override applied on top (last one wins,
@@ -885,9 +1134,24 @@ static int spawn_pty(const char *cwd, const char *const *argv,
     .ws_xpixel = (unsigned short)(cols * cell_w),
     .ws_ypixel = (unsigned short)(rows * cell_h),
   };
-  /* Everything the child touches between fork and exec is computed here,
-   * before the fork: getenv/getpwuid/allocation are not async-signal-safe,
-   * so the child branch only follows precomputed pointers. */
+  /* Everything the child needs is worked out here, before the fork. getenv,
+   * getpwuid and anything that walks the filesystem or builds a path are not
+   * async-signal-safe, and pt has GLib's worker threads in it, so a child that
+   * called them could block on a lock another thread was holding at the moment
+   * of the fork.
+   *
+   * The child branch is not free of that, and the five setenv calls below are
+   * the exception: setenv reaches the allocator whenever the variable is new or
+   * its value has grown, which on a first spawn is all of them. The way out
+   * would be assembling the whole environment by hand and calling execve, and
+   * that is not worth it for this. What the pre-computation buys is the width
+   * of the window rather than its absence: the child does a handful of short
+   * environment writes and an exec, with no path resolution, no environment
+   * reads and no filesystem work in between. Even the chdir fallback's
+   * g_get_home_dir is a one-time lookup that term_name's terminfo search has
+   * already made. */
+  const char *terminfo_dirs = terminfo_dirs_env();
+  const char *term = term_name();
   const char *shell_argv0 = NULL;
   if (shell != NULL) {
     shell_argv0 = strrchr(shell, '/');
@@ -898,8 +1162,15 @@ static int spawn_pty(const char *cwd, const char *const *argv,
   if (child < 0) return -1;
   if (child == 0) {
     if (cwd != NULL) { if (chdir(cwd) != 0) { /* fall through to $HOME */ chdir(g_get_home_dir()); } }
-    setenv("TERM", "xterm-256color", 1);
+    setenv("TERM", term, 1);
     setenv("COLORTERM", "truecolor", 1);
+    setenv("TERM_PROGRAM", PT_TERM_PROGRAM, 1);
+    setenv("TERM_PROGRAM_VERSION", PT_TERM_PROGRAM_VERSION, 1);
+    /* putenv rather than setenv because the string was built before the fork,
+     * and before env_pairs so a caller can still override it. NULL only when
+     * pt could not find its own terminfo directory, and then the child keeps
+     * whatever it inherited. */
+    if (terminfo_dirs != NULL) putenv((char *)terminfo_dirs);
     /* Names this pane to anything the child runs: an agent integration writes
      * its session report under this key. Set before env_pairs so a caller can
      * still override it. */
@@ -1143,7 +1414,7 @@ void pt_term_core_write(PtTermCore *c, const char *buf, gssize len) {
 
 gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
                                GhosttyKeyAction action, GhosttyMods mods,
-                               guint32 unshifted_cp,
+                               GhosttyMods consumed_mods, guint32 unshifted_cp,
                                const char *utf8, gsize utf8_len) {
   if (c->child_exited) return FALSE;
   ghostty_key_encoder_setopt_from_terminal(c->key_encoder, c->terminal);
@@ -1151,10 +1422,7 @@ gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
   ghostty_key_event_set_action(c->key_event, action);
   ghostty_key_event_set_mods(c->key_event, mods);
   ghostty_key_event_set_unshifted_codepoint(c->key_event, unshifted_cp);
-  GhosttyMods consumed = 0;
-  if (unshifted_cp != 0 && (mods & GHOSTTY_MODS_SHIFT))
-    consumed |= GHOSTTY_MODS_SHIFT;
-  ghostty_key_event_set_consumed_mods(c->key_event, consumed);
+  ghostty_key_event_set_consumed_mods(c->key_event, consumed_mods);
   ghostty_key_event_set_utf8(c->key_event,
                              utf8_len > 0 ? utf8 : NULL, utf8_len);
   char buf[128];
@@ -1165,7 +1433,28 @@ gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
     pty_write_raw(c->pty_fd, buf, written);
     return TRUE;
   }
-  /* Fallback: raw text (e.g. IM-composed input with no matching key). */
+  /* Fallback: the text the keyval carried, for an event the encoder declined
+   * to encode at all. Nothing an input method composed reaches this, whatever
+   * the shape of the branch suggests: pt builds no GtkIMContext anywhere, so a
+   * pane only ever sees text that came with a key event.
+   *
+   * This cannot strip a modifier off a combination and send the bare letter.
+   * With ctrl held the encoder writes the C0 byte from ctrlSeq, or, where that
+   * does not match, the CSI u form, which asks for nothing beyond ctrl and one
+   * codepoint of text (input/key_encode.zig:383-397 and :480-521), and a
+   * keyval never gives us more than one codepoint. With alt held it writes the
+   * esc prefix and the text, or the text alone when alt-as-esc is off.
+   *
+   * Three things it declines to encode at all. A dead key mid composition,
+   * which pt never reports. A lone modifier key in kitty mode (:233), whose
+   * keyval carries no text for this branch to write. And a backspace holding
+   * non-control text, which it drops so that an input method can delete one
+   * preedit character instead (:371, and :171 in kitty mode). The last of
+   * those is reachable: that carve-out is keyed off the physical key, so a
+   * Backspace remapped to a keysym pt's keyval table does not list stays a
+   * backspace and arrives here carrying the remapped character, which this
+   * branch then writes. No code guards it, because writing the character the
+   * user's own layout produced is the answer they asked for. */
   if (utf8_len > 0 && action != GHOSTTY_KEY_ACTION_RELEASE) {
     pty_write_raw(c->pty_fd, utf8, utf8_len);
     return TRUE;
@@ -1793,6 +2082,23 @@ gboolean pt_term_core_take_render_dirty(PtTermCore *c) {
   gboolean dirty = c->content_serial != c->taken_serial;
   c->taken_serial = c->content_serial;
   return dirty;
+}
+
+/* The whole question a repaint has to answer, in one call: is there anything
+ * new to show, and is the program willing to have it shown yet? A widget that
+ * has stopped queuing repaints for the duration of a hold can still be reached
+ * by a repaint it never asked for — focus, blink, a fading bar — and syncing on
+ * one of those would put the child's half-drawn frame on the screen, which is
+ * the tear synchronized output exists to prevent. Ghostty's renderer bails out
+ * of the whole frame under the same condition (renderer/generic.zig:1176-1180).
+ *
+ * The short circuit is the load-bearing part. While the frame is held the
+ * dirty flag has to be left alone rather than taken and discarded, because it
+ * is the only record that anything happened during the hold: take it here and
+ * the first frame after the ESU would sync nothing and the finished frame
+ * would sit there unseen until the child happened to write again. */
+gboolean pt_term_core_take_frame(PtTermCore *c) {
+  return !c->sync_output && pt_term_core_take_render_dirty(c);
 }
 
 guint pt_term_core_content_serial(PtTermCore *c) { return c->content_serial; }

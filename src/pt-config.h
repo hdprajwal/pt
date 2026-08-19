@@ -13,6 +13,20 @@
 #define PT_CONFIG_FONT_FAMILY_DEFAULT "JetBrains Mono"
 #define PT_CONFIG_UI_FONT_FAMILY_DEFAULT "IBM Plex Sans"
 #define PT_CONFIG_THEME_DEFAULT "pt-dark"
+/* What a pane's child is told $TERM is — ghostty's `term` key
+ * (config/Config.zig:3724), with ghostty's default. pt earns the name: its VT
+ * layer is libghostty-vt and it implements the capability set the entry
+ * advertises. It is a key rather than a constant because $TERM is the one thing
+ * on that list every program a user runs reads, and the entry only resolves
+ * where pt's TERMINFO_DIRS reaches. sudo, su and docker exec all drop it, and
+ * a user who hits that needs a way out that is not editing the source. Setting
+ * this to xterm-256color is that way out.
+ *
+ * Only $TERM. $TERM_PROGRAM, $TERM_PROGRAM_VERSION and the XTVERSION reply are
+ * not configurable and do not follow this: they describe what pt implements,
+ * which does not change with the name of a terminfo entry. */
+#define PT_CONFIG_TERM_DEFAULT "xterm-ghostty"
+
 /* Whether apps that ask for the mouse get the pointer: clicks, drags and
  * motion. On, as in ghostty and every other terminal. pt shipped it off for a
  * while so a plain drag selected text out of a full-screen TUI without anyone
@@ -76,6 +90,7 @@ typedef struct {
   char *font_family;       /* never NULL */
   double ui_font_size;     /* chrome base, px */
   char *ui_font_family;    /* never NULL */
+  char *term;              /* the child's $TERM; never NULL */
   int scrollback_limit;    /* history a pane keeps, bytes */
   int window_padding_x;    /* pane edge to cell grid, px, left and right */
   int window_padding_y;    /* pane edge to cell grid, px, top and bottom */

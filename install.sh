@@ -42,6 +42,10 @@ mkdir -p "$PREFIX/bin" "$PREFIX/share/pt/prompt" \
          "$PREFIX/share/icons/hicolor/scalable/apps"
 install -m755 "$TMP/$NAME/bin/pt" "$PREFIX/bin/pt"
 install -m644 "$TMP/$NAME"/share/pt/prompt/pt-prompt.* "$PREFIX/share/pt/prompt/"
+# Copied whole rather than file by file: a compiled terminfo database is a
+# directory tree, one file per terminal name filed under its first letter.
+rm -rf "$PREFIX/share/pt/terminfo"
+cp -R "$TMP/$NAME/share/pt/terminfo" "$PREFIX/share/pt/"
 install -m644 "$TMP/$NAME/share/icons/hicolor/scalable/apps/dev.hdprajwal.pt.svg" \
   "$PREFIX/share/icons/hicolor/scalable/apps/"
 # Absolute Exec: app launchers do not necessarily share the shell's PATH.

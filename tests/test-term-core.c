@@ -5,6 +5,7 @@
 #include <glib/gstdio.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>              /* realpath */
 #include <string.h>
 
 typedef struct { GMainLoop *loop; PtTermCore *core;
@@ -134,8 +135,10 @@ static void test_key_send_echoes(void) {
   ctx.core = core;
   PtTermCoreCallbacks cbs = {0};
   pt_term_core_set_callbacks(core, &cbs, &ctx);
-  pt_term_core_send_key(core, GHOSTTY_KEY_H, GHOSTTY_KEY_ACTION_PRESS, 0, 'h', "h", 1);
-  pt_term_core_send_key(core, GHOSTTY_KEY_I, GHOSTTY_KEY_ACTION_PRESS, 0, 'i', "i", 1);
+  pt_term_core_send_key(core, GHOSTTY_KEY_H, GHOSTTY_KEY_ACTION_PRESS, 0, 0,
+                        'h', "h", 1);
+  pt_term_core_send_key(core, GHOSTTY_KEY_I, GHOSTTY_KEY_ACTION_PRESS, 0, 0,
+                        'i', "i", 1);
   /* Pump the loop until the echo comes back. */
   gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
   gboolean ok = FALSE;
@@ -602,6 +605,15 @@ static gboolean wait_for_text(PtTermCore *core, const char *needle) {
   return FALSE;
 }
 
+/* Let any in-flight pty reads land so a take-and-clear assertion cannot race
+   a byte that was already on its way. */
+static void drain_reads(void) {
+  for (int i = 0; i < 20; i++) {
+    g_main_context_iteration(NULL, FALSE);
+    g_usleep(2000);
+  }
+}
+
 static gboolean tracking_on(PtTermCore *c) {
   return pt_term_core_mouse_tracking(c);
 }
@@ -906,6 +918,44 @@ static void test_focus_report_resent_on_mode_enable(void) {
   pt_term_core_free(core);
 }
 
+/* ---- kitty keyboard event types ----
+ *
+ * `CSI > 10 u` pushes kitty flags 0b1010: report event types, which is what
+ * makes a release encode anything at all, and report all keys as escape codes,
+ * so that press and release both come back as sequences rather than as the
+ * letter itself. Same `stty -echo -icanon` and `cat -v` recipe as the mouse
+ * tests above. The flags are pushed before the marker is printed, so a grid
+ * holding the marker is a grid whose parser has already seen them. */
+static void test_kitty_key_event_types(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[>10u'; printf ready; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+
+  /* The three encodings below were read off the grid rather than derived from
+     the spec. A bare press carries neither field: kitty's defaults are modifier
+     1 and event type 1, and both are left off when they hold. Repeat and
+     release each add the event type as a sub-parameter of the modifier field
+     (`:2` and `:3`), which forces the modifier field itself to be spelled out
+     as the 1 it was already assumed to be. */
+  g_assert_true(pt_term_core_send_key(core, GHOSTTY_KEY_A,
+                                      GHOSTTY_KEY_ACTION_PRESS, 0, 0, 'a',
+                                      "a", 1));
+  g_assert_true(wait_for_text(core, "^[[97u"));
+  g_assert_true(pt_term_core_send_key(core, GHOSTTY_KEY_A,
+                                      GHOSTTY_KEY_ACTION_REPEAT, 0, 0, 'a',
+                                      "a", 1));
+  g_assert_true(wait_for_text(core, "^[[97u^[[97;1:2u"));
+  g_assert_true(pt_term_core_send_key(core, GHOSTTY_KEY_A,
+                                      GHOSTTY_KEY_ACTION_RELEASE, 0, 0, 'a',
+                                      "a", 1));
+  g_assert_true(wait_for_text(core, "^[[97u^[[97;1:2u^[[97;1:3u"));
+
+  pt_term_core_free(core);
+}
+
 /* ---- in-band resize reports (mode 2048) ----
  *
  * Same `cat -v` recipe again. The report is
@@ -1108,6 +1158,121 @@ static void test_sync_output_rearm_survives_past_1s_then_hits_ceiling(void) {
   /* Past the 5s ceiling from the rising edge: force-cleared regardless of the
      stream still running. */
   g_assert_true(wait_until(sync_output_off, core));
+
+  pt_term_core_free(core);
+}
+
+/* ---- the frame gate (pt_term_core_take_frame) ----
+ *
+ * The rule the widget's snapshot pass runs on, tested where it lives. The
+ * widget itself is a GtkWidget with no test binary, so the reason the gate
+ * exists — a focus or blink repaint reaching a snapshot in the middle of a
+ * held frame — is reproduced here by simply calling take_frame during a hold,
+ * which is all such a repaint would do. */
+static guint frame_serial_before;      /* the serial as of the last handshake */
+
+static gboolean frame_serial_moved(PtTermCore *c) {
+  return pt_term_core_content_serial(c) != frame_serial_before;
+}
+
+static void test_take_frame(void) {
+  /* Nothing holding anything: take_frame is the dirty flag and no more. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+  drain_reads();
+
+  g_assert_true(pt_term_core_take_frame(core));
+  g_assert_false(pt_term_core_take_frame(core));
+  g_assert_false(pt_term_core_take_frame(core));
+
+  /* Bytes from the child set it again, exactly once. */
+  pt_term_core_write(core, "probe\n", -1);
+  g_assert_true(wait_for_text(core, "probe"));
+  drain_reads();
+  g_assert_true(pt_term_core_take_frame(core));
+  g_assert_false(pt_term_core_take_frame(core));
+
+  pt_term_core_free(core);
+}
+
+static void test_take_frame_refuses_while_held(void) {
+  /* BSU and the frame the child is drawing arrive together, and the ESU waits
+     on `read` so the hold is a real one rather than a race with a sleep. The
+     text is deliberately never asked for through wait_for_text while the hold
+     is on: that helper syncs, which is the very thing under test here, so the
+     serial is what says the child's bytes have landed. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; read x; printf '\\033[?2026hHELD'; "
+    "read y; printf '\\033[?2026l'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+  drain_reads();
+  g_assert_true(pt_term_core_take_frame(core));    /* start from a clean flag */
+  g_assert_false(pt_term_core_take_frame(core));
+
+  frame_serial_before = pt_term_core_content_serial(core);
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_until(sync_output_on, core));
+  g_assert_true(wait_until(frame_serial_moved, core));
+
+  /* Held, with something to draw: every one of these stands for a repaint the
+     widget never asked for, and not one of them may sync. */
+  g_assert_true(pt_term_core_sync_output(core));
+  for (int i = 0; i < 5; i++) g_assert_false(pt_term_core_take_frame(core));
+
+  pt_term_core_write(core, "\n", 1);               /* the child's ESU */
+  g_assert_true(wait_until(sync_output_off, core));
+  g_assert_true(pt_term_core_take_frame(core));
+
+  /* And the frame the child drew under the hold reaches the visible grid on
+     that first sync after the ESU, which is the point of keeping the flag. */
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(strstr(text, "HELD"));
+  g_free(text);
+
+  pt_term_core_free(core);
+}
+
+static void test_take_frame_keeps_the_flag_through_a_hold(void) {
+  /* The same shape as above with the ESU taken away, which is what makes it
+     an honest test of the short circuit: a real ESU arrives as bytes, and
+     those bytes would set the dirty flag again all by themselves, so the TRUE
+     that follows one proves nothing about what the refusals did to the flag.
+     Here nothing arrives after the held write at all — the 1s safety timer is
+     what ends the hold — so the only thing left to make take_frame answer
+     TRUE is the flag those five refusals were careful not to consume. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf ready; read x; printf '\\033[?2026hLATE'; "
+    "sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "ready"));
+  drain_reads();
+  g_assert_true(pt_term_core_take_frame(core));
+  g_assert_false(pt_term_core_take_frame(core));
+
+  frame_serial_before = pt_term_core_content_serial(core);
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_until(sync_output_on, core));
+  g_assert_true(wait_until(frame_serial_moved, core));
+
+  g_assert_true(pt_term_core_sync_output(core));
+  for (int i = 0; i < 5; i++) g_assert_false(pt_term_core_take_frame(core));
+
+  g_assert_true(wait_until(sync_output_off, core));   /* no bytes, just time */
+  g_assert_true(pt_term_core_take_frame(core));
+  pt_term_core_sync(core);
+  char *text = pt_term_core_grid_text(core);
+  g_assert_nonnull(strstr(text, "LATE"));
+  g_free(text);
 
   pt_term_core_free(core);
 }
@@ -1366,9 +1531,9 @@ static void test_reset_keeps_the_child(void) {
   g_assert_cmpint(pt_term_core_shell_pid(core), ==, before);
   g_assert_false(pt_term_core_exited(core, NULL));
 
-  pt_term_core_send_key(core, GHOSTTY_KEY_H, GHOSTTY_KEY_ACTION_PRESS, 0,
+  pt_term_core_send_key(core, GHOSTTY_KEY_H, GHOSTTY_KEY_ACTION_PRESS, 0, 0,
                         'h', "h", 1);
-  pt_term_core_send_key(core, GHOSTTY_KEY_I, GHOSTTY_KEY_ACTION_PRESS, 0,
+  pt_term_core_send_key(core, GHOSTTY_KEY_I, GHOSTTY_KEY_ACTION_PRESS, 0, 0,
                         'i', "i", 1);
   g_assert_true(wait_for_text(core, "hi"));       /* cat echoed it back */
   g_assert_cmpint(pt_term_core_shell_pid(core), ==, before);
@@ -2753,15 +2918,6 @@ static void test_cursor_info(void) {
 
 /* ---- render dirty ---- */
 
-/* Let any in-flight pty reads land so a take-and-clear assertion cannot race
-   a byte that was already on its way. */
-static void drain_reads(void) {
-  for (int i = 0; i < 20; i++) {
-    g_main_context_iteration(NULL, FALSE);
-    g_usleep(2000);
-  }
-}
-
 static void test_take_render_dirty(void) {
   PtTermCore *core = cursor_core_new();   /* output has arrived already */
   drain_reads();
@@ -3108,6 +3264,205 @@ static void test_write_right_after_spawn_queues(void) {
   pt_term_core_free(c);
 }
 
+/* The entry this build compiled, found in the build's own staging directory
+ * with nothing else on the search path. That is the point of passing the roots
+ * in: this machine has ghostty installed system-wide, so a search that also
+ * looked at /usr/share/terminfo would pass whether or not pt shipped anything.
+ * tic writes the `ghostty` alias beside it, under its own first letter, so
+ * both names have to resolve. */
+static void test_terminfo_found_in_build_dir(void) {
+  const char *roots[] = { PT_TERMINFO_BUILD_DIR, NULL };
+  g_assert_true(pt_terminfo_in_roots(roots, "xterm-ghostty"));
+  g_assert_true(pt_terminfo_in_roots(roots, "ghostty"));
+}
+
+/* The other branch, the one the TERM fallback exists for: an empty directory
+ * holds no entry, so the same lookup says so instead of finding the installed
+ * ghostty's copy. */
+static void test_terminfo_missing_from_empty_dir(void) {
+  char *empty = g_dir_make_tmp("pt-terminfo-XXXXXX", NULL);
+  g_assert_nonnull(empty);
+  const char *roots[] = { empty, NULL };
+  g_assert_false(pt_terminfo_in_roots(roots, "xterm-ghostty"));
+  g_rmdir(empty);
+  g_free(empty);
+}
+
+/* What the shipped entry is for: a child spawned by this build is pointed at
+ * the directory the build compiled it into. The whole value is pinned, not a
+ * prefix, so both halves of the promise are covered at once — pt's directory
+ * comes first, so its entry wins, and the list ends in an empty element, which
+ * names the system database and puts it directly behind pt's own directory
+ * instead of leaving it to be searched last.
+ *
+ * Three things this assumes, all true and none obvious. The process must have
+ * inherited no TERMINFO_DIRS of its own, or there would be more on the end;
+ * main clears it. The build directory has to be compared in the form the code
+ * produces, which is symlink-resolved, because the runtime value is built from
+ * readlink("/proc/self/exe") and the kernel resolves that; CMake's binary dir
+ * is whatever path the developer typed, so realpath brings the two to the same
+ * form. And terminfo_own_dir has to take its build-tree branch, which is the
+ * only one of the two that builds no ".." component: the installed branch would
+ * hand the child <bindir>/../share/pt/terminfo, which no realpath is applied to
+ * and which this equality would then reject. A test binary sits in the build
+ * directory, where <bindir>/../share/pt/terminfo does not exist, so it does.
+ *
+ * The comparison is a string equality on a value handed to the child in its
+ * environment, rather than a `case` glob with a path interpolated into the
+ * pattern: a build directory holding a glob character would quietly change what
+ * the pattern matches. */
+static void test_terminfo_dirs_reaches_child(void) {
+  char *real = realpath(PT_TERMINFO_BUILD_DIR, NULL);
+  g_assert_nonnull(real);
+  char *expect = g_strdup_printf("PT_EXPECT_DIRS=%s:", real);
+  const char *envp[] = { expect, NULL };
+  const char *argv[] = { "/bin/sh", "-c",
+    "[ \"$TERMINFO_DIRS\" = \"$PT_EXPECT_DIRS\" ] && echo dirs-ok; sleep 30",
+    NULL };
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, envp, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "dirs-ok"));
+  pt_term_core_free(core);
+  g_free(expect);
+  free(real);
+}
+
+/* The public guard, over the roots it gathers for itself.
+ *
+ * Asserting only that it answers TRUE would prove nothing on this machine:
+ * /usr/share/terminfo is one of the guard's fixed roots and ghostty is
+ * installed system-wide, so that assertion holds even against a pt that ships
+ * no entry and cannot find its own directory. Clearing the environment does
+ * not help, because the system paths are not read from it.
+ *
+ * So the test goes in through the roots instead. The first root is pt's own
+ * directory, and asking that one root alone is what pins the layout: this
+ * binary sits in the build directory next to build/share/pt/terminfo, which is
+ * the build-tree layout the lookup checks. Break the resolution, or point
+ * PT_TERMINFO_DIR at a directory with no entry in it, and this goes red.
+ *
+ * TERMINFO and TERMINFO_DIRS are cleared in main, so the first root cannot be
+ * something a developer exported. */
+static void test_terminfo_available_for_ghostty(void) {
+  char **roots = pt_terminfo_roots();
+  g_assert_nonnull(roots);
+  g_assert_nonnull(roots[0]);
+  const char *own[] = { roots[0], NULL };
+  g_assert_true(pt_terminfo_in_roots(own, "xterm-ghostty"));
+  g_strfreev(roots);
+  g_assert_true(pt_term_core_terminfo_available("xterm-ghostty"));
+  /* And it is not a function that says yes to everything. */
+  g_assert_false(pt_term_core_terminfo_available("pt-no-such-terminal"));
+}
+
+/* ---- identity ----
+ *
+ * What a child is told it is running under. $TERM is the ghostty name here
+ * because this build stages its compiled entry beside the test binary, which
+ * is the same thing test_terminfo_available_for_ghostty pins; the other three
+ * are unconditional. One child prints all four in one line, so a variable that
+ * went missing cannot pass on the strength of its neighbours. */
+static void test_spawn_identity_env(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "echo term=$TERM prog=$TERM_PROGRAM ver=$TERM_PROGRAM_VERSION "
+    "color=$COLORTERM; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "term=xterm-ghostty "));
+  g_assert_true(wait_for_text(core, "prog=ghostty "));
+  /* A prefix, not the whole value: the point is which libghostty pt is built
+     on, and a later pin may carry a suffix. */
+  g_assert_true(wait_for_text(core, "ver=1.3.2"));
+  g_assert_true(wait_for_text(core, "color=truecolor"));
+  pt_term_core_free(core);
+}
+
+/* The `term` config key, end to end, and with it the fallback the guard exists
+ * for. Both names are chosen so the answer cannot depend on the machine: this
+ * build stages the entry itself, and `ghostty` is the alias tic writes beside
+ * xterm-ghostty, so the first one resolves wherever pt built; the second is a
+ * name no terminfo database has.
+ *
+ * The identity three do not move with $TERM, so they are asserted on the
+ * fallback spawn as well — that is the promise term_name's comment makes.
+ *
+ * The setting is process-wide, so this puts it back before it returns. */
+static void test_term_follows_the_config(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "echo term=$TERM prog=$TERM_PROGRAM ver=$TERM_PROGRAM_VERSION; sleep 30",
+    NULL};
+  GError *err = NULL;
+
+  pt_term_core_set_term("ghostty");
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "term=ghostty "));
+  pt_term_core_free(core);
+
+  pt_term_core_set_term("pt-no-such-terminal");
+  core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "term=xterm-256color "));
+  g_assert_true(wait_for_text(core, "prog=ghostty "));
+  g_assert_true(wait_for_text(core, "ver=1.3.2"));
+  pt_term_core_free(core);
+
+  /* NULL is the default, which is what every other test in this file wants. */
+  pt_term_core_set_term(NULL);
+  core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "term=xterm-ghostty "));
+  pt_term_core_free(core);
+}
+
+/* CSI > q, answered as `ESC P > | <name> ESC \`. Same `cat -v` recipe as the
+ * mouse tests, and for the same reason: only what the child writes reaches the
+ * parser, so the child sends the query and prints back what pt replied.
+ *
+ * The reply has to name ghostty because a program that cannot read the
+ * environment of a shell it did not spawn asks this way instead. */
+static void test_xtversion_names_ghostty(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[>q'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "^[P>|ghostty 1.3.2^[\\"));
+  pt_term_core_free(core);
+}
+
+/* CSI c and CSI > c, the same `cat -v` recipe again. Both answers are pinned
+ * byte for byte because both are compared byte for byte by what reads them:
+ * these are the strings a program that fingerprints ghostty by device
+ * attributes is looking for (termio/stream_handler.zig:812-834). */
+static void test_device_attributes_match_ghostty(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[c\\033[>c'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "^[[?62;22;52c^[[>1;10;0c"));
+  pt_term_core_free(core);
+}
+
+/* Feature 52 says the terminal will take a clipboard write, so a pane with
+ * osc52 off has to stop claiming it. Ghostty drops the same feature when
+ * `clipboard-write` is `deny`. The mode is set before the main loop runs, so
+ * it is in place before the parent parses anything the child wrote — the same
+ * ordering run_osc52 relies on. */
+static void test_device_attributes_drop_clipboard(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[c'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  pt_term_core_set_osc52(core, PT_OSC52_OFF);
+  g_assert_true(wait_for_text(core, "^[[?62;22c"));
+  pt_term_core_free(core);
+}
+
 int main(int argc, char *argv[]) {
   /* Report paths come off $XDG_STATE_HOME, and the pane-token tests write real
      files: point them at a temp dir so a test run never touches the state of
@@ -3116,6 +3471,17 @@ int main(int argc, char *argv[]) {
   char *state_dir = g_dir_make_tmp("pt-termcore-state-XXXXXX", NULL);
   g_assert_nonnull(state_dir);
   g_setenv("XDG_STATE_HOME", state_dir, TRUE);
+  /* The terminfo tests read what this process's own environment does to the
+     lookup, and a developer or CI runner that exports either variable would
+     otherwise fail a correct implementation. Cleared before g_test_init rather
+     than inside the tests, because the child's TERMINFO_DIRS is built once and
+     cached at the first spawn, which happens several tests earlier. */
+  g_unsetenv("TERMINFO");
+  g_unsetenv("TERMINFO_DIRS");
+  /* And PT_TERMINFO_DIR, which moves pt's own directory somewhere else
+     entirely: a developer with that exported would be testing whatever is in
+     there rather than what this build compiled. */
+  g_unsetenv("PT_TERMINFO_DIR");
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
   g_test_add_func("/termcore/exit", test_exit_status_reported);
@@ -3152,6 +3518,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/focus-report-forced", test_focus_report_forced);
   g_test_add_func("/termcore/focus-report-on-enable",
                   test_focus_report_resent_on_mode_enable);
+  g_test_add_func("/termcore/kitty-key-event-types", test_kitty_key_event_types);
   g_test_add_func("/termcore/in-band-resize", test_in_band_resize_report);
   g_test_add_func("/termcore/in-band-resize-off",
                   test_in_band_resize_needs_mode);
@@ -3167,6 +3534,10 @@ int main(int argc, char *argv[]) {
                   test_sync_output_resize_clears);
   g_test_add_func("/termcore/sync-output-rearm-then-ceiling",
                   test_sync_output_rearm_survives_past_1s_then_hits_ceiling);
+  g_test_add_func("/termcore/take-frame", test_take_frame);
+  g_test_add_func("/termcore/take-frame-held", test_take_frame_refuses_while_held);
+  g_test_add_func("/termcore/take-frame-held-flag",
+                  test_take_frame_keeps_the_flag_through_a_hold);
   g_test_add_func("/termcore/alt-screen-arrows", test_alt_screen_arrows);
   g_test_add_func("/termcore/alt-screen-tracking-wheel",
                   test_alt_screen_tracking_wheel);
@@ -3260,6 +3631,22 @@ int main(int argc, char *argv[]) {
                   test_free_without_report_is_quiet);
   g_test_add_func("/termcore/write-after-spawn-queues",
                   test_write_right_after_spawn_queues);
+  g_test_add_func("/termcore/terminfo-build-dir",
+                  test_terminfo_found_in_build_dir);
+  g_test_add_func("/termcore/terminfo-empty-dir",
+                  test_terminfo_missing_from_empty_dir);
+  g_test_add_func("/termcore/terminfo-available",
+                  test_terminfo_available_for_ghostty);
+  g_test_add_func("/termcore/terminfo-dirs-child",
+                  test_terminfo_dirs_reaches_child);
+  g_test_add_func("/termcore/identity-env", test_spawn_identity_env);
+  g_test_add_func("/termcore/term-config-key", test_term_follows_the_config);
+  g_test_add_func("/termcore/identity-xtversion",
+                  test_xtversion_names_ghostty);
+  g_test_add_func("/termcore/identity-device-attributes",
+                  test_device_attributes_match_ghostty);
+  g_test_add_func("/termcore/identity-device-attributes-no-clipboard",
+                  test_device_attributes_drop_clipboard);
   int rc = g_test_run();
   char *sessions = g_build_filename(state_dir, "pt", "agent-sessions", NULL);
   char *pt_dir = g_build_filename(state_dir, "pt", NULL);

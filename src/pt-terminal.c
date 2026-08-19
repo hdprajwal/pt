@@ -94,6 +94,10 @@ static gboolean pt_debug_enabled(void) {
  * 64-bit counter incremented once per pane cannot wrap in any session. */
 static guint64 next_terminal_id = 1;
 
+/* See the keys_held field below. */
+#define PT_KEYS_HELD_WORDS 32
+#define PT_KEYS_HELD_MAX (PT_KEYS_HELD_WORDS * 32)
+
 struct _PtTerminal {
   GtkWidget parent_instance;
   guint64 id;
@@ -185,6 +189,18 @@ struct _PtTerminal {
    * frame contain one" here is free, where a second grid walk to ask the core
    * separately would not be. */
   gboolean text_blink;
+
+  /* Which hardware keycodes are physically down, one bit each, 128 bytes of
+   * them. GDK puts no repeat flag on a key event, so this is the only way to
+   * tell a held key's second press from a fresh one, and the kitty protocol
+   * reports the two as different event types. It also answers whether a release
+   * has a press behind it, which is how on_key_released drops the releases of
+   * chords pt's own keybindings swallowed. Indexed by the keycode itself: GDK
+   * reports evdev codes offset by eight on Wayland and xkb keycodes on X11, and
+   * neither reaches 1024. A keycode past the end is never recorded as held, so
+   * both readers fall back to the safe answer: every press reports as a press,
+   * as pt did before this, and every release is sent. */
+  guint32 keys_held[PT_KEYS_HELD_WORDS];
 };
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
@@ -1220,20 +1236,12 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   }
   /* Sync only when the core says a frame would differ. Focus, scrim, blink
    * and bar-fade repaints redraw from what the last sync left in place, which
-   * is byte-identical — the state only moves when the serial does.
-   *
-   * While synchronized output is held, skip the sync even if the dirty flag
-   * is set. core_draw already stopped queuing repaints for this reason, but
-   * one of those same focus/blink/bar-fade paths can still reach a snapshot
-   * on its own, and syncing here would pull the child's half-drawn frame
-   * onto the screen despite core_draw's refusal to ask for it. Critically,
-   * the flag must be left unconsumed rather than taken and discarded — it
-   * has to still be there for pt_term_core_take_render_dirty to see when the
-   * real ESU lands and calls back into core_draw, or that first post-hold
-   * frame would sync nothing. Mirrors ghostty's renderer bailing out of the
-   * whole frame under the same condition (renderer/generic.zig:1176-1180). */
-  if (!pt_term_core_sync_output(t->core) && pt_term_core_take_render_dirty(t->core))
-    pt_term_core_sync(t->core);
+   * is byte-identical — the state only moves when the serial does. The core
+   * owns the rule because it also owns the other half of it: those same
+   * repaint paths reach a snapshot on their own, without going through
+   * core_draw, so this is where a frame held by synchronized output would
+   * otherwise leak onto the screen. See pt_term_core_take_frame. */
+  if (pt_term_core_take_frame(t->core)) pt_term_core_sync(t->core);
 
   /* The effective default background: the theme's, unless a program moved it
    * with OSC 11. Seeded so a refused read still paints something sane. */
@@ -1596,6 +1604,34 @@ static void restart_shell(PtTerminal *t) {
   gtk_widget_queue_draw(GTK_WIDGET(t));
 }
 
+/* The held-key set behind the keys_held bitmap. Marking returns whether the
+ * keycode was already down, which is the whole question a repeat turns on. */
+static gboolean keys_held_mark(PtTerminal *t, guint keycode) {
+  if (keycode >= PT_KEYS_HELD_MAX) return FALSE;
+  guint32 bit = 1u << (keycode % 32);
+  gboolean was_down = (t->keys_held[keycode / 32] & bit) != 0;
+  t->keys_held[keycode / 32] |= bit;
+  return was_down;
+}
+
+/* Clearing answers the other question the set can settle: whether pt saw the
+ * press this release belongs to, since the only thing that ever sets a bit is a
+ * press that reached key_event. A keycode too large for the bitmap was never
+ * marked either, so it answers yes rather than have every release for it read
+ * as an orphan; the range covers every keycode X11 and Wayland produce, whose
+ * keycodes stop at 255 and at 775. */
+static gboolean keys_held_release(PtTerminal *t, guint keycode) {
+  if (keycode >= PT_KEYS_HELD_MAX) return TRUE;
+  guint32 bit = 1u << (keycode % 32);
+  gboolean was_down = (t->keys_held[keycode / 32] & bit) != 0;
+  t->keys_held[keycode / 32] &= ~bit;
+  return was_down;
+}
+
+static void keys_held_clear(PtTerminal *t) {
+  memset(t->keys_held, 0, sizeof t->keys_held);
+}
+
 static void on_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
@@ -1628,43 +1664,151 @@ static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
   if (t->core != NULL) pt_term_core_focus_report(t->core, FALSE, FALSE);
   gtk_widget_remove_css_class(GTK_WIDGET(t), "focused");
   gtk_widget_queue_draw(GTK_WIDGET(t));
+  /* A key let go of while some other widget holds the keyboard never produces
+   * a release here, so its bit would sit set until the pane is destroyed and
+   * turn the user's next press of that key into a repeat. Losing the focus is
+   * the moment pt stops being able to see the release, so it is the moment the
+   * whole set stops being true. */
+  keys_held_clear(t);
+}
+
+/* One key event of any action. Press, repeat and release differ only in what
+ * the encoder is told and in whether the pane treats the event as typing, so
+ * the two GTK handlers below are thin wrappers over this. */
+static gboolean key_event(PtTerminal *t, GtkEventControllerKey *ctl,
+                          guint keyval, guint keycode, GdkModifierType state,
+                          GhosttyKeyAction action) {
+  if (t->core == NULL) return FALSE;
+
+  /* Everything below the physical key needs the event itself rather than the
+   * four arguments GTK unpacked for us: the layout, the device and the
+   * consumed modifiers are only on there. There is an event for every key
+   * event GTK delivers here; the guard is for the getter's own contract, which
+   * returns NULL whenever the controller is not dispatching one. Ghostty gives
+   * up on the same NULL rather than carry on without it
+   * (apprt/gtk/class/surface.zig:1243), and so does pt: an event encoded with
+   * no consumed modifiers and no unshifted codepoint is a wrong answer sent
+   * confidently, where handling nothing leaves the key for something else. */
+  GdkEvent *event =
+      gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(ctl));
+  if (event == NULL) return FALSE;
+
+  GhosttyKey key = pt_keymap_physical_key(keycode, keyval);
+  GhosttyMods mods = pt_keymap_mods(state);
+  GdkDevice *device = gdk_event_get_device(event);
+  if (device != NULL && gdk_device_get_num_lock_state(device))
+    mods |= GHOSTTY_MODS_NUM_LOCK;
+  /* GDK reports which modifiers the layout already spent on producing the
+   * keyval, and the encoder subtracts them before deciding what to send, so
+   * that Shift+1 encodes as a plain `!` rather than as Shift+!.
+   * (surface.zig:1386-1393.) */
+  GhosttyMods consumed_mods =
+      pt_keymap_mods(gdk_key_event_get_consumed_modifiers(event) &
+                     GDK_MODIFIER_MASK);
+  guint32 unshifted = pt_keymap_unshifted_codepoint(
+      gtk_widget_get_display(GTK_WIDGET(t)), event, keycode);
+  mods = pt_keymap_mods_for_key(mods, key, action);
+
+  /* Text for the event, taken straight off the keyval. GTK will not turn
+   * Ctrl+Shift+1 into "!" for us, but the keyval says `exclam` all the same,
+   * so the encoder can be handed the character and work out that this is
+   * Ctrl+! (surface.zig:1400-1414). Control characters are the one exclusion,
+   * and ghostty draws that line at 0x20 rather than by asking whether the
+   * codepoint is printable: the encoder already produces the C0 byte for keys
+   * like escape and backspace, and passing it their text as well makes it
+   * treat the event as committed input method text instead. */
+  char utf8[8];
+  gsize utf8_len = 0;
+  guint32 uc = gdk_keyval_to_unicode(keyval);
+  if (uc >= 0x20) utf8_len = g_unichar_to_utf8((gunichar)uc, utf8);
+
+  gboolean consumed =
+      pt_term_core_send_key(t->core, key, action, mods, consumed_mods,
+                            unshifted, utf8, utf8_len);
+  if (consumed && action != GHOSTTY_KEY_ACTION_RELEASE &&
+      !pt_keymap_is_modifier(key)) {
+    /* any keypress that writes to the pty drops the selection, and snaps the
+     * viewport back to the prompt: typing into scrollback you can't see is how
+     * you run a command without noticing it ran. Both calls fire the core's
+     * draw callback when they change anything, so nothing is queued here — a
+     * keypress that moves nothing repaints nothing.
+     *
+     * Modifier keys are held out of both, which is ghostty's rule: the same
+     * two calls sit behind `!event.key.modifier()` there (Surface.zig:2818).
+     * An app in kitty's report-all-keys mode has bytes encoded for a bare
+     * shift, so without it reaching for shift would tear down a selection.
+     *
+     * Releases are held out too, and that half is pt's own choice rather than
+     * ghostty's. Ghostty puts no action test on this path at all, so in
+     * report-events mode it clears and scrolls on an encoded release as well.
+     * pt does not, because a release is not typing: there is one encoded for
+     * every key struck, so counting them would do the viewport work twice per
+     * keystroke, and letting go of a key would clear a selection made while it
+     * was held. */
+    pt_term_core_selection_clear(t->core);
+    pt_term_core_scroll_bottom(t->core);
+  }
+  return consumed;
 }
 
 static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
                                guint keycode, GdkModifierType state,
                                gpointer user) {
-  (void)ctl; (void)keycode;
   PtTerminal *t = PT_TERMINAL(user);
+  /* Press-only: the banner offers one action, and it must not fire again when
+   * the same Enter comes back up. */
   if (t->exited) {
     if (keyval == GDK_KEY_Return) { restart_shell(t); return TRUE; }
     return FALSE;
   }
-  if (t->core == NULL) return FALSE;
+  /* GDK does not mark repeats, so the pressed set answers it: a key already
+   * down that presses again is the autorepeat firing. */
+  GhosttyKeyAction action = keys_held_mark(t, keycode)
+      ? GHOSTTY_KEY_ACTION_REPEAT : GHOSTTY_KEY_ACTION_PRESS;
+  return key_event(t, ctl, keyval, keycode, state, action);
+}
 
-  GhosttyKey key = pt_keymap_from_keyval(keyval);
-  GhosttyMods mods = pt_keymap_mods(state);
-  guint32 unshifted = pt_keymap_unshifted_codepoint(keyval);
-
-  char utf8[8];
-  gsize utf8_len = 0;
-  guint32 uc = gdk_keyval_to_unicode(keyval);
-  if (uc != 0 && g_unichar_isprint(uc) &&
-      (state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK)) == 0)
-    utf8_len = g_unichar_to_utf8((gunichar)uc, utf8);
-
-  gboolean consumed =
-      pt_term_core_send_key(t->core, key, GHOSTTY_KEY_ACTION_PRESS, mods,
-                            unshifted, utf8, utf8_len);
-  if (consumed) {
-    /* any keypress that writes to the pty drops the selection, and snaps the
-     * viewport back to the prompt: typing into scrollback you can't see is how
-     * you run a command without noticing it ran. Both calls fire the core's
-     * draw callback when they change anything, so nothing is queued here — a
-     * keypress that moves nothing repaints nothing. */
-    pt_term_core_selection_clear(t->core);
-    pt_term_core_scroll_bottom(t->core);
-  }
-  return consumed;
+/* GTK works out for itself whether a release is handled, from whether the
+ * matching press was (gtkeventcontrollerkey.c:125-132), so this signal returns
+ * nothing and the encoder's answer is of no use to anyone. */
+static void on_key_released(GtkEventControllerKey *ctl, guint keyval,
+                            guint keycode, GdkModifierType state,
+                            gpointer user) {
+  PtTerminal *t = PT_TERMINAL(user);
+  gboolean was_held = keys_held_release(t, keycode);
+  /* A dead pane keeps its core, so without this every key let go of under the
+   * exited banner would still be encoded and written to a pty whose child is
+   * gone. */
+  if (t->exited) return;
+  /* A release pt has no press for is not pt's to send. pt's own keybindings
+   * live on two window-level controllers, both in the capture phase, so both
+   * see a chord's press before this widget's controller is offered it
+   * (install_shortcuts in pt-window.c). Neither ever passes on the matching
+   * release: a GtkShortcutController handles no release event at all, and the
+   * Ctrl+Tab controller beside it is a GtkEventControllerKey with only
+   * key-pressed connected. So the release bubbles all the way down here on its
+   * own, and without this an app in kitty's report-event-types mode would be
+   * handed one for every one of pt's chords with no press in front of it.
+   * Ghostty drops exactly these, off the hash of the binding the press
+   * triggered (Surface.zig:2844-2858).
+   *
+   * The held set answers it, because a bit is only ever set by a press that
+   * reached key_event. A clear bit is usually a press that went somewhere else:
+   * a chord the window took, a key pressed before this pane had focus, or the
+   * Enter that restarts a dead shell, whose press the banner above consumed.
+   *
+   * One case is not that, and it costs something. Hold ctrl, use a chord that
+   * moves the focus off this pane, come back and let go: the press did reach
+   * key_event, but the focus-out cleared the whole set on the way out, so the
+   * release is dropped and an app in report-all-keys mode is left believing
+   * ctrl is still down. Ghostty would send that release. It is accepted here
+   * because the focus-out clear is wanted for its own reason, and because the
+   * damage is bounded: every encoded event carries the live modifier state, so
+   * a program reading mods off its next key event sees the truth. A program
+   * tracking the ctrl key itself stays wrong until that key is struck and let
+   * go of again without the focus moving. */
+  if (!was_held) return;
+  key_event(t, ctl, keyval, keycode, state, GHOSTTY_KEY_ACTION_RELEASE);
 }
 
 /* ---- mouse ----
@@ -2500,6 +2644,7 @@ static void pt_terminal_init(PtTerminal *t) {
 
   GtkEventController *key = gtk_event_controller_key_new();
   g_signal_connect(key, "key-pressed", G_CALLBACK(on_key_pressed), t);
+  g_signal_connect(key, "key-released", G_CALLBACK(on_key_released), t);
   g_signal_connect(key, "modifiers", G_CALLBACK(on_key_modifiers), t);
   gtk_widget_add_controller(GTK_WIDGET(t), key);
 
