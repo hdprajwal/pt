@@ -1,8 +1,8 @@
 #pragma once
 #include <glib.h>
 
-/* Sprite glyphs: box drawing and friends, drawn from the cell metrics instead
- * of asked of the font.
+/* Sprite glyphs: box drawing, block elements and braille, drawn from the cell
+ * metrics instead of asked of the font.
  *
  * The font's own box-drawing glyphs are cut for the font's natural line
  * height, which includes line gap. pt's cell height is ascent + descent with
@@ -14,6 +14,9 @@
  * unconditionally, and CodepointResolver checks the sprite face ahead of every
  * loaded font). This module is the same idea, ported from
  * build/_deps/ghostty-src/src/font/sprite/draw/.
+ *
+ * Block elements are here for a related but different reason: the font's ink
+ * is narrower than the rounded cell width, so adjacent block cells seam.
  *
  * Everything here is pure: no GTK types, no drawing. The caller supplies a
  * sink and turns the primitives into whatever it renders with. */

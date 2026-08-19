@@ -1,7 +1,8 @@
 #include "pt-sprite.h"
 #include <math.h>
 
-/* Ported from build/_deps/ghostty-src/src/font/sprite/draw/{common,box}.zig.
+/* Ported from build/_deps/ghostty-src/src/font/sprite/draw/, one section per
+ * source file: common.zig and box.zig, then block.zig, then braille.zig.
  *
  * Zig's saturating operators `-|` and `+|` are all over the metric arithmetic
  * there, on unsigned types. C has no equivalent, so every `-|` becomes an
@@ -16,8 +17,8 @@
  * the cell edge and land on the neighbour. This is the one place pt is simpler
  * than ghostty rather than sloppier. */
 
-/* Line weights. Ghostty's Thickness.height (common.zig:33-39). super_light is
- * unused by the box range but kept for the ranges that do use it. */
+/* Line weights. Ghostty's Thickness.height (common.zig:33-39). Its third
+ * weight, super_light, is not used by anything in these ranges. */
 static int thick_light(int base) { return base; }
 static int thick_heavy(int base) { return base * 2; }
 
@@ -506,6 +507,98 @@ static void block_glyph(const PtSpriteMetrics *m, const PtSpriteSink *sink,
   }
 }
 
+/* ---- braille ---- */
+
+/* braille.zig draw2800_28FF (:57-147). btop's graphs are drawn in braille, so
+ * this range matters as much as the box range does.
+ *
+ * The whole function is a pixel budget. Eight dots, two columns and four rows,
+ * have to fit the cell with spacing between them and a margin at the edges,
+ * and at terminal sizes there are only a handful of pixels to go around. The
+ * order of the fallbacks below is what decides how it degrades: a visible dot
+ * first, then a margin so the dots do not touch the cell edge, then spacing,
+ * then bigger margins, and only with everything else satisfied does the dot
+ * get a second pixel. Reordering any of it changes what braille looks like at
+ * small sizes. */
+static void braille(const PtSpriteMetrics *m, const PtSpriteSink *sink,
+                    void *user, gunichar cp) {
+  const int width = m->cell_w, height = m->cell_h;
+
+  int w = MIN(width / 4, height / 8);
+  int x_spacing = width / 4;
+  int y_spacing = height / 8;
+  int x_margin = x_spacing / 2;
+  int y_margin = y_spacing / 2;
+
+  int x_px_left = width - 2 * x_margin - x_spacing - 2 * w;
+  int y_px_left = height - 2 * y_margin - 3 * y_spacing - 4 * w;
+
+  /* First, try hard to ensure the dot width is non-zero */
+  if (x_px_left >= 2 && y_px_left >= 4 && w == 0) {
+    w += 1;
+    x_px_left -= 2;
+    y_px_left -= 4;
+  }
+
+  /* Second, prefer a non-zero margin */
+  if (x_px_left >= 2 && x_margin == 0) {
+    x_margin = 1;
+    x_px_left -= 2;
+  }
+  if (y_px_left >= 2 && y_margin == 0) {
+    y_margin = 1;
+    y_px_left -= 2;
+  }
+
+  /* Third, increase spacing */
+  if (x_px_left >= 1) {
+    x_spacing += 1;
+    x_px_left -= 1;
+  }
+  if (y_px_left >= 3) {
+    y_spacing += 1;
+    y_px_left -= 3;
+  }
+
+  /* Fourth, margins ("spacing", but on the sides) */
+  if (x_px_left >= 2) {
+    x_margin += 1;
+    x_px_left -= 2;
+  }
+  if (y_px_left >= 2) {
+    y_margin += 1;
+    y_px_left -= 2;
+  }
+
+  /* Last, increase dot width */
+  if (x_px_left >= 2 && y_px_left >= 4) {
+    w += 1;
+    x_px_left -= 2;
+    y_px_left -= 4;
+  }
+
+  const int x[2] = { x_margin, x_margin + w + x_spacing };
+  int y[4];
+  y[0] = y_margin;
+  y[1] = y[0] + w + y_spacing;
+  y[2] = y[1] + w + y_spacing;
+  y[3] = y[2] + w + y_spacing;
+
+  /* The codepoint's low byte is the dot pattern, one bit per dot, and
+   * ghostty's Pattern struct is a bit cast of exactly that. Reading top to
+   * bottom, the left column is bits 0, 1, 2 and 6, and the right column is
+   * bits 3, 4, 5 and 7. */
+  const guint8 p = (guint8)(cp & 0xff);
+  if (p & 0x01) emit_box(sink, user, x[0], y[0], x[0] + w, y[0] + w);
+  if (p & 0x02) emit_box(sink, user, x[0], y[1], x[0] + w, y[1] + w);
+  if (p & 0x04) emit_box(sink, user, x[0], y[2], x[0] + w, y[2] + w);
+  if (p & 0x40) emit_box(sink, user, x[0], y[3], x[0] + w, y[3] + w);
+  if (p & 0x08) emit_box(sink, user, x[1], y[0], x[1] + w, y[0] + w);
+  if (p & 0x10) emit_box(sink, user, x[1], y[1], x[1] + w, y[1] + w);
+  if (p & 0x20) emit_box(sink, user, x[1], y[2], x[1] + w, y[2] + w);
+  if (p & 0x80) emit_box(sink, user, x[1], y[3], x[1] + w, y[3] + w);
+}
+
 /* ---- dispatch ---- */
 
 /* The arm styles for every intersection glyph in U+2500..U+257F, transcribed
@@ -658,7 +751,7 @@ static const guint8 box_lines[0x80] = {
 #undef LN
 
 gboolean pt_sprite_has(gunichar cp) {
-  return cp >= 0x2500 && cp <= 0x259f;
+  return (cp >= 0x2500 && cp <= 0x259f) || (cp >= 0x2800 && cp <= 0x28ff);
 }
 
 gboolean pt_sprite_draw(gunichar cp, const PtSpriteMetrics *m,
@@ -677,6 +770,10 @@ gboolean pt_sprite_draw(gunichar cp, const PtSpriteMetrics *m,
    * instead. Both are ghostty's literals. */
   const int wide_gap = MAX(4, light);
 
+  if (cp >= 0x2800) {
+    braille(&mm, sink, user, cp);
+    return TRUE;
+  }
   if (cp >= 0x2580) {
     block_glyph(&mm, sink, user, cp);
     return TRUE;

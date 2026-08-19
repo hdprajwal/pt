@@ -706,23 +706,178 @@ static void test_block_sweep(void) {
   }
 }
 
+/* ---- braille ---- */
+
+/* Ghostty's braille is a pixel budget, not a layout: eight dots in two columns
+ * and four rows, with spacing and margins, out of a cell that at terminal
+ * sizes has only a handful of spare pixels. Reimplementing that budget in the
+ * test would prove nothing, so instead the dot size and the two column and
+ * four row positions are pinned outright, and ghostty's own in-file asserts
+ * (braille.zig:122-124) are checked as invariants over a sweep of sizes. */
+typedef struct { int cw, ch; int w; int x[2]; int y[4]; } PinnedBraille;
+
+static const PinnedBraille pinned_braille[] = {
+  { 18, 36, 4, {2, 11}, {2, 11, 20, 29} },
+  { 12, 24, 3, {1, 8}, {1, 7, 13, 19} },
+  { 11, 21, 2, {2, 7}, {2, 7, 12, 17} },
+  { 9, 17, 2, {1, 6}, {1, 5, 9, 13} },
+  { 4, 8, 1, {0, 3}, {0, 2, 4, 6} },
+  { 3, 7, 1, {0, 2}, {1, 2, 3, 4} },
+  { 2, 4, 1, {0, 1}, {0, 1, 2, 3} },
+  { 1, 1, 0, {0, 0}, {0, 0, 0, 0} },   /* no dot fits at all */
+};
+
+static void test_pinned_braille(void) {
+  Rec r;
+  for (gsize i = 0; i < G_N_ELEMENTS(pinned_braille); i++) {
+    const PinnedBraille *p = &pinned_braille[i];
+    /* U+28FF is every dot on, so one draw shows the whole layout. */
+    g_assert_true(rec_draw(&r, 0x28ff, p->cw, p->ch, 1));
+    if (p->w == 0) {
+      if (r.nrect != 0)
+        g_error("braille %dx%d: %d rects, wanted none", p->cw, p->ch, r.nrect);
+      continue;
+    }
+    if (r.nrect != 8)
+      g_error("braille %dx%d: %d rects, want 8", p->cw, p->ch, r.nrect);
+    /* Emission order is the left column top to bottom, then the right. */
+    for (int c = 0; c < 2; c++) {
+      for (int j = 0; j < 4; j++) {
+        const RecRect *b = &r.rect[c * 4 + j];
+        if (b->x != p->x[c] || b->y != p->y[j] || b->w != p->w ||
+            b->h != p->w)
+          g_error("braille %dx%d dot %d,%d: got %d,%d %dx%d want %d,%d %dx%d",
+                  p->cw, p->ch, c, j, b->x, b->y, b->w, b->h, p->x[c],
+                  p->y[j], p->w, p->w);
+      }
+    }
+  }
+}
+
+/* Two of the three asserts ghostty leaves in braille.zig, recovered from the
+ * dots rather than recomputed: the dots plus their spacing and margins fit the
+ * cell, in both directions, at every size. The third one does not hold and is
+ * checked separately below. */
+static void test_braille_budget(void) {
+  Rec r;
+  for (int cw = 1; cw <= 32; cw++) {
+    for (int ch = 1; ch <= 48; ch++) {
+      g_assert_true(rec_draw(&r, 0x28ff, cw, ch, 1));
+      if (r.nrect == 0) continue;   /* no dot fits; nothing to check */
+      g_assert_cmpint(r.nrect, ==, 8);
+
+      int w = r.rect[0].w;
+      int x_margin = r.rect[0].x;
+      int y_margin = r.rect[0].y;
+      int x_spacing = r.rect[4].x - r.rect[0].x - w;
+      int y_spacing = r.rect[1].y - r.rect[0].y - w;
+
+      if (2 * x_margin + 2 * w + x_spacing > cw)
+        g_error("braille %dx%d: dots overrun the width", cw, ch);
+      if (2 * y_margin + 4 * w + 3 * y_spacing > ch)
+        g_error("braille %dx%d: dots overrun the height", cw, ch);
+
+      for (int i = 0; i < 8; i++) {
+        const RecRect *a = &r.rect[i];
+        g_assert_cmpint(a->w, ==, w);
+        g_assert_cmpint(a->h, ==, w);
+        if (a->x < 0 || a->y < 0 || a->x + a->w > cw || a->y + a->h > ch)
+          g_error("braille %dx%d: dot %d,%d %dx%d leaves the cell", cw, ch,
+                  a->x, a->y, a->w, a->h);
+        for (int j = i + 1; j < 8; j++) {
+          const RecRect *b = &r.rect[j];
+          if (a->x < b->x + b->w && b->x < a->x + a->w &&
+              a->y < b->y + b->h && b->y < a->y + a->h)
+            g_error("braille %dx%d: dots %d and %d overlap", cw, ch, i, j);
+        }
+      }
+    }
+  }
+}
+
+/* Ghostty's third assert says the budget is always spent down to at most one
+ * spare pixel in one direction or the other (braille.zig:122). It is not true.
+ * A 14x23 cell finishes with two spare pixels each way, and about six percent
+ * of the sizes from 1x1 to 40x60 do the same. In ghostty's shipping build that
+ * assert compiles to `unreachable`, so it costs nothing there, but a safe
+ * build of ghostty would trip on it.
+ *
+ * pt matches ghostty's arithmetic rather than trying to improve on it, so the
+ * same slack shows up here. This pins that, both so the divergence from the
+ * assert is written down and so a later attempt to "fix" the budget cannot
+ * change the layout quietly. */
+static void test_braille_leftover_assert_is_wrong_upstream(void) {
+  Rec r;
+  g_assert_true(rec_draw(&r, 0x28ff, 14, 23, 1));
+  g_assert_cmpint(r.nrect, ==, 8);
+  int w = r.rect[0].w;
+  int x_margin = r.rect[0].x, y_margin = r.rect[0].y;
+  int x_spacing = r.rect[4].x - r.rect[0].x - w;
+  int y_spacing = r.rect[1].y - r.rect[0].y - w;
+  g_assert_cmpint(w, ==, 2);
+  g_assert_cmpint(x_margin, ==, 2);
+  g_assert_cmpint(y_margin, ==, 2);
+  g_assert_cmpint(x_spacing, ==, 4);
+  g_assert_cmpint(y_spacing, ==, 3);
+  g_assert_cmpint(14 - 2 * x_margin - x_spacing - 2 * w, ==, 2);
+  g_assert_cmpint(23 - 2 * y_margin - 3 * y_spacing - 4 * w, ==, 2);
+}
+
+/* The low byte of the codepoint is the dot pattern, and ghostty's Pattern is a
+ * bit cast of exactly that byte, so the bit order has to survive the port. */
+static void test_braille_bits(void) {
+  Rec all, one;
+  g_assert_true(rec_draw(&all, 0x28ff, 12, 24, 1));
+  g_assert_cmpint(all.nrect, ==, 8);
+  int left = all.rect[0].x, right = all.rect[4].x;
+  int top = all.rect[0].y, bottom = all.rect[3].y;
+
+  static const struct { gunichar cp; int corner; const char *name; } bits[] = {
+    { 0x2801, 0, "top left" },
+    { 0x2808, 1, "top right" },
+    { 0x2840, 2, "bottom left" },
+    { 0x2880, 3, "bottom right" },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(bits); i++) {
+    g_assert_true(rec_draw(&one, bits[i].cp, 12, 24, 1));
+    if (one.nrect != 1)
+      g_error("U+%04X: %d dots, want 1", bits[i].cp, one.nrect);
+    int want_x = (bits[i].corner & 1) ? right : left;
+    int want_y = (bits[i].corner & 2) ? bottom : top;
+    if (one.rect[0].x != want_x || one.rect[0].y != want_y)
+      g_error("U+%04X is not the %s dot: %d,%d want %d,%d", bits[i].cp,
+              bits[i].name, one.rect[0].x, one.rect[0].y, want_x, want_y);
+  }
+
+  /* U+2800 is the blank pattern and draws nothing, but it is still ours: it
+   * must not fall through to the font, or a blank braille cell would pick up
+   * whatever the font has there. */
+  g_assert_true(pt_sprite_has(0x2800));
+  g_assert_true(rec_draw(&one, 0x2800, 12, 24, 1));
+  g_assert_cmpint(one.nrect, ==, 0);
+}
+
 /* ---- coverage ---- */
 
 static void test_coverage(void) {
   Rec r;
-  for (guint32 cp = 0x2500; cp <= 0x259f; cp++) {
+  for (guint32 cp = 0x2500; cp <= 0x28ff; cp++) {
     gboolean drew = rec_draw(&r, cp, 12, 24, 3);
     if (drew != pt_sprite_has(cp))
       g_error("U+%04X: has() says %d, draw() says %d", cp, pt_sprite_has(cp),
               drew);
-    if (drew && r.nrect == 0 && r.nstroke == 0)
+    /* U+2800 is the blank braille pattern and is the only codepoint this
+     * module claims and then draws nothing for. */
+    if (drew && cp != 0x2800 && r.nrect == 0 && r.nstroke == 0)
       g_error("U+%04X: claimed but drew nothing", cp);
+    if (!drew && (r.nrect != 0 || r.nstroke != 0))
+      g_error("U+%04X: not ours but touched the sink", cp);
   }
 }
 
 static void test_not_ours(void) {
-  static const gunichar other[] = { 0, 'A', 0x24ff, 0x25a0, 0x2600, 0x28ff,
-                                    0xe0b0, 0x1fb00 };
+  static const gunichar other[] = { 0, 'A', 0x24ff, 0x25a0, 0x2600, 0x27ff,
+                                    0x2900, 0xe0b0, 0x1fb00 };
   Rec r;
   for (gsize i = 0; i < G_N_ELEMENTS(other); i++) {
     g_assert_false(pt_sprite_has(other[i]));
@@ -746,6 +901,10 @@ int main(void) {
   test_pinned_blocks();
   test_quadrants_overlap_at_odd_sizes();
   test_block_sweep();
+  test_pinned_braille();
+  test_braille_budget();
+  test_braille_leftover_assert_is_wrong_upstream();
+  test_braille_bits();
   test_coverage();
   test_not_ours();
   g_print("test-sprite: OK\n");
