@@ -3295,13 +3295,17 @@ static void test_terminfo_missing_from_empty_dir(void) {
  * names the system database and puts it directly behind pt's own directory
  * instead of leaving it to be searched last.
  *
- * Two things this assumes, both true and neither obvious. The process must have
+ * Three things this assumes, all true and none obvious. The process must have
  * inherited no TERMINFO_DIRS of its own, or there would be more on the end;
- * main clears it. And the build directory has to be compared in the form the
- * code produces, which is symlink-resolved, because the runtime value is built
- * from readlink("/proc/self/exe") and the kernel resolves that. CMake's binary
- * dir is whatever path the developer typed, so realpath brings the two to the
- * same form.
+ * main clears it. The build directory has to be compared in the form the code
+ * produces, which is symlink-resolved, because the runtime value is built from
+ * readlink("/proc/self/exe") and the kernel resolves that; CMake's binary dir
+ * is whatever path the developer typed, so realpath brings the two to the same
+ * form. And terminfo_own_dir has to take its build-tree branch, which is the
+ * only one of the two that builds no ".." component: the installed branch would
+ * hand the child <bindir>/../share/pt/terminfo, which no realpath is applied to
+ * and which this equality would then reject. A test binary sits in the build
+ * directory, where <bindir>/../share/pt/terminfo does not exist, so it does.
  *
  * The comparison is a string equality on a value handed to the child in its
  * environment, rather than a `case` glob with a path interpolated into the

@@ -1780,20 +1780,33 @@ static void on_key_released(GtkEventControllerKey *ctl, guint keyval,
    * exited banner would still be encoded and written to a pty whose child is
    * gone. */
   if (t->exited) return;
-  /* A release pt has no press for is not pt's to send. pt's own keybindings sit
-   * on window-level GtkShortcutControllers in the capture phase
-   * (pt-window.c:2004 and :2020), so they take the press of every chord before
-   * this widget's controller is offered it, and GtkShortcutController has no
-   * notion of a release at all: the release bubbles all the way down here alone.
-   * Without this an app in kitty's report-event-types mode would be handed a
-   * release for every one of pt's chords with no press in front of it. Ghostty
-   * drops exactly these, off the hash of the binding the press triggered
-   * (Surface.zig:2844-2858).
+  /* A release pt has no press for is not pt's to send. pt's own keybindings
+   * live on two window-level controllers, both in the capture phase, so both
+   * see a chord's press before this widget's controller is offered it
+   * (install_shortcuts in pt-window.c). Neither ever passes on the matching
+   * release: a GtkShortcutController handles no release event at all, and the
+   * Ctrl+Tab controller beside it is a GtkEventControllerKey with only
+   * key-pressed connected. So the release bubbles all the way down here on its
+   * own, and without this an app in kitty's report-event-types mode would be
+   * handed one for every one of pt's chords with no press in front of it.
+   * Ghostty drops exactly these, off the hash of the binding the press
+   * triggered (Surface.zig:2844-2858).
    *
-   * The held set is the whole test, because a bit is only ever set by a press
-   * that reached key_event: a clear bit means the press went somewhere else.
-   * That also covers a key pressed before this pane had focus, and the Enter
-   * that restarts a dead shell, whose press the banner above consumed. */
+   * The held set answers it, because a bit is only ever set by a press that
+   * reached key_event. A clear bit is usually a press that went somewhere else:
+   * a chord the window took, a key pressed before this pane had focus, or the
+   * Enter that restarts a dead shell, whose press the banner above consumed.
+   *
+   * One case is not that, and it costs something. Hold ctrl, use a chord that
+   * moves the focus off this pane, come back and let go: the press did reach
+   * key_event, but the focus-out cleared the whole set on the way out, so the
+   * release is dropped and an app in report-all-keys mode is left believing
+   * ctrl is still down. Ghostty would send that release. It is accepted here
+   * because the focus-out clear is wanted for its own reason, and because the
+   * damage is bounded: every encoded event carries the live modifier state, so
+   * a program reading mods off its next key event sees the truth. A program
+   * tracking the ctrl key itself stays wrong until that key is struck and let
+   * go of again without the focus moving. */
   if (!was_held) return;
   key_event(t, ctl, keyval, keycode, state, GHOSTTY_KEY_ACTION_RELEASE);
 }

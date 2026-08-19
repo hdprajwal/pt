@@ -960,10 +960,10 @@ static const char *terminfo_own_dir(void) {
  *
  * It is not what keeps them reachable. ncurses walks its compiled-in list after
  * the roots it read from the environment whatever those say (db_iterator.c,
- * dbdCfgList after dbdEnvList), so `infocmp xterm` answers with pt's directory
- * alone on TERMINFO_DIRS, and answers with a path that does not exist there.
- * What the empty element buys is a defined position in the search order rather
- * than last place.
+ * dbdCfgList after dbdEnvList), so `infocmp xterm` still answers when
+ * TERMINFO_DIRS holds only pt's directory, and still answers when it holds only
+ * a path that does not exist. What the empty element buys is a defined position
+ * in the search order rather than last place.
  *
  * Built once and kept, for the same two reasons as terminfo_own_dir: neither
  * input changes while pt runs, and the string has to exist before the fork
