@@ -58,6 +58,13 @@ struct PtTermCore {
   gboolean was_focus_event; /* mode 1004 as of the last read, for the 0->1 edge */
   gboolean was_in_band_resize; /* mode 2048, same, for the enable-time report */
 
+  /* synchronized output (mode 2026); see poll_mode_edges and
+   * pt_term_core_sync_output */
+  gboolean sync_output;      /* mode 2026 as of the last poll */
+  guint sync_reset_source;   /* re-armed on every poll that sees it true */
+  gint64 sync_rising_edge_us; /* g_get_monotonic_time() at the 0->1 edge, for
+                                * the 5s ceiling that ignores re-arming */
+
   PtOscScan osc;            /* OSC scanner state, carried across reads */
   PtOsc52Mode osc52;        /* what OSC 52 may do to the clipboard */
 
@@ -686,6 +693,83 @@ static void send_size_report(PtTermCore *c) {
   pty_write_raw(c->pty_fd, buf, written);
 }
 
+/* ---- synchronized output (mode 2026) ----
+ *
+ * Claude Code and most modern TUIs wrap every frame in BSU (`CSI ? 2026 h`)
+ * and ESU (`CSI ? 2026 l`) so the terminal can hold a torn frame off the
+ * screen until it is whole. pt answers DECRQM for this mode as "recognised",
+ * which is a promise to do exactly that; this is where the promise is kept.
+ * There is no repaint logic here — the widget gates its own draw on
+ * pt_term_core_sync_output() — this only maintains the flag, the same way
+ * poll_mode_edges already tracks modes 1004 and 2048: sampled once per read
+ * dispatch, because terminal.h gives pt no hook that fires on every
+ * transition, only ghostty_terminal_mode_get's snapshot of where things stand.
+ *
+ * Ghostty does not have this problem, because it does have that hook: it runs
+ * its VT parser on a dedicated thread and hangs a callback off the mode
+ * itself, so startSynchronizedOutput (termio/Thread.zig:364) re-arms its
+ * 1000ms `sync_reset_ms` timer (:37) on *every* `?2026h`, including one that
+ * finds the mode already on. pt cannot see that transition; it can only see
+ * that the mode is on right now. An edge-only timer — armed once when the
+ * mode first goes true — would be fine if BSU/ESU pairs always landed inside
+ * one read, but PT_READ_MAX_PER_DISPATCH ends a dispatch at an arbitrary 256
+ * KB boundary, so a fast enough stream of frames can leave the mode
+ * continuously true with no further 0->1 edge to arm anything. The timer from
+ * the *first* BSU would then fire mid-frame and force-clear it — a periodic
+ * tear in exactly the app this feature exists to stop.
+ *
+ * So the timer re-arms on every poll that observes the mode true, not only
+ * the rising edge: "1s since sync activity was last seen", which never fires
+ * against an app that is still actively wrapping frames. That alone trades
+ * one failure for its opposite — an app that sends one BSU and then never
+ * sends ESU would hold the frame forever — so a second, non-re-arming bound
+ * rides alongside it: the monotonic time of the rising edge is recorded once,
+ * and the mode is force-cleared the instant it has been continuously true for
+ * 5s, however recently the 1s timer was last re-armed. No legitimate frame is
+ * held for five seconds; this only bounds the pathological app. Both timers
+ * are a deliberate divergence from ghostty, forced by pt polling the mode
+ * instead of hooking its setter — ghostty needs neither bound, because its
+ * timer only ever runs against a real edge.
+ *
+ * The whole scheme leans on one invariant in on_pty_readable: poll_mode_edges
+ * runs after the whole read buffer has reached the parser and before
+ * c->cbs.draw fires. A frame whose BSU and ESU arrive in the same chunk — the
+ * common case — is therefore never held at all, since the falling edge is
+ * seen before any draw happens; and a frame that *is* held gets repainted by
+ * that same draw call the moment this poll clears it, with no extra hook. */
+#define PT_SYNC_OUTPUT_RESET_MS 1000            /* ghostty's sync_reset_ms,
+                                                  * termio/Thread.zig:37 */
+#define PT_SYNC_OUTPUT_CEILING_US (5 * G_USEC_PER_SEC) /* pt's own bound; see
+                                                          * the block above */
+
+/* Force the mode off: cancels the re-arm timer and writes the library mode,
+ * which is a no-op when the app's own ESU already got there first. Shared by
+ * the falling edge below, the two timeouts that override the app, and resize
+ * and reset, which both have their own reasons (ghostty's, and the library's
+ * own fullReset) to drop synchronized output outright. */
+static void sync_output_clear(PtTermCore *c) {
+  ghostty_terminal_mode_set(c->terminal, GHOSTTY_MODE_SYNC_OUTPUT, false);
+  c->sync_output = FALSE;
+  if (c->sync_reset_source != 0) {
+    g_source_remove(c->sync_reset_source);
+    c->sync_reset_source = 0;
+  }
+}
+
+/* The 1s "activity stopped" bound: reached only when a poll has not re-armed
+ * it in time, i.e. the app went quiet mid-frame (or the app never sends ESU
+ * at all — the common way for that to happen is a program that dies with the
+ * mode on). No draw follows this one for free the way it does inside
+ * on_pty_readable, so it fires its own. */
+static gboolean sync_output_timeout(gpointer ud) {
+  PtTermCore *c = ud;
+  c->sync_reset_source = 0;      /* GLib is already tearing this source down */
+  ghostty_terminal_mode_set(c->terminal, GHOSTTY_MODE_SYNC_OUTPUT, false);
+  c->sync_output = FALSE;
+  if (c->cbs.draw != NULL) c->cbs.draw(c, c->cbs_user);
+  return G_SOURCE_REMOVE;
+}
+
 static void poll_mode_edges(PtTermCore *c) {
   bool focus_event = false;
   ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_FOCUS_EVENT,
@@ -700,7 +784,31 @@ static void poll_mode_edges(PtTermCore *c) {
                             &in_band_resize);
   if (in_band_resize && !c->was_in_band_resize) send_size_report(c);
   c->was_in_band_resize = in_band_resize;
+
+  bool sync_output = false;
+  ghostty_terminal_mode_get(c->terminal, GHOSTTY_MODE_SYNC_OUTPUT,
+                            &sync_output);
+  if (sync_output) {
+    gint64 now = g_get_monotonic_time();
+    if (!c->sync_output) c->sync_rising_edge_us = now;   /* the 0->1 edge */
+    if (now - c->sync_rising_edge_us >= PT_SYNC_OUTPUT_CEILING_US) {
+      sync_output_clear(c);     /* the pathological-app bound; see above */
+    } else {
+      c->sync_output = TRUE;
+      if (c->sync_reset_source != 0) g_source_remove(c->sync_reset_source);
+      c->sync_reset_source = g_timeout_add(PT_SYNC_OUTPUT_RESET_MS,
+                                           sync_output_timeout, c);
+    }
+  } else if (c->sync_output || c->sync_reset_source != 0) {
+    sync_output_clear(c);       /* the common case: BSU and ESU in one read */
+  }
 }
+
+/* TRUE means the running program has asked the terminal to hold the current
+ * frame off the screen until it says otherwise (mode 2026 / BSU-ESU); see the
+ * block comment above poll_mode_edges for how long pt is willing to wait. As
+ * of the last read dispatch, like the other mode shadows above it. */
+gboolean pt_term_core_sync_output(PtTermCore *c) { return c->sync_output; }
 
 /* How much one dispatch may drain before handing the main loop back. A child
  * flooding the pty (`cat bigfile`) can otherwise hold this callback for as
@@ -1017,6 +1125,15 @@ void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
   /* A reflow rewrites the row count and the visible area both. */
   c->sb_dirty = TRUE;
   c->content_serial++;
+
+  /* ghostty_terminal_resize() already turns synchronized output off inside the
+   * library (terminal/c/terminal.zig:502, matching Termio.zig:490-492: "show
+   * changes immediately for a resize" is explicitly allowed by the spec). What
+   * it cannot do is update pt's own shadow flag and cancel pt's re-arm timer —
+   * those only self-correct on the next poll, and a caller asking
+   * pt_term_core_sync_output() before any more bytes arrive would still be
+   * told the frame is held. Clear them here, synchronously with the resize. */
+  sync_output_clear(c);
 }
 
 void pt_term_core_write(PtTermCore *c, const char *buf, gssize len) {
@@ -1647,6 +1764,12 @@ void pt_term_core_reset(PtTermCore *c) {
   c->was_focus_event = FALSE;
   c->was_in_band_resize = FALSE;
 
+  /* fullReset() resets every mode to its default, synchronized output
+   * included, so the library's own copy is already off; this only follows
+   * suit in pt's shadow and cancels the re-arm timer, the same gap
+   * ghostty_terminal_resize() leaves above in pt_term_core_resize. */
+  sync_output_clear(c);
+
   /* The color scheme is deliberately *not* cleared: it mirrors the theme pt is
    * painting, which a reset does not touch (colors survive fullReset), so the
    * next 996 query must still be answered with the truth. Nothing is reported
@@ -1933,12 +2056,16 @@ char *pt_term_core_grid_text(PtTermCore *c) {
 }
 
 /* One PtCell from the walk's current cell. `fg_default` is the render state's
- * default foreground, resolved here so a consumer never asks twice. Zeroed
- * first, so every byte of the struct — padding and the text tail past the NUL
- * included — is deterministic and two fills of the same cell compare equal
- * bytewise, whatever the buffer held before. */
+ * default foreground, resolved here so a consumer never asks twice. `palette`
+ * is the render state's 256-color table, read once per row walk by the
+ * caller and handed down rather than re-read per cell — NULL when that read
+ * failed, in which case a palette-indexed underline color resolves to none
+ * rather than a guess. Zeroed first, so every byte of the struct — padding
+ * and the text tail past the NUL included — is deterministic and two fills
+ * of the same cell compare equal bytewise, whatever the buffer held before. */
 static void fill_cell(PtCell *out, GhosttyRenderStateRowCells cells,
-                      GhosttyColorRgb fg_default) {
+                      GhosttyColorRgb fg_default,
+                      const GhosttyColorRgb *palette) {
   memset(out, 0, sizeof *out);
   uint32_t glen = 0;
   ghostty_render_state_row_cells_get(cells,
@@ -1978,16 +2105,48 @@ static void fill_cell(PtCell *out, GhosttyRenderStateRowCells cells,
              : wide == GHOSTTY_CELL_WIDE_NARROW   ? 1
                                                   : 0;
 
+  /* GhosttyStyle (ghostty/vt/style.h:92-108) carries far more than the old
+   * six bits: the underline shape is its own int (matching GhosttySgrUnderline,
+   * ghostty/vt/sgr.h:99-105, value for value with PtUnderline, so no mapping
+   * table needed), and blink/invisible/overline had no home in PtCell.style
+   * at all. */
   GhosttyStyle style = GHOSTTY_INIT_SIZED(GhosttyStyle);
   ghostty_render_state_row_cells_get(cells,
       GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &style);
-  out->style = (guint8)((style.bold ? PT_CELL_STYLE_BOLD : 0) |
+  out->style = (guint16)((style.bold ? PT_CELL_STYLE_BOLD : 0) |
                         (style.italic ? PT_CELL_STYLE_ITALIC : 0) |
-                        (style.underline != GHOSTTY_SGR_UNDERLINE_NONE
-                             ? PT_CELL_STYLE_UNDERLINE : 0) |
                         (style.strikethrough ? PT_CELL_STYLE_STRIKE : 0) |
                         (style.faint ? PT_CELL_STYLE_FAINT : 0) |
-                        (style.inverse ? PT_CELL_STYLE_INVERSE : 0));
+                        (style.inverse ? PT_CELL_STYLE_INVERSE : 0) |
+                        (style.blink ? PT_CELL_STYLE_BLINK : 0) |
+                        (style.invisible ? PT_CELL_STYLE_INVISIBLE : 0) |
+                        (style.overline ? PT_CELL_STYLE_OVERLINE : 0));
+  out->underline = (guint8)style.underline;
+
+  /* style.underline_color is a tagged union (GHOSTTY_STYLE_COLOR_NONE /
+   * _PALETTE / _RGB) with no render-state data enum of its own to resolve it
+   * the way GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_FG_COLOR resolves fg, so this
+   * does that resolution by hand. has_underline_color and underline_color
+   * are already zeroed by the memset above, so NONE — and a PALETTE index
+   * with no palette to look it up in — both fall out as "no color" for free. */
+  switch (style.underline_color.tag) {
+    case GHOSTTY_STYLE_COLOR_RGB: {
+      GhosttyColorRgb rgb = style.underline_color.value.rgb;
+      out->has_underline_color = TRUE;
+      out->underline_color = (PtColor){ rgb.r, rgb.g, rgb.b, 1.0 };
+      break;
+    }
+    case GHOSTTY_STYLE_COLOR_PALETTE:
+      if (palette != NULL) {
+        GhosttyColorRgb rgb = palette[style.underline_color.value.palette];
+        out->has_underline_color = TRUE;
+        out->underline_color = (PtColor){ rgb.r, rgb.g, rgb.b, 1.0 };
+      }
+      break;
+    case GHOSTTY_STYLE_COLOR_NONE:
+    default:
+      break;
+  }
 
   bool selected = false;
   ghostty_render_state_row_cells_get(cells,
@@ -2016,8 +2175,15 @@ int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max) {
     ghostty_render_state_get(c->render_state,
                              GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
                              &fg_default);
+    /* Read once for the whole row, not once per cell — 256 colors is cheap
+     * once and wasteful per glyph. A failed read (NULL below) just means
+     * palette-indexed underline colors on this row resolve to none. */
+    GhosttyColorRgb palette[256];
+    gboolean has_palette = ghostty_render_state_get(c->render_state,
+                             GHOSTTY_RENDER_STATE_DATA_COLOR_PALETTE,
+                             palette) == GHOSTTY_SUCCESS;
     while (n < max && ghostty_render_state_row_cells_next(w.cells))
-      fill_cell(&out[n++], w.cells, fg_default);
+      fill_cell(&out[n++], w.cells, fg_default, has_palette ? palette : NULL);
   }
   row_walk_end(&w);
   return n;
@@ -2028,7 +2194,8 @@ int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max) {
  * The frame-shaped read: one iterator pair for the whole pass instead of the
  * per-call seek row_cells pays, so a full repaint is O(rows) iterator steps
  * rather than O(rows²). Each next() fills exactly what row_cells would for
- * that row — both go through fill_cell with the same resolved default fg.
+ * that row — both go through fill_cell with the same resolved default fg
+ * and the same once-per-walk palette read.
  *
  * The reader owns the row buffer and grows it to the widest row it meets, so
  * no caller ever guesses a column count and no width is ever truncated — an
@@ -2037,6 +2204,8 @@ int pt_term_core_row_cells(PtTermCore *c, int row, PtCell *out, int max) {
 struct PtRowReader {
   PtRowWalk w;
   GhosttyColorRgb fg_default;
+  GhosttyColorRgb palette[256]; /* valid only when has_palette */
+  gboolean has_palette;
   PtCell *cells;              /* owned; handed out by rows_next */
   int cap;
 };
@@ -2050,6 +2219,11 @@ PtRowReader *pt_term_core_rows_begin(PtTermCore *c) {
   ghostty_render_state_get(c->render_state,
                            GHOSTTY_RENDER_STATE_DATA_COLOR_FOREGROUND,
                            &r->fg_default);
+  /* One read for the whole pass, same reasoning as row_cells: the walk
+   * covers every visible row, but the palette does not change mid-frame. */
+  r->has_palette = ghostty_render_state_get(c->render_state,
+                           GHOSTTY_RENDER_STATE_DATA_COLOR_PALETTE,
+                           r->palette) == GHOSTTY_SUCCESS;
   /* Seeded from the pty size so the common case never reallocates; the walk
    * below still grows past it whenever a row turns out wider. */
   r->cap = MAX(c->cols, 1);
@@ -2070,7 +2244,8 @@ int pt_term_core_rows_next(PtRowReader *r, const PtCell **out) {
       r->cap *= 2;
       r->cells = g_renew(PtCell, r->cells, r->cap);
     }
-    fill_cell(&r->cells[n++], r->w.cells, r->fg_default);
+    fill_cell(&r->cells[n++], r->w.cells, r->fg_default,
+             r->has_palette ? r->palette : NULL);
   }
   *out = r->cells;            /* again: the grow may have moved the buffer */
   return n;
@@ -2285,6 +2460,7 @@ void pt_term_core_free(PtTermCore *c) {
   if (c->fd_source != 0) g_source_remove(c->fd_source);
   if (c->child_source != 0) g_source_remove(c->child_source);
   if (c->cmd_timer != 0) g_source_remove(c->cmd_timer);
+  if (c->sync_reset_source != 0) g_source_remove(c->sync_reset_source);
   pt_osc_scan_clear(&c->osc);
   if (c->pty_fd >= 0) close(c->pty_fd);
   if (c->child > 0 && !c->child_exited) {

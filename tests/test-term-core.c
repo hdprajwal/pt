@@ -996,6 +996,122 @@ static void test_in_band_resize_on_mode_enable(void) {
   pt_term_core_free(core);
 }
 
+/* ---- synchronized output (mode 2026, BSU/ESU) ----
+ *
+ * No `cat -v` recipe here: pt_term_core_sync_output() is a direct getter, so
+ * these poll it instead of hunting the grid for an echoed escape. */
+static gboolean sync_output_on(PtTermCore *c) { return pt_term_core_sync_output(c); }
+static gboolean sync_output_off(PtTermCore *c) { return !pt_term_core_sync_output(c); }
+
+static void test_sync_output_set(void) {
+  /* BSU alone. pt already answers DECRQM for mode 2026 with "recognised";
+     this is the first proof that the promise is actually kept. */
+  const char *argv[] = {"/bin/sh", "-c", "printf '\\033[?2026h'; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(sync_output_on, core));
+  pt_term_core_free(core);
+}
+
+static void test_sync_output_cleared(void) {
+  /* BSU and ESU in two separate reads — `read x` gates them apart — so both
+     the rising and the falling edge are actually observed. A BSU/ESU pair
+     sharing one read nets out to no edge at all (see the block comment above
+     poll_mode_edges in pt-term-core.c), so folding them into a single printf
+     here would prove nothing: the flag would just never have moved. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[?2026h'; read x; "
+    "printf '\\033[?2026l'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(sync_output_on, core));
+
+  pt_term_core_write(core, "\n", 1);
+  g_assert_true(wait_until(sync_output_off, core));
+
+  pt_term_core_free(core);
+}
+
+static void test_sync_output_safety_timer(void) {
+  /* The child sends BSU once and then goes fully quiet — no ESU, no further
+     writes at all. poll_mode_edges therefore runs exactly once for this mode,
+     which is the one case the re-arming logic never touches: the 1000ms timer
+     armed by that single poll is the only thing that can still clear this. */
+  const char *argv[] = {"/bin/sh", "-c", "printf '\\033[?2026h'; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(sync_output_on, core));
+
+  /* Still true a beat later, well short of 1000ms — this is the timer
+     actually elapsing, not some accidental immediate clear. */
+  for (int i = 0; i < 20; i++) {
+    g_main_context_iteration(NULL, FALSE);
+    g_usleep(5000);
+  }
+  g_assert_true(pt_term_core_sync_output(core));
+
+  /* Comfortably past 1000ms, well inside the 5s ceiling and the 10s budget
+     wait_until allows. */
+  g_assert_true(wait_until(sync_output_off, core));
+
+  pt_term_core_free(core);
+}
+
+static void test_sync_output_resize_clears(void) {
+  /* BSU with no ESU, then a resize. ghostty_terminal_resize() already turns
+     synchronized output off inside the library (terminal/c/terminal.zig:502);
+     pt_term_core_resize must follow in its own shadow synchronously, because
+     nothing else runs poll_mode_edges here — a resize does not read from the
+     pty, so without the explicit clear the flag would stay stale true until
+     bytes next arrived. */
+  const char *argv[] = {"/bin/sh", "-c", "printf '\\033[?2026h'; sleep 30", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(sync_output_on, core));
+
+  pt_term_core_resize(core, 100, 30, 8, 16);
+  g_assert_false(pt_term_core_sync_output(core));   /* synchronous, no poll needed */
+
+  pt_term_core_free(core);
+}
+
+static void test_sync_output_rearm_survives_past_1s_then_hits_ceiling(void) {
+  /* The case A1 exists for: BSU once, then a steady drip of tiny writes and no
+     ESU, ever. Each write is its own read dispatch roughly every 200ms — well
+     under the 1000ms reset window — so poll_mode_edges keeps re-arming the
+     timer the whole time. An edge-only timer armed once at the rising edge
+     would force-clear this at ~1000ms, mid-stream, which is exactly the tear
+     this feature exists to prevent; re-arming is what keeps it held while the
+     app is still actively (if endlessly) asking. Only the 5s absolute
+     ceiling, timed from the rising edge and blind to the re-arming, can still
+     end it — and it must, since nothing legitimate holds a frame that long. */
+  const char *argv[] = {"/bin/sh", "-c",
+    "printf '\\033[?2026h'; while :; do printf .; sleep 0.2; done", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_until(sync_output_on, core));
+
+  /* Past the 1000ms re-arm window, still true: the re-arming is doing its
+     job against a stream that never stops. */
+  gint64 deadline = g_get_monotonic_time() + 1500 * 1000;
+  while (g_get_monotonic_time() < deadline) {
+    g_main_context_iteration(NULL, FALSE);
+    g_usleep(5000);
+  }
+  g_assert_true(pt_term_core_sync_output(core));
+
+  /* Past the 5s ceiling from the rising edge: force-cleared regardless of the
+     stream still running. */
+  g_assert_true(wait_until(sync_output_off, core));
+
+  pt_term_core_free(core);
+}
+
 /* ---- color scheme (CSI ? 996 n, mode 2031) ----
  *
  * Same `cat -v` recipe once more, with one twist: the query has to come from
@@ -2221,7 +2337,8 @@ static void test_row_cells_text_style_colors(void) {
   g_assert_cmpuint(cells[0].width, ==, 1);
   g_assert_cmpuint(cells[0].style, ==,
                    PT_CELL_STYLE_BOLD | PT_CELL_STYLE_ITALIC |
-                   PT_CELL_STYLE_UNDERLINE | PT_CELL_STYLE_STRIKE);
+                   PT_CELL_STYLE_STRIKE);
+  g_assert_cmpuint(cells[0].underline, ==, PT_UNDERLINE_SINGLE);
   g_assert_cmpuint(cells[0].fg.r, ==, 200);
   g_assert_cmpuint(cells[0].fg.g, ==, 10);
   g_assert_cmpuint(cells[0].fg.b, ==, 20);
@@ -2286,6 +2403,74 @@ static void test_row_cells_selected(void) {
   g_assert_true(cells[0].selected);
   g_assert_true(cells[2].selected);
   g_assert_false(cells[3].selected);
+  pt_term_core_free(core);
+}
+
+static void test_row_cells_underline_style(void) {
+  /* fill_cell must carry every SGR underline shape, the underline's own
+     color (both direct and palette forms) and the flags libghostty tracks
+     alongside it, none of which survived the old single UNDERLINE bit. Row 2
+     keeps clear of the ready marker; palette slot 1 is pinned so the SGR
+     58:5:1 case doesn't depend on libghostty's stock palette. */
+  PtTermCore *core = cursor_core_new();
+  PtTermColors colors = {
+    .bg = { 0, 0, 0, 1.0 },
+    .fg = { 255, 255, 255, 1.0 },
+    .cursor = { 255, 255, 255, 1.0 },
+  };
+  colors.palette[1] = (PtColor){ 90, 91, 92, 1.0 };
+  pt_term_core_set_colors(core, &colors);
+
+  pt_term_core_write(core,
+      "\033[2;1H"
+      "\033[4:1mA\033[0m"                     /* single */
+      "\033[4:2mB\033[0m"                     /* double */
+      "\033[4:3mC\033[0m"                     /* curly */
+      "\033[4:4mD\033[0m"                     /* dotted */
+      "\033[4:5mE\033[0m"                     /* dashed */
+      "\033[4mF\033[0m"                       /* bare 4 still means single */
+      "\033[4:1m\033[4:0mG\033[0m"            /* 4:0 clears back to none */
+      "\033[4:1m\033[24mH\033[0m"             /* 24 clears back to none */
+      "\033[58:2::10:20:30mI\033[0m"          /* direct RGB underline color */
+      "\033[58:5:1mJ\033[0m"                  /* palette-indexed, slot 1 */
+      "\033[58:2::10:20:30m\033[59mK\033[0m"  /* 59 clears the color */
+      "\033[5mL\033[0m"                       /* blink */
+      "\033[8mM\033[0m"                       /* invisible */
+      "\033[53mN\033[0m"                      /* overline */
+      "\033[9mO\033[0m",                      /* strikethrough */
+      -1);
+  g_assert_true(wait_for_text(core, "ABCDEFGHIJKLMNO"));
+  pt_term_core_sync(core);
+
+  PtCell cells[16];
+  g_assert_cmpint(pt_term_core_row_cells(core, 1, cells, 16), ==, 16);
+
+  g_assert_cmpuint(cells[0].underline, ==, PT_UNDERLINE_SINGLE);
+  g_assert_cmpuint(cells[1].underline, ==, PT_UNDERLINE_DOUBLE);
+  g_assert_cmpuint(cells[2].underline, ==, PT_UNDERLINE_CURLY);
+  g_assert_cmpuint(cells[3].underline, ==, PT_UNDERLINE_DOTTED);
+  g_assert_cmpuint(cells[4].underline, ==, PT_UNDERLINE_DASHED);
+  g_assert_cmpuint(cells[5].underline, ==, PT_UNDERLINE_SINGLE);
+  g_assert_cmpuint(cells[6].underline, ==, PT_UNDERLINE_NONE);
+  g_assert_cmpuint(cells[7].underline, ==, PT_UNDERLINE_NONE);
+
+  g_assert_true(cells[8].has_underline_color);
+  g_assert_cmpuint(cells[8].underline_color.r, ==, 10);
+  g_assert_cmpuint(cells[8].underline_color.g, ==, 20);
+  g_assert_cmpuint(cells[8].underline_color.b, ==, 30);
+
+  g_assert_true(cells[9].has_underline_color);
+  g_assert_cmpuint(cells[9].underline_color.r, ==, 90);
+  g_assert_cmpuint(cells[9].underline_color.g, ==, 91);
+  g_assert_cmpuint(cells[9].underline_color.b, ==, 92);
+
+  g_assert_false(cells[10].has_underline_color);
+
+  g_assert_cmpuint(cells[11].style & PT_CELL_STYLE_BLINK, ==, PT_CELL_STYLE_BLINK);
+  g_assert_cmpuint(cells[12].style & PT_CELL_STYLE_INVISIBLE, ==, PT_CELL_STYLE_INVISIBLE);
+  g_assert_cmpuint(cells[13].style & PT_CELL_STYLE_OVERLINE, ==, PT_CELL_STYLE_OVERLINE);
+  g_assert_cmpuint(cells[14].style & PT_CELL_STYLE_STRIKE, ==, PT_CELL_STYLE_STRIKE);
+
   pt_term_core_free(core);
 }
 
@@ -2974,6 +3159,14 @@ int main(int argc, char *argv[]) {
                   test_in_band_resize_unchanged_is_silent);
   g_test_add_func("/termcore/in-band-resize-on-enable",
                   test_in_band_resize_on_mode_enable);
+  g_test_add_func("/termcore/sync-output-set", test_sync_output_set);
+  g_test_add_func("/termcore/sync-output-cleared", test_sync_output_cleared);
+  g_test_add_func("/termcore/sync-output-safety-timer",
+                  test_sync_output_safety_timer);
+  g_test_add_func("/termcore/sync-output-resize-clears",
+                  test_sync_output_resize_clears);
+  g_test_add_func("/termcore/sync-output-rearm-then-ceiling",
+                  test_sync_output_rearm_survives_past_1s_then_hits_ceiling);
   g_test_add_func("/termcore/alt-screen-arrows", test_alt_screen_arrows);
   g_test_add_func("/termcore/alt-screen-tracking-wheel",
                   test_alt_screen_tracking_wheel);
@@ -3048,6 +3241,8 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/row-cells", test_row_cells_text_style_colors);
   g_test_add_func("/termcore/row-cells-wide", test_row_cells_wide);
   g_test_add_func("/termcore/row-cells-selected", test_row_cells_selected);
+  g_test_add_func("/termcore/row-cells-underline-style",
+                  test_row_cells_underline_style);
   g_test_add_func("/termcore/rows-walk", test_rows_walk_matches_row_cells);
   g_test_add_func("/termcore/rows-walk-wide", test_rows_walk_wide_pane);
   g_test_add_func("/termcore/row-link-helpers", test_row_link_helpers);

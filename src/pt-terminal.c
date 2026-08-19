@@ -113,6 +113,12 @@ struct _PtTerminal {
   PangoFontDescription *font_desc;
   int cell_w, cell_h;
   int baseline;              /* ascent, in px: text nodes sit on the baseline */
+  /* Underline/strikethrough geometry, cell-local px offsets from the row's
+   * top edge, cached at font-measure time like everything else in this block
+   * — see measure_font and the ---- decorations ---- comment below for where
+   * these numbers come from and why. */
+  int underline_thickness, underline_y;
+  int strike_thickness, strike_y;
   gboolean exited;
   int exit_status;
   gboolean focused;
@@ -169,6 +175,16 @@ struct _PtTerminal {
   gboolean blink_visible;
   gboolean blink_wanted;     /* last synced: the app asked for a blinking cursor */
   gint64 blink_reset_at;
+  /* Set during the snapshot's row walk, true when the viewport just drawn
+   * held at least one SGR-5 cell. Ghostty parses blink into style.flags but
+   * its renderer never reads it (grep -rn "flags.blink" src/renderer/ in the
+   * vendored tree is empty) — pt goes further and actually blinks the text,
+   * on the same phase as the cursor, so the two never fight over the eye's
+   * attention. There is no core accessor for this: the widget already walks
+   * every cell for the frame it is about to draw, so answering "did this
+   * frame contain one" here is free, where a second grid walk to ask the core
+   * separately would not be. */
+  gboolean text_blink;
 };
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
@@ -217,13 +233,15 @@ static void blink_timer_start(PtTerminal *t) {
 }
 
 /* The one place that decides whether a timer should exist. A blink timer runs
- * exactly while this pane is focused, still has a shell, and the app has asked
- * for a blinking cursor — an unfocused pane draws a hollow block whatever it
+ * exactly while this pane is focused, still has a shell, and either the app
+ * has asked for a blinking cursor or the frame just drawn held a blinking
+ * cell — an unfocused pane draws a hollow block and steady text whatever it
  * was asked for, so a timer there would burn a wakeup a second to animate
  * nothing. Every input to that answer calls back here when it changes:
- * focus-in, focus-out, the sync in snapshot, the child exiting, and dispose. */
+ * focus-in, focus-out, the sync in snapshot (where blink_wanted and
+ * text_blink are both freshly known), the child exiting, and dispose. */
 static void sync_blink_timer(PtTerminal *t) {
-  gboolean want = t->focused && !t->exited && t->blink_wanted;
+  gboolean want = t->focused && !t->exited && (t->blink_wanted || t->text_blink);
   if (want == (t->blink_source != 0)) return;
   if (want)
     blink_timer_start(t);
@@ -252,8 +270,20 @@ static void core_output(PtTermCore *core, gpointer user) {
 }
 
 static void core_draw(PtTermCore *core, gpointer user) {
-  (void)core;
   PtTerminal *t = PT_TERMINAL(user);
+  /* A synchronized-output frame is not done yet: painting now would show the
+   * half of it the app has written so far, then tear again when the rest
+   * lands. Ghostty's renderer stops entirely for the same reason and the
+   * same window (renderer/generic.zig:1176-1180); pt just skips the queue
+   * here rather than the eventual draw call, since nothing has changed to
+   * paint until the flag drops.
+   *
+   * This also delays repaints this callback fires for reasons that have
+   * nothing to do with the pty — scrollback scrolling and selection clears
+   * both route through cbs.draw — for as long as the sync window holds. That
+   * matches ghostty, whose whole renderer freezes the same way, and is not a
+   * bug to "fix" by carving out an exception for them. */
+  if (pt_term_core_sync_output(core)) return;
   gtk_widget_queue_draw(GTK_WIDGET(t));
   update_link_cursor(t);       /* the grid just moved under the pointer */
 }
@@ -537,40 +567,357 @@ static void flush_run(GtkSnapshot *snapshot, PangoFont *font,
   run->num_glyphs = 0;
 }
 
-/* ---- link underlines ----
+/* ---- decorations ----
  *
- * Linked cells get an underline, which is the only thing that tells a user a
- * run of text is clickable at all. Drawn as a pass over the row's flat cells
- * after its backgrounds went down (a background painted later would cover the
- * line), and only for rows carrying a link at all. The colour is resolved the
- * same way the glyph's is, inverse included — under inverse video the cell's
- * foreground is what got painted *behind* the text, so an underline in it is a
- * line the same colour as the block it sits on. Selection only replaces the
- * background, so it leaves this alone, exactly as it leaves the glyph colour
- * alone.
+ * Everything drawn from a cell's style bits and its underline field: SGR
+ * underline (five shapes), overline, strikethrough, and the pt-only link
+ * underline. Split into two passes on either side of the glyph pass, in the
+ * same order ghostty's renderer composites them in (generic.zig:2946-2963
+ * for underline/overline, :3042-3048 for strikethrough) even though ghostty
+ * writes the per-cell code for all of it in one x-loop — its background,
+ * underline/overline, glyph and strikethrough cells land in separate GPU
+ * buffers that get drawn in that fixed order regardless of loop order, so
+ * the *loop* order there is not the *paint* order. GTK has no such split:
+ * a GskRenderNode snapshot is painted in the order it was appended, so pt
+ * has to walk the row twice more (once before the glyphs, once after) to
+ * get the same z-order ghostty gets for free. Ghostty's stated reason is
+ * readability: "We draw underlines first so that they layer underneath
+ * text. This improves readability when a colored underline is used which
+ * intersects parts of the text (descenders)" (generic.zig:2946-2948) — an
+ * underline sits close enough to the baseline that a g, y, p, q or j's
+ * descender reaches into it, and a solid colored bar painted on top of that
+ * descender reads worse than one painted under it. Strikethrough has no such
+ * problem (it crosses the letter's body, not a descender) and ghostty draws
+ * it after the glyph too, so pt matches that as well rather than inventing
+ * a different rule for it.
  *
- * Two kinds of link land here. An OSC 8 cell is underlined whenever it is on
- * screen, because the program declared it and the underline is what says so.
- * A bare URL is underlined only over the columns [span_a, span_b] of this row,
- * and only while it is the one under the pointer with the modifier down —
+ * draw_row_underline_overline runs right after the row's backgrounds, before
+ * any glyph in the row is drawn, and is also where pt's link underline is
+ * decided now (see below). draw_row_strike runs after the row's glyphs and
+ * draws strikethrough only.
+ *
+ * Colour: an SGR underline uses `underline_color` when the cell set one
+ * (SGR 58), otherwise the cell's own resolved foreground, same as ghostty
+ * (generic.zig:2951, `style.underlineColor(&state.colors.palette) orelse
+ * fg`). This applies whether the underline came from the cell's own SGR 4 or
+ * from the link merge below — ghostty's colour lookup runs after the merge
+ * and does not care which one produced it. Strikethrough and overline always
+ * use the resolved foreground — ghostty never lets SGR 58 touch them; its
+ * addOverline and addStrikethrough calls both pass `fg`, not the underline
+ * colour. Faint multiplies every decoration's alpha by the same factor the
+ * glyph gets: 0.5, ghostty's `faint-opacity` default (config/Config.zig:
+ * 3716), applied at all four call sites in generic.zig (:2954, :2962, :3033,
+ * :3048). pt has no setting for this, so 0.5 is a literal, matched to the
+ * reference implementation.
+ *
+ * Invisible and the link merge, in ghostty's order (generic.zig:2920-2944):
+ * the `continue` for an invisible cell (:2920-2930) runs before the link
+ * merge that decides whether a cell gets a link's underline (:2930-2944), so
+ * an invisible cell never reaches the merge at all and draws no underline,
+ * link or SGR, same as it draws no glyph, overline or strikethrough. pt
+ * matches that by gating `is_link` on `!invisible` before it ever asks
+ * whether the cell is a link.
+ *
+ * Blink is not read here at all: it hides the glyph itself (see the glyph
+ * loop), not what decorates it. A blinking, underlined word keeps its
+ * underline solid through the off phase, the way most terminals that blink
+ * text at all still leave the line under it alone.
+ *
+ * Link underline: ghostty never draws two underlines on one cell
+ * (generic.zig:2930-2944, `Give links a single underline, unless they
+ * already have an underline, in which case use a double underline to
+ * distinguish them`). pt used to keep its own separate 1px link underline
+ * and draw it in addition to any SGR underline, which could put two lines
+ * under one linked, underlined cell; that was wrong and pt now follows
+ * ghostty's rule exactly. The decision is made once per cell, before
+ * anything about that cell is drawn: if the cell is a link and its SGR
+ * underline is SINGLE, draw DOUBLE; if it is a link in any other SGR state
+ * (including none), draw SINGLE; if it is not a link, draw its own SGR
+ * underline unchanged. There is no longer a separate link pass or a
+ * separate link geometry — a link's underline is an ordinary underline at
+ * the SGR geometry's `underline_y`, merged into the same run machinery as
+ * everything else below.
+ *
+ * Two kinds of link feed that decision. An OSC 8 cell counts as a link
+ * whenever it is on screen, because the program declared it. A bare URL
+ * counts as a link only over the columns [span_a, span_b] of this row, and
+ * only while it is the one under the pointer with the modifier down —
  * ghostty highlights its regex links on hover too, for the same reason:
- * every address in a build log underlined at once is noise, not information.
- * span_a > span_b means this row has no such span. */
-static void draw_row_underlines(PtTerminal *t, GtkSnapshot *snapshot,
-                                const PtCell *cells, int n, int y,
-                                PtColor bg_default, int span_a, int span_b) {
-  int uy = MIN(y + t->baseline + 2, y + t->cell_h - 1);
+ * every address in a build log underlined at once is noise, not
+ * information. span_a > span_b means this row has no such span.
+ *
+ * Runs: single and double underline, and overline, are plain rects, so
+ * adjacent cells that agree on shape and colour merge into one rect, the
+ * way the background pass merges adjacent cells (:882-919 above).
+ * Strikethrough merges the same way in the second pass. Curly, dotted and
+ * dashed do not merge: each is a periodic shape whose period ghostty ties to
+ * a single cell width by drawing it from a per-cell sprite and tiling that
+ * sprite at every column (font/sprite/draw/special.zig) — dashed included,
+ * since its dash_width and dash_count are computed from the sprite's own
+ * cell-width canvas, not from however long the underlined run turns out to
+ * be. An earlier version of this pass merged dashed with single and double,
+ * on the theory that only curly and dotted needed the per-cell restart; that
+ * was wrong; computing dash_width from a merged run's width scales the dash
+ * period with the length of the word, which is not what a dashed underline
+ * looks like anywhere else, ghostty included. So dashed joins curly and
+ * dotted in drawing once per cell regardless of what its neighbours are
+ * doing. */
+
+static void draw_rect(GtkSnapshot *snapshot, float x, float y, float w,
+                      float h, const GdkRGBA *color) {
+  gtk_snapshot_append_color(snapshot, color, &GRAPHENE_RECT_INIT(x, y, w, h));
+}
+
+/* One cycle of a sine-shaped wave per cell, geometry matched to ghostty's
+ * underline_curly (font/sprite/draw/special.zig:162-235): amplitude = cell
+ * width / pi, two cubic beziers meeting at the cell's centre with 0.4
+ * curvature, round caps, stroke width = underline_thickness. `top` is
+ * clamped so the wave cannot draw below the row it belongs to — the same job
+ * ghostty's canvas clamp does for its sprite. */
+static void draw_underline_curly(PtTerminal *t, GtkSnapshot *snapshot,
+                                 int x, int y, const GdkRGBA *color) {
+  double w = t->cell_w;
+  double th = t->underline_thickness;
+  double amplitude = w / G_PI;
+  double top_max = MAX(0.0, t->cell_h - amplitude - th);
+  double top = MIN((double)t->underline_y, top_max);
+  double bottom = top + amplitude;
+  double center = 0.5 * w;
+  double r = 0.4;
+
+  GskPathBuilder *pb = gsk_path_builder_new();
+  gsk_path_builder_move_to(pb, (float)x, (float)(y + bottom));
+  gsk_path_builder_cubic_to(pb,
+      (float)(x + center * r), (float)(y + bottom),
+      (float)(x + center - center * r), (float)(y + top),
+      (float)(x + center), (float)(y + top));
+  gsk_path_builder_cubic_to(pb,
+      (float)(x + center + center * r), (float)(y + top),
+      (float)(x + w - center * r), (float)(y + bottom),
+      (float)(x + w), (float)(y + bottom));
+  GskPath *path = gsk_path_builder_free_to_path(pb);
+  GskStroke *stroke = gsk_stroke_new((float)th);
+  gsk_stroke_set_line_cap(stroke, GSK_LINE_CAP_ROUND);
+  gtk_snapshot_append_stroke(snapshot, path, stroke, color);
+  gsk_stroke_free(stroke);
+  gsk_path_unref(path);
+}
+
+/* A row of filled circles, radius and spacing matched to ghostty's
+ * underline_dotted (font/sprite/draw/special.zig:72-129): radius =
+ * sqrt(1/2) * underline_thickness (a circle at the underline's own thickness
+ * looks anemic), dot count is the largest value that keeps the gaps no
+ * smaller than a dot's radius and no larger than its diameter, floored at
+ * one dot per cell, and the cell is split into that many equal slots with
+ * one dot centred in each. */
+static void draw_underline_dotted(PtTerminal *t, GtkSnapshot *snapshot,
+                                  int x, int y, const GdkRGBA *color) {
+  double w = t->cell_w;
+  double th = t->underline_thickness;
+  double radius = (G_SQRT2 / 2.0) * th;
+  double cy = MIN(t->underline_y + 0.5 * th, t->cell_h - ceil(radius));
+  if (cy < 0) cy = 0;
+  double count = MAX(1.0, MIN(MIN(ceil(w / (4 * radius)),
+                                  floor(w / (3 * radius))),
+                              floor(w / (2 * radius + 1))));
+  double slot = w / count;
+  double cx = slot / 2;
+
+  GskPathBuilder *pb = gsk_path_builder_new();
+  for (int i = 0; i < (int)count; i++) {
+    gsk_path_builder_add_circle(pb,
+        &GRAPHENE_POINT_INIT((float)(x + cx), (float)(y + cy)), (float)radius);
+    cx += slot;
+  }
+  GskPath *path = gsk_path_builder_free_to_path(pb);
+  gtk_snapshot_append_fill(snapshot, path, GSK_FILL_RULE_WINDING, color);
+  gsk_path_unref(path);
+}
+
+/* One cell's worth of dashes, dash_width and dash_count from special.zig:
+ * 131-160, computed from this single cell's width so the period matches
+ * ghostty's per-cell sprite exactly — see the header comment above for why
+ * this is not merged into a wider run the way single/double/overline are. */
+static void draw_underline_dashed(PtTerminal *t, GtkSnapshot *snapshot,
+                                  int x, int y, const GdkRGBA *color) {
+  int w = t->cell_w;
+  int dash_w = w / 3 + 1;
+  int dash_count = w / dash_w + 1;
+  for (int i = 0; i < dash_count; i += 2)
+    draw_rect(snapshot, x + i * dash_w, y + t->underline_y, dash_w,
+              t->underline_thickness, color);
+}
+
+/* Which straight-rect decoration a flushed run is: underline (only single or
+ * double ever reach here now — curly, dotted and dashed are drawn per-cell,
+ * see above), strikethrough or overline. The three share the merge-and-flush
+ * shape below but draw at different y-offsets. */
+typedef enum { PT_DECO_UNDERLINE, PT_DECO_STRIKE, PT_DECO_OVERLINE } PtDecoKind;
+
+static void draw_straight_run(PtTerminal *t, GtkSnapshot *snapshot,
+                              PtDecoKind kind, PtUnderline style,
+                              int x, int y, int w, const GdkRGBA *color) {
+  if (kind == PT_DECO_STRIKE) {
+    draw_rect(snapshot, x, y + t->strike_y, w, t->strike_thickness, color);
+    return;
+  }
+  if (kind == PT_DECO_OVERLINE) {
+    /* Ghostty pins overline to the top of the cell with the underline's own
+     * thickness (Metrics.zig:298-318: overline_position = 0, overline_
+     * thickness = underline_thickness), so there is no separate field for
+     * it to draw from. */
+    draw_rect(snapshot, x, y, w, t->underline_thickness, color);
+    return;
+  }
+  switch (style) {
+    case PT_UNDERLINE_SINGLE:
+      draw_rect(snapshot, x, y + t->underline_y, w, t->underline_thickness, color);
+      break;
+    case PT_UNDERLINE_DOUBLE: {
+      /* Two rects at underline_y ± one thickness; the row the single
+       * underline would occupy is left empty between them (special.zig:
+       * 38-70). Each offset is clamped into the row on its own — going one
+       * thickness either side of an already-clamped underline_y can still
+       * walk off the top or bottom for a font with an extreme metric. */
+      int th = t->underline_thickness;
+      int top_max = MAX(0, t->cell_h - th);
+      int y0 = CLAMP(t->underline_y - th, 0, top_max);
+      int y1 = CLAMP(t->underline_y + th, 0, top_max);
+      draw_rect(snapshot, x, y + y0, w, th, color);
+      draw_rect(snapshot, x, y + y1, w, th, color);
+      break;
+    }
+    default: break;   /* NONE/CURLY/DOTTED/DASHED never reach a run */
+  }
+}
+
+/* First of the two decoration passes: SGR underline and overline, drawn
+ * before this row's glyphs so a colored underline sits under a descender
+ * rather than over it (see the header comment). Backgrounds are already
+ * down by the time this runs. This is also where a link's underline is
+ * decided, folded into the same per-cell u_kind so a cell never ends up
+ * with two underlines (see the header comment's "Link underline"
+ * paragraph). span_a/span_b are the bare-URL hover span's columns on this
+ * row; span_a > span_b means there is none. */
+static void draw_row_underline_overline(PtTerminal *t, GtkSnapshot *snapshot,
+                                        const PtCell *cells, int n, int y,
+                                        PtColor bg_default, int span_a,
+                                        int span_b) {
+  gboolean u_open = FALSE;
+  PtUnderline u_style = PT_UNDERLINE_NONE;
+  GdkRGBA u_color = { 0, 0, 0, 0 };
+  int u_x = 0, u_w = 0;
+
+  gboolean o_open = FALSE;
+  GdkRGBA o_color = { 0, 0, 0, 0 };
+  int o_x = 0, o_w = 0;
+
   int x = pad_x;
   for (int i = 0; i < n; i++, x += t->cell_w) {
     const PtCell *cl = &cells[i];
-    if (!cl->has_link && !(i >= span_a && i <= span_b)) continue;
+    gboolean invisible = (cl->style & PT_CELL_STYLE_INVISIBLE) != 0;
     PtColor fg = cl->fg;
     if (cl->style & PT_CELL_STYLE_INVERSE)
       fg = cl->has_bg ? cl->bg : bg_default;
-    gtk_snapshot_append_color(snapshot,
-        &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1},
-        &GRAPHENE_RECT_INIT(x, uy, t->cell_w, 1));
+    float alpha = (cl->style & PT_CELL_STYLE_FAINT) ? 0.5f : 1.0f;
+    GdkRGBA fg_rgba = { fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, alpha };
+
+    /* Link merge (generic.zig:2930-2944): a link cell that already had a
+     * single underline gets a double one to stand out from it; a link cell
+     * in any other SGR state, including none, gets a single one; a
+     * non-link cell keeps its own SGR underline untouched. Gated on
+     * !invisible first, matching ghostty's `continue` at :2920-2930 firing
+     * before the merge ever runs, so an invisible cell never becomes a
+     * link underline either. */
+    gboolean is_link = !invisible &&
+        (cl->has_link || (i >= span_a && i <= span_b));
+    PtUnderline sgr_kind = invisible ? PT_UNDERLINE_NONE : (PtUnderline)cl->underline;
+    PtUnderline u_kind = is_link
+        ? (sgr_kind == PT_UNDERLINE_SINGLE ? PT_UNDERLINE_DOUBLE : PT_UNDERLINE_SINGLE)
+        : sgr_kind;
+    GdkRGBA u_want = fg_rgba;
+    if (u_kind != PT_UNDERLINE_NONE && cl->has_underline_color) {
+      PtColor uc = cl->underline_color;
+      u_want = (GdkRGBA){ uc.r / 255.0f, uc.g / 255.0f, uc.b / 255.0f, alpha };
+    }
+
+    if (u_kind == PT_UNDERLINE_CURLY || u_kind == PT_UNDERLINE_DOTTED ||
+        u_kind == PT_UNDERLINE_DASHED) {
+      if (u_open) {
+        draw_straight_run(t, snapshot, PT_DECO_UNDERLINE, u_style, u_x, y, u_w, &u_color);
+        u_open = FALSE;
+      }
+      if (u_kind == PT_UNDERLINE_CURLY)
+        draw_underline_curly(t, snapshot, x, y, &u_want);
+      else if (u_kind == PT_UNDERLINE_DOTTED)
+        draw_underline_dotted(t, snapshot, x, y, &u_want);
+      else
+        draw_underline_dashed(t, snapshot, x, y, &u_want);
+    } else {
+      if (u_open && (u_kind != u_style || !gdk_rgba_equal(&u_want, &u_color))) {
+        draw_straight_run(t, snapshot, PT_DECO_UNDERLINE, u_style, u_x, y, u_w, &u_color);
+        u_open = FALSE;
+      }
+      if (u_kind != PT_UNDERLINE_NONE) {
+        if (!u_open) { u_open = TRUE; u_style = u_kind; u_color = u_want; u_x = x; u_w = t->cell_w; }
+        else u_w += t->cell_w;
+      }
+    }
+
+    /* overline: its own run, keyed on its own on/off state and the resolved
+     * foreground alone — it never takes the underline colour, see the
+     * header comment above. */
+    gboolean want_overline = !invisible && (cl->style & PT_CELL_STYLE_OVERLINE);
+    if (o_open && (!want_overline || !gdk_rgba_equal(&fg_rgba, &o_color))) {
+      draw_straight_run(t, snapshot, PT_DECO_OVERLINE, PT_UNDERLINE_NONE, o_x, y, o_w, &o_color);
+      o_open = FALSE;
+    }
+    if (want_overline) {
+      if (!o_open) { o_open = TRUE; o_color = fg_rgba; o_x = x; o_w = t->cell_w; }
+      else o_w += t->cell_w;
+    }
   }
+
+  if (u_open) draw_straight_run(t, snapshot, PT_DECO_UNDERLINE, u_style, u_x, y, u_w, &u_color);
+  if (o_open) draw_straight_run(t, snapshot, PT_DECO_OVERLINE, PT_UNDERLINE_NONE, o_x, y, o_w, &o_color);
+}
+
+/* Second of the two decoration passes: strikethrough, drawn after this row's
+ * glyphs the same way ghostty draws it (generic.zig:3042-3048, after the
+ * glyph call in its own per-cell loop) — a strikethrough crosses the body of
+ * a letter rather than reaching into a descender, so there is no readability
+ * reason to put it under the glyph the way underline/overline are. The link
+ * underline no longer has a pass of its own; it is folded into the SGR
+ * underline decision in draw_row_underline_overline above. */
+static void draw_row_strike(PtTerminal *t, GtkSnapshot *snapshot,
+                            const PtCell *cells, int n, int y,
+                            PtColor bg_default) {
+  gboolean s_open = FALSE;
+  GdkRGBA s_color = { 0, 0, 0, 0 };
+  int s_x = 0, s_w = 0;
+
+  int x = pad_x;
+  for (int i = 0; i < n; i++, x += t->cell_w) {
+    const PtCell *cl = &cells[i];
+    gboolean invisible = (cl->style & PT_CELL_STYLE_INVISIBLE) != 0;
+    PtColor fg = cl->fg;
+    if (cl->style & PT_CELL_STYLE_INVERSE)
+      fg = cl->has_bg ? cl->bg : bg_default;
+    float alpha = (cl->style & PT_CELL_STYLE_FAINT) ? 0.5f : 1.0f;
+    GdkRGBA fg_rgba = { fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, alpha };
+
+    gboolean want_strike = !invisible && (cl->style & PT_CELL_STYLE_STRIKE);
+    if (s_open && (!want_strike || !gdk_rgba_equal(&fg_rgba, &s_color))) {
+      draw_straight_run(t, snapshot, PT_DECO_STRIKE, PT_UNDERLINE_NONE, s_x, y, s_w, &s_color);
+      s_open = FALSE;
+    }
+    if (want_strike) {
+      if (!s_open) { s_open = TRUE; s_color = fg_rgba; s_x = x; s_w = t->cell_w; }
+      else s_w += t->cell_w;
+    }
+  }
+
+  if (s_open) draw_straight_run(t, snapshot, PT_DECO_STRIKE, PT_UNDERLINE_NONE, s_x, y, s_w, &s_color);
 }
 
 /* ---- geometry ---- */
@@ -584,10 +931,40 @@ static void measure_font(PtTerminal *t) {
   /* Text nodes are positioned by baseline, not by the layout's top-left the
    * way gtk_snapshot_append_layout was. */
   t->baseline = PANGO_PIXELS(pango_font_metrics_get_ascent(m));
+
+  /* Underline/strikethrough geometry, matched to ghostty's own formulas
+   * (build/_deps/ghostty-src/src/font/Metrics.zig:298-318): thickness is the
+   * face's own thickness rounded up with a 1px floor, position is the face's
+   * own distance from the baseline rounded to the nearest pixel. Pango
+   * reports both distances in font units with "above the baseline" positive,
+   * so baseline - PANGO_PIXELS(position) is ghostty's
+   * top_to_baseline - facePosition(). Overline has no face metric of its
+   * own — ghostty pins it to the top of the cell and reuses the underline's
+   * own thickness (same Metrics.zig lines) — so the decoration pass below
+   * draws it at y=0 with underline_thickness rather than a field of its own.
+   * Measured once per font change, same as the rest of this function, rather
+   * than once per frame. */
+  t->underline_thickness = (int)ceil(
+      pango_font_metrics_get_underline_thickness(m) / (double)PANGO_SCALE);
+  t->underline_y = t->baseline - (int)lround(
+      pango_font_metrics_get_underline_position(m) / (double)PANGO_SCALE);
+  t->strike_thickness = (int)ceil(
+      pango_font_metrics_get_strikethrough_thickness(m) / (double)PANGO_SCALE);
+  t->strike_y = t->baseline - (int)lround(
+      pango_font_metrics_get_strikethrough_position(m) / (double)PANGO_SCALE);
+
   pango_font_metrics_unref(m);
   if (t->cell_w < 1) t->cell_w = 8;
   if (t->cell_h < 1) t->cell_h = 16;
   if (t->baseline < 1) t->baseline = t->cell_h;
+  /* Same defensive floor as cell_w/cell_h/baseline above: a font reporting
+   * garbage metrics must not hand the decoration pass a zero-or-negative
+   * thickness, or a y that has walked off the row the glyph itself sits in. */
+  if (t->underline_thickness < 1) t->underline_thickness = 1;
+  if (t->strike_thickness < 1) t->strike_thickness = 1;
+  t->underline_y = CLAMP(t->underline_y, 0,
+                         MAX(0, t->cell_h - t->underline_thickness));
+  t->strike_y = CLAMP(t->strike_y, 0, MAX(0, t->cell_h - t->strike_thickness));
   /* Cached advances are in terms of cell_w, and the cached font follows the
    * description — both just changed. */
   glyph_cache_clear();
@@ -843,8 +1220,19 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   }
   /* Sync only when the core says a frame would differ. Focus, scrim, blink
    * and bar-fade repaints redraw from what the last sync left in place, which
-   * is byte-identical — the state only moves when the serial does. */
-  if (pt_term_core_take_render_dirty(t->core))
+   * is byte-identical — the state only moves when the serial does.
+   *
+   * While synchronized output is held, skip the sync even if the dirty flag
+   * is set. core_draw already stopped queuing repaints for this reason, but
+   * one of those same focus/blink/bar-fade paths can still reach a snapshot
+   * on its own, and syncing here would pull the child's half-drawn frame
+   * onto the screen despite core_draw's refusal to ask for it. Critically,
+   * the flag must be left unconsumed rather than taken and discarded — it
+   * has to still be there for pt_term_core_take_render_dirty to see when the
+   * real ESU lands and calls back into core_draw, or that first post-hold
+   * frame would sync nothing. Mirrors ghostty's renderer bailing out of the
+   * whole frame under the same condition (renderer/generic.zig:1176-1180). */
+  if (!pt_term_core_sync_output(t->core) && pt_term_core_take_render_dirty(t->core))
     pt_term_core_sync(t->core);
 
   /* The effective default background: the theme's, unless a program moved it
@@ -876,21 +1264,54 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
   PtRowReader *rows = pt_term_core_rows_begin(t->core);
   int ncells;
   int row_i = -1;               /* the visible row the walk stands on */
+  /* Whether any cell in the viewport just walked carries SGR 5 — folded into
+   * sync_blink_timer's predicate below once the walk finishes, since that is
+   * the earliest point this frame knows the answer. See the text_blink field
+   * comment on the struct for why this lives here instead of a core
+   * accessor. */
+  gboolean text_blink = FALSE;
   while (rows != NULL &&
          (ncells = pt_term_core_rows_next(rows, &cells)) >= 0) {
     row_i++;
+    /* The highlighted bare URL's columns on this row, if it reaches it: the
+     * whole row between its first and last, and the head or tail on those.
+     * Computed here, before the underline/overline pass below, because that
+     * pass is now where the link/underline merge happens (see the ----
+     * decorations ---- comment's "Link underline" paragraph) and needs to
+     * know a cell's link status before it draws anything. */
+    int span_a = 0, span_b = -1;
+    if (t->url_uri != NULL && row_i >= t->url_r0 && row_i <= t->url_r1) {
+      span_a = row_i == t->url_r0 ? t->url_c0 : 0;
+      span_b = row_i == t->url_r1 ? t->url_c1 : ncells - 1;
+    }
     /* Backgrounds first, merged: adjacent cells with the same effective
      * background (selection included) become one rect, the way adjacent
      * glyphs already share one text node. Laying the whole row's backgrounds
      * down before any of its glyphs is what makes the merge safe — no rect
      * appended here can cover a glyph. */
-    gboolean row_linked = FALSE;
+    /* Whether each decoration pass below has anything at all to do for this
+     * row, so a row of plain text (the overwhelming majority in practice)
+     * skips a second or third full walk of its cells rather than calling in
+     * to find out it had nothing to draw. False positives (a bit set on a
+     * cell that turns out invisible) just mean the call happens and draws
+     * nothing; only a false negative would be wrong, and there is none here
+     * since every bit either pass reads is read here too. Split in two
+     * because the two passes now run on opposite sides of the glyph loop —
+     * see the ---- decorations ---- comment below. row_has_uo now also
+     * covers a link cell, since a link is folded into the underline decision
+     * in that pass rather than drawn separately. */
+    gboolean row_has_uo = FALSE;     /* underline/overline pass */
+    gboolean row_has_strike = FALSE; /* strikethrough pass */
     int bg_x = 0, bg_w = 0;
     GdkRGBA bg_color = { 0, 0, 0, 0 };
     int x = pad_x;
     for (int i = 0; i < ncells; i++, x += t->cell_w) {
       const PtCell *cl = &cells[i];
-      row_linked |= cl->has_link;
+      row_has_uo |= cl->underline != PT_UNDERLINE_NONE ||
+          (cl->style & PT_CELL_STYLE_OVERLINE) != 0 || cl->has_link ||
+          (i >= span_a && i <= span_b);
+      row_has_strike |= (cl->style & PT_CELL_STYLE_STRIKE) != 0;
+      text_blink |= (cl->style & PT_CELL_STYLE_BLINK) != 0;
       gboolean paint = TRUE;
       GdkRGBA color = { 0, 0, 0, 0 };
       if (cl->selected)
@@ -918,7 +1339,16 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
       gtk_snapshot_append_color(snapshot, &bg_color,
           &GRAPHENE_RECT_INIT(bg_x, y, bg_w, t->cell_h));
 
-    /* Glyphs second, over the row's backgrounds. */
+    /* SGR underline and overline next, under the glyphs that are about to go
+     * down — see the ---- decorations ---- comment for why this pass has to
+     * come before the glyph loop rather than after it, the way it used to.
+     * This is also where a link cell's underline is decided, so span_a/
+     * span_b travel in here too. */
+    if (row_has_uo)
+      draw_row_underline_overline(t, snapshot, cells, ncells, y, bg_default,
+                                  span_a, span_b);
+
+    /* Glyphs third, over the row's backgrounds and its underline/overline. */
     x = pad_x;
     for (int i = 0; i < ncells; i++, x += t->cell_w) {
       const PtCell *cl = &cells[i];
@@ -935,11 +1365,42 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
         flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
         continue;
       }
+      /* INVISIBLE hides the glyph outright: ghostty `continue`s past an
+       * invisible cell before it ever reaches the underline/overline code
+       * (generic.zig:2920-2930), so the decoration pass below never sees
+       * this cell either — invisible hides the whole cell, not just the
+       * text, and the comment there says the choice is deliberate, to match
+       * xterm rather than Alacritty.
+       *
+       * BLINK has no ghostty analogue at all — ghostty parses SGR 5 into
+       * style.flags.blink but its renderer never reads it (grep -rn
+       * "flags.blink" src/renderer/ in the vendored tree is empty; ghostty
+       * does not blink text). pt implements it anyway, going further than
+       * ghostty on purpose, and reuses the cursor's own timer and phase
+       * (sync_blink_timer, blink_visible) so the two blink together instead
+       * of at odds — a page with a blinking cursor next to blinking text
+       * that blinked out of sync would be worse than either alone. An
+       * unfocused pane's blink_visible is pinned TRUE by blink_timer_stop,
+       * so this never hides text in a pane that is not focused, matching
+       * the cursor's own "unfocused never blinks" rule. */
+      gboolean invisible = (cl->style & PT_CELL_STYLE_INVISIBLE) != 0;
+      gboolean blink_off =
+          (cl->style & PT_CELL_STYLE_BLINK) != 0 && !t->blink_visible;
+      if (invisible || blink_off) {
+        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
+        continue;
+      }
       /* Under inverse video the glyph takes the cell's background colour;
        * the cell's own fg went down behind it in the first pass. */
       PtColor fg = (cl->style & PT_CELL_STYLE_INVERSE)
                        ? (cl->has_bg ? cl->bg : bg_default)
                        : cl->fg;
+      /* FAINT multiplies the glyph's alpha by ghostty's faint-opacity
+       * default, 0.5 (config/Config.zig:3716, applied at generic.zig:2878
+       * and carried into every foreground draw for the cell) — pt has no
+       * setting for this either, so 0.5 is a literal matched to the
+       * reference implementation, same as the decoration pass above. */
+      float alpha = (cl->style & PT_CELL_STYLE_FAINT) ? 0.5f : 1.0f;
 
       /* Block elements are drawn from the cell metrics, never shaped: the
        * font's ink is narrower than the rounded cell width, which seams every
@@ -951,7 +1412,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
         for (int r = 0; r < nrects; r++)
           gtk_snapshot_append_color(snapshot,
               &(GdkRGBA){fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f,
-                         rects[r].alpha},
+                         rects[r].alpha * alpha},
               &GRAPHENE_RECT_INIT(x + rects[r].x * t->cell_w,
                                   y + rects[r].y * t->cell_h,
                                   rects[r].w * t->cell_w,
@@ -965,7 +1426,7 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
                        (cl->style & PT_CELL_STYLE_ITALIC) != 0);
       if (ge == NULL) continue;
 
-      GdkRGBA fg_rgba = { fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, 1 };
+      GdkRGBA fg_rgba = { fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, alpha };
       if (run->num_glyphs > 0 &&
           (ge->font != run_font || !gdk_rgba_equal(&fg_rgba, &run_color)))
         flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
@@ -982,26 +1443,23 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
         run->log_clusters[at + g] = at + g;
     }
     flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
-    /* The highlighted bare URL's columns on this row, if it reaches it: the
-     * whole row between its first and last, and the head or tail on those. */
-    int span_a = 0, span_b = -1;
-    if (t->url_uri != NULL && row_i >= t->url_r0 && row_i <= t->url_r1) {
-      span_a = row_i == t->url_r0 ? t->url_c0 : 0;
-      span_b = row_i == t->url_r1 ? t->url_c1 : ncells - 1;
-    }
-    if (row_linked || span_a <= span_b)
-      draw_row_underlines(t, snapshot, cells, ncells, y, bg_default,
-                          span_a, span_b);
+    /* Strikethrough last, over the glyphs — see the ---- decorations ----
+     * comment for why strikethrough stayed on this side while
+     * underline/overline (and the link merge) moved to the other. */
+    if (row_has_strike)
+      draw_row_strike(t, snapshot, cells, ncells, y, bg_default);
     y += t->cell_h;
   }
   pt_term_core_rows_end(rows);
   pango_glyph_string_free(run);
+  t->text_blink = text_blink;
 
   /* cursor: one core call carries position, style, blink, color and width. */
   PtCursorInfo ci;
   gboolean cursor_in_vp = pt_term_core_cursor_info(t->core, &ci);
   t->blink_wanted = ci.blinking;
-  sync_blink_timer(t);         /* the app may have just started or stopped it */
+  sync_blink_timer(t);         /* the app or the frame just walked may have
+                                 * started or stopped wanting a timer */
   PtCursorShape shape = cursor_shape(t, cursor_in_vp, &ci);
   if (shape != PT_CURSOR_NONE) {
     /* A wide character owns two cells and the cursor has to cover both, or it
