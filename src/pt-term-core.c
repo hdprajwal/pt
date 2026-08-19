@@ -115,16 +115,33 @@ static bool effect_size(GhosttyTerminal t, void *ud,
   return true;
 }
 
+/* CSI c and CSI > c, the other two answers a program fingerprints a terminal
+ * with. Ghostty writes them as fixed strings, `?62;22;52c` and `>1;10;0c`, and
+ * pt says the same through the library's struct
+ * (termio/stream_handler.zig:812-834). It quacks as a VT220 rather than a VT420
+ * because it implements no DCS sequences, which is ghostty's own note there.
+ *
+ * Feature 52 is clipboard access, and it follows the osc52 setting exactly as
+ * ghostty's follows `clipboard-write`: a pane that will not write the clipboard
+ * must not advertise that it will. The terminfo entry pt ships declares Ms for
+ * the same capability, so the two would otherwise disagree at the default.
+ *
+ * DA2's second field is the firmware version, and 10 is ghostty's number. It
+ * has nothing to do with PT_TERM_PROGRAM_VERSION below and does not track it:
+ * this field is what a program that knows ghostty compares against. */
 static bool effect_device_attributes(GhosttyTerminal t, void *ud,
                                      GhosttyDeviceAttributes *out) {
-  (void)t; (void)ud;
+  (void)t;
+  PtTermCore *c = ud;
   out->primary.conformance_level = GHOSTTY_DA_CONFORMANCE_VT220;
-  out->primary.features[0] = GHOSTTY_DA_FEATURE_COLUMNS_132;
-  out->primary.features[1] = GHOSTTY_DA_FEATURE_SELECTIVE_ERASE;
-  out->primary.features[2] = GHOSTTY_DA_FEATURE_ANSI_COLOR;
-  out->primary.num_features = 3;
+  out->primary.features[0] = GHOSTTY_DA_FEATURE_ANSI_COLOR;
+  out->primary.num_features = 1;
+  if (c->osc52 != PT_OSC52_OFF) {
+    out->primary.features[1] = GHOSTTY_DA_FEATURE_CLIPBOARD;
+    out->primary.num_features = 2;
+  }
   out->secondary.device_type = GHOSTTY_DA_DEVICE_TYPE_VT220;
-  out->secondary.firmware_version = 1;
+  out->secondary.firmware_version = 10;
   out->secondary.rom_cartridge = 0;
   out->tertiary.unit_id = 0;
   return true;

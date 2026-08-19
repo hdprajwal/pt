@@ -3375,6 +3375,36 @@ static void test_xtversion_names_ghostty(void) {
   pt_term_core_free(core);
 }
 
+/* CSI c and CSI > c, the same `cat -v` recipe again. Both answers are pinned
+ * byte for byte because both are compared byte for byte by what reads them:
+ * these are the strings a program that fingerprints ghostty by device
+ * attributes is looking for (termio/stream_handler.zig:812-834). */
+static void test_device_attributes_match_ghostty(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[c\\033[>c'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "^[[?62;22;52c^[[>1;10;0c"));
+  pt_term_core_free(core);
+}
+
+/* Feature 52 says the terminal will take a clipboard write, so a pane with
+ * osc52 off has to stop claiming it. Ghostty drops the same feature when
+ * `clipboard-write` is `deny`. The mode is set before the main loop runs, so
+ * it is in place before the parent parses anything the child wrote — the same
+ * ordering run_osc52 relies on. */
+static void test_device_attributes_drop_clipboard(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "stty -echo -icanon; printf '\\033[c'; cat -v", NULL};
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  pt_term_core_set_osc52(core, PT_OSC52_OFF);
+  g_assert_true(wait_for_text(core, "^[[?62;22c"));
+  pt_term_core_free(core);
+}
+
 int main(int argc, char *argv[]) {
   /* Report paths come off $XDG_STATE_HOME, and the pane-token tests write real
      files: point them at a temp dir so a test run never touches the state of
@@ -3550,6 +3580,10 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/identity-env", test_spawn_identity_env);
   g_test_add_func("/termcore/identity-xtversion",
                   test_xtversion_names_ghostty);
+  g_test_add_func("/termcore/identity-device-attributes",
+                  test_device_attributes_match_ghostty);
+  g_test_add_func("/termcore/identity-device-attributes-no-clipboard",
+                  test_device_attributes_drop_clipboard);
   int rc = g_test_run();
   char *sessions = g_build_filename(state_dir, "pt", "agent-sessions", NULL);
   char *pt_dir = g_build_filename(state_dir, "pt", NULL);
