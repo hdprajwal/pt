@@ -32,6 +32,7 @@ PtConfig *pt_config_new(void) {
   c->font_family = g_strdup(PT_CONFIG_FONT_FAMILY_DEFAULT);
   c->ui_font_size = PT_CONFIG_UI_FONT_SIZE_DEFAULT;
   c->ui_font_family = g_strdup(PT_CONFIG_UI_FONT_FAMILY_DEFAULT);
+  c->term = g_strdup(PT_CONFIG_TERM_DEFAULT);
   c->scrollback_limit = PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT;
   c->window_padding_x = PT_CONFIG_WINDOW_PADDING_X_DEFAULT;
   c->window_padding_y = PT_CONFIG_WINDOW_PADDING_Y_DEFAULT;
@@ -49,6 +50,7 @@ void pt_config_free(PtConfig *c) {
   g_free(c->theme);
   g_free(c->font_family);
   g_free(c->ui_font_family);
+  g_free(c->term);
   g_hash_table_unref(c->app_overrides);
   g_free(c);
 }
@@ -89,6 +91,11 @@ static const PtConfigField config_fields[] = {
   { "ui-font-size",    G_STRUCT_OFFSET(PtConfig, ui_font_size),
     FLD_DOUBLE, 0, G_MAXDOUBLE, NULL, NULL },
   { "ui-font-family",  G_STRUCT_OFFSET(PtConfig, ui_font_family),
+    FLD_STR,    0, 0, NULL, NULL },
+  /* Any string: what a terminfo entry may be called is not this parser's
+   * business, and a name with no entry behind it falls back at spawn time
+   * rather than at parse time — see term_name() in pt-term-core.c. */
+  { "term",            G_STRUCT_OFFSET(PtConfig, term),
     FLD_STR,    0, 0, NULL, NULL },
   { "mouse-reporting", G_STRUCT_OFFSET(PtConfig, mouse_reporting),
     FLD_BOOL,   0, 0, NULL, NULL },

@@ -1050,31 +1050,53 @@ gboolean pt_term_core_terminfo_available(const char *term) {
   return found;
 }
 
-/* What the child's $TERM will say: the ghostty name when its entry can be
+/* The `term` config key, held for the whole process rather than per core: it
+ * comes from one config file, and a pane reads it at spawn, so ghostty's rule
+ * applies here too — a change reaches panes opened after it and leaves the ones
+ * already running alone. NULL until something sets it, which means the
+ * default. */
+static char *configured_term;
+/* term_name's answer for the term above, or NULL when it has to be worked out
+ * again. Cleared by the setter, so a config edit is re-resolved once at the
+ * next spawn rather than on every one. */
+static char *resolved_term;
+
+void pt_term_core_set_term(const char *term) {
+  if (term == NULL || term[0] == '\0') term = PT_CONFIG_TERM_DEFAULT;
+  if (g_strcmp0(term, configured_term) == 0) return;
+  g_free(configured_term);
+  configured_term = g_strdup(term);
+  g_clear_pointer(&resolved_term, g_free);
+}
+
+/* What the child's $TERM will say: the configured name when its entry can be
  * resolved, and xterm-256color when it cannot. See the identity section at the
- * top of this file for why pt claims the ghostty name at all.
+ * top of this file for why the default is ghostty's name.
  *
  * The fallback exists because a $TERM with no entry behind it is worse than a
  * modest one. ncurses programs that cannot look their terminal up either fall
  * back to something far poorer than xterm-256color or refuse to start, so a pt
  * whose shipped entry did not make it through packaging would break every pane
- * rather than lose a few attributes.
+ * rather than lose a few attributes. It applies to a configured name as well,
+ * so a typo in the config costs the user a name, not their panes.
  *
- * Only $TERM falls back. $TERM_PROGRAM, $TERM_PROGRAM_VERSION and the XTVERSION
- * reply stay as they are on this path, and should not be "fixed" to follow it:
- * they describe what pt implements, which is the same either way, and nothing
- * that reads them goes through the terminfo database. All that is missing here
- * is a compiled file to look the capabilities up in.
+ * Only $TERM falls back, and only $TERM is configurable. $TERM_PROGRAM,
+ * $TERM_PROGRAM_VERSION and the XTVERSION reply stay as they are on both
+ * paths, and should not be "fixed" to follow either: they describe what pt
+ * implements, which is the same whatever the terminfo entry is called, and
+ * nothing that reads them goes through the terminfo database.
  *
- * Resolved once and remembered, like the two lookups above it: this walks the
- * filesystem, the answer cannot change while pt runs, and a spawn needs it
- * before the fork, where none of that work would be safe. */
+ * Resolved once per configured name and remembered, like the two lookups above
+ * it: this walks the filesystem, and a spawn needs the answer before the fork,
+ * where none of that work would be safe. */
 static const char *term_name(void) {
-  static const char *name;
-  if (name == NULL)
-    name = pt_term_core_terminfo_available("xterm-ghostty") ? "xterm-ghostty"
-                                                            : "xterm-256color";
-  return name;
+  if (resolved_term == NULL) {
+    const char *want = configured_term != NULL ? configured_term
+                                               : PT_CONFIG_TERM_DEFAULT;
+    resolved_term = pt_term_core_terminfo_available(want)
+                        ? g_strdup(want) : g_strdup("xterm-256color");
+  }
+  return resolved_term;
 }
 
 /* ---- spawn ---- */

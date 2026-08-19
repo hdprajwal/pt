@@ -146,6 +146,49 @@ static void test_rewrite_osc52(void) {
   pt_config_free(c);
 }
 
+static void test_parse_term(void) {
+  /* Absent: ghostty's name, which is what pt ships an entry for. */
+  PtConfig *c = pt_config_parse("");
+  g_assert_cmpstr(c->term, ==, PT_CONFIG_TERM_DEFAULT);
+  g_assert_cmpstr(c->term, ==, "xterm-ghostty");
+  pt_config_free(c);
+
+  /* The whole point of the key: the way out for a user whose TERMINFO_DIRS
+     does not survive to the program that needs it. */
+  c = pt_config_parse("term = xterm-256color\n");
+  g_assert_cmpstr(c->term, ==, "xterm-256color");
+  pt_config_free(c);
+
+  /* An empty value reads as "leave this alone", like every other string key
+     here, rather than as a child with no $TERM at all. */
+  c = pt_config_parse("term =\n");
+  g_assert_cmpstr(c->term, ==, PT_CONFIG_TERM_DEFAULT);
+  pt_config_free(c);
+
+  /* Any name parses. Whether an entry exists behind it is answered at spawn,
+     by the terminfo guard, not here. */
+  c = pt_config_parse("term = pt-no-such-terminal\n");
+  g_assert_cmpstr(c->term, ==, "pt-no-such-terminal");
+  pt_config_free(c);
+
+  /* It takes part in copy/equal and the rewrite like the rest. */
+  PtConfig *a = pt_config_parse("term = xterm-256color\n");
+  PtConfig *b = pt_config_copy(a);
+  g_assert_cmpstr(b->term, ==, "xterm-256color");
+  g_assert_true(pt_config_equal(a, b));
+  g_free(b->term);
+  b->term = g_strdup("xterm-ghostty");
+  g_assert_false(pt_config_equal(a, b));
+  char *out = pt_config_rewrite("theme = pt-dark\n", a);
+  g_assert_nonnull(strstr(out, "term = xterm-256color\n"));
+  PtConfig *back = pt_config_parse(out);
+  g_assert_true(pt_config_equal(a, back));
+  g_free(out);
+  pt_config_free(a);
+  pt_config_free(b);
+  pt_config_free(back);
+}
+
 static void test_parse_scrollback_limit(void) {
   /* Absent: ghostty's 10MB, in bytes. */
   PtConfig *c = pt_config_parse("");
@@ -407,6 +450,7 @@ int main(void) {
   test_parse_resume_agents();
   test_parse_osc52();
   test_rewrite_osc52();
+  test_parse_term();
   test_parse_scrollback_limit();
   test_parse_window_padding();
   test_parse_out_of_range_font_size();

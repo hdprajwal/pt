@@ -90,6 +90,22 @@ infocmp -x xterm-ghostty | ssh host 'tic -x -'
 Doing that automatically, the way ghostty's ssh integration does, is follow-up
 work and is not shipped here.
 
+`sudo` has the same problem closer to home. It resets the environment by
+default, so `TERMINFO_DIRS` does not reach the command it runs and pt's copy of
+the entry is out of reach even though it is on the same machine. `sudo -E`
+keeps the variable, or add it once:
+
+```sh
+# /etc/sudoers.d/terminfo, via visudo
+Defaults env_keep += "TERMINFO_DIRS"
+```
+
+`su` and `docker exec` drop it for the same reason. If none of that suits you,
+set `term = xterm-256color` in the config and pt stops sending the ghostty name
+at all. Nothing else about pt changes: `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`
+and the `XTVERSION` reply still say ghostty, because they describe what pt
+implements rather than which terminfo entry it asks you to look up.
+
 ## Shell prompt integration
 
 Source the snippet for your shell from its rc file:
@@ -313,6 +329,7 @@ font-size = 9
 font-family = JetBrains Mono
 ui-font-size = 12.5
 ui-font-family = IBM Plex Sans
+term = xterm-ghostty
 mouse-reporting = true
 osc52 = write
 claude-usage = false
@@ -322,7 +339,7 @@ window-padding-x = 20
 window-padding-y = 18
 ```
 
-Those twelve keys plus `app-*` color-token overrides (e.g.
+Those thirteen keys plus `app-*` color-token overrides (e.g.
 `app-background = #101010`) are the entire config surface. Booleans accept
 `true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`. `osc52` takes `write`, `ask`
 or `off` (see above). `claude-usage` is the info panel's Claude Code opt-in
@@ -333,7 +350,10 @@ one pane keeps, in bytes rather than lines — ghostty's key, its semantics and
 its 10MB default — and it is read when a pane spawns, so a change applies to
 panes opened after it. `window-padding-x` and `window-padding-y` are the pixels
 between a pane's edge and its text, ghostty's keys of the same name, and they
-apply live to every open pane. Custom themes go in
+apply live to every open pane. `term` is what a pane's child is told `TERM` is,
+ghostty's key of the same name and its default (see above); it is read when a
+pane spawns, and a name with no terminfo entry behind it falls back to
+`xterm-256color`. Custom themes go in
 `~/.config/pt/themes/<name>`; both the config and the active theme are watched
 and applied live.
 

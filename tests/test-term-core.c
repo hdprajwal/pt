@@ -3359,6 +3359,44 @@ static void test_spawn_identity_env(void) {
   pt_term_core_free(core);
 }
 
+/* The `term` config key, end to end, and with it the fallback the guard exists
+ * for. Both names are chosen so the answer cannot depend on the machine: this
+ * build stages the entry itself, and `ghostty` is the alias tic writes beside
+ * xterm-ghostty, so the first one resolves wherever pt built; the second is a
+ * name no terminfo database has.
+ *
+ * The identity three do not move with $TERM, so they are asserted on the
+ * fallback spawn as well — that is the promise term_name's comment makes.
+ *
+ * The setting is process-wide, so this puts it back before it returns. */
+static void test_term_follows_the_config(void) {
+  const char *argv[] = {"/bin/sh", "-c",
+    "echo term=$TERM prog=$TERM_PROGRAM ver=$TERM_PROGRAM_VERSION; sleep 30",
+    NULL};
+  GError *err = NULL;
+
+  pt_term_core_set_term("ghostty");
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "term=ghostty "));
+  pt_term_core_free(core);
+
+  pt_term_core_set_term("pt-no-such-terminal");
+  core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "term=xterm-256color "));
+  g_assert_true(wait_for_text(core, "prog=ghostty "));
+  g_assert_true(wait_for_text(core, "ver=1.3.2"));
+  pt_term_core_free(core);
+
+  /* NULL is the default, which is what every other test in this file wants. */
+  pt_term_core_set_term(NULL);
+  core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "term=xterm-ghostty "));
+  pt_term_core_free(core);
+}
+
 /* CSI > q, answered as `ESC P > | <name> ESC \`. Same `cat -v` recipe as the
  * mouse tests, and for the same reason: only what the child writes reaches the
  * parser, so the child sends the query and prints back what pt replied.
@@ -3578,6 +3616,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/terminfo-dirs-child",
                   test_terminfo_dirs_reaches_child);
   g_test_add_func("/termcore/identity-env", test_spawn_identity_env);
+  g_test_add_func("/termcore/term-config-key", test_term_follows_the_config);
   g_test_add_func("/termcore/identity-xtversion",
                   test_xtversion_names_ghostty);
   g_test_add_func("/termcore/identity-device-attributes",

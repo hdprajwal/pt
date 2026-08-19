@@ -77,6 +77,17 @@ typedef struct {
  * binary that has been moved away from the data it shipped with. */
 gboolean pt_term_core_terminfo_available(const char *term);
 
+/* The `term` config key: what a pane's child is told $TERM is. Process-wide
+ * and read at spawn, so a config edit reaches panes opened after it and leaves
+ * the running ones with the name they were started with, as ghostty's own
+ * `term` does. NULL or "" means PT_CONFIG_TERM_DEFAULT.
+ *
+ * The guard above still has the last word. A name with no entry ncurses can
+ * find is replaced by xterm-256color at spawn, whether it came from here or
+ * from the default. Nothing else about pt's identity moves with it: see
+ * term_name() in pt-term-core.c. */
+void pt_term_core_set_term(const char *term);
+
 /* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh).
  * env_pairs: NULL-terminated "KEY=VALUE" strings set in the child before
  * exec (after TERM). NULL → none. Copied; caller keeps ownership.

@@ -4,6 +4,7 @@
 #include <string.h>        /* strrchr */
 
 #include "pt-terminal.h"
+#include "pt-term-core.h"  /* pt_term_core_set_term, the `term` config key */
 #include "pt-sidebar.h"
 #include "pt-info-panel.h"
 #include "pt-tab-strip.h"
@@ -229,6 +230,9 @@ static void render_config(PtWindow *w, const PtConfig *cfg) {
   /* Spawn-time, so editing this reaches the next pane rather than the open
    * ones; ghostty's scrollback-limit works the same way. */
   pt_terminal_set_scrollback_limit((gsize)cfg->scrollback_limit);
+  /* Spawn-time for the same reason: a running child read $TERM once, at exec,
+   * and there is no telling it otherwise afterwards. */
+  pt_term_core_set_term(cfg->term);
   /* Follows the file both ways: editing claude-usage back to false stops the
    * lookups and clears what they fetched. */
   pt_agent_monitor_set_claude_enabled(w->agents, cfg->claude_usage);
