@@ -279,6 +279,110 @@ static void dash_v(const PtSpriteMetrics *m, const PtSpriteSink *sink,
   }
 }
 
+/* ---- arcs and diagonals ---- */
+
+/* The only shapes in this range that are not rectangles. Everything else here
+ * is a pixel loop; these two need a real curve and a real slope, so they go to
+ * the sink's stroke instead, butt caps, one width. */
+
+static void path_move(PtSpritePath *p, double x, double y) {
+  p->seg[p->n].verb = PT_SPRITE_MOVE;
+  p->seg[p->n].x[0] = (float)x;
+  p->seg[p->n].y[0] = (float)y;
+  p->n++;
+}
+
+static void path_line(PtSpritePath *p, double x, double y) {
+  p->seg[p->n].verb = PT_SPRITE_LINE;
+  p->seg[p->n].x[0] = (float)x;
+  p->seg[p->n].y[0] = (float)y;
+  p->n++;
+}
+
+static void path_cubic(PtSpritePath *p, double c1x, double c1y, double c2x,
+                       double c2y, double x, double y) {
+  p->seg[p->n].verb = PT_SPRITE_CUBIC;
+  p->seg[p->n].x[0] = (float)c1x;
+  p->seg[p->n].y[0] = (float)c1y;
+  p->seg[p->n].x[1] = (float)c2x;
+  p->seg[p->n].y[1] = (float)c2y;
+  p->seg[p->n].x[2] = (float)x;
+  p->seg[p->n].y[2] = (float)y;
+  p->n++;
+}
+
+typedef enum { CORNER_TL, CORNER_TR, CORNER_BL, CORNER_BR } SpriteCorner;
+
+/* box.zig arc (:694-776). Not an arc of a circle end to end: a straight
+ * lead-in from the cell edge to where the circle starts, one cubic across the
+ * quarter turn, then a straight lead-out to the other edge. The controls sit a
+ * quarter of the radius away from the centre line, which is ghostty's own
+ * constant, not a circle-fitting one. `corner` names the pair of edges the
+ * curve joins, so ╭ is the bottom-right corner. */
+static void arc(const PtSpriteMetrics *m, const PtSpriteSink *sink, void *user,
+                SpriteCorner corner) {
+  const int thick_px = thick_light(m->thickness);
+  const double fw = m->cell_w, fh = m->cell_h, ft = thick_px;
+  /* The integer division happens before the half-thickness is added, the same
+   * way the rectangles are centred, so a curve lines up with the straight
+   * stroke it continues. */
+  const double cx = (double)(sat_sub(m->cell_w, thick_px) / 2) + ft / 2;
+  const double cy = (double)(sat_sub(m->cell_h, thick_px) / 2) + ft / 2;
+  const double r = MIN(fw, fh) / 2;
+  const double s = 0.25;   /* how far from the centre the controls sit */
+
+  PtSpritePath p = { { { 0, { 0 }, { 0 } } }, 0 };
+  switch (corner) {
+    case CORNER_TL:
+      path_move(&p, cx, 0);
+      path_line(&p, cx, cy - r);
+      path_cubic(&p, cx, cy - s * r, cx - s * r, cy, cx - r, cy);
+      path_line(&p, 0, cy);
+      break;
+    case CORNER_TR:
+      path_move(&p, cx, 0);
+      path_line(&p, cx, cy - r);
+      path_cubic(&p, cx, cy - s * r, cx + s * r, cy, cx + r, cy);
+      path_line(&p, fw, cy);
+      break;
+    case CORNER_BL:
+      path_move(&p, cx, fh);
+      path_line(&p, cx, cy + r);
+      path_cubic(&p, cx, cy + s * r, cx - s * r, cy, cx - r, cy);
+      path_line(&p, 0, cy);
+      break;
+    case CORNER_BR:
+      path_move(&p, cx, fh);
+      path_line(&p, cx, cy + r);
+      path_cubic(&p, cx, cy + s * r, cx + s * r, cy, cx + r, cy);
+      path_line(&p, fw, cy);
+      break;
+  }
+  sink->stroke(user, &p, (float)ft);
+}
+
+/* box.zig lightDiagonalUpperRightToLowerLeft and its mirror (:638-684). Both
+ * deliberately overshoot the cell corners by half a slope step so that a run
+ * of them chains into one unbroken line instead of showing a nick at every
+ * cell boundary. pt has no clip, so the overshoot simply lands on the
+ * neighbouring cell. */
+static void diagonal(const PtSpriteMetrics *m, const PtSpriteSink *sink,
+                     void *user, gboolean upper_right_to_lower_left) {
+  const double fw = m->cell_w, fh = m->cell_h;
+  const double slope_x = MIN(1.0, fw / fh);
+  const double slope_y = MIN(1.0, fh / fw);
+
+  PtSpritePath p = { { { 0, { 0 }, { 0 } } }, 0 };
+  if (upper_right_to_lower_left) {
+    path_move(&p, fw + 0.5 * slope_x, -0.5 * slope_y);
+    path_line(&p, -0.5 * slope_x, fh + 0.5 * slope_y);
+  } else {
+    path_move(&p, -0.5 * slope_x, -0.5 * slope_y);
+    path_line(&p, fw + 0.5 * slope_x, fh + 0.5 * slope_y);
+  }
+  sink->stroke(user, &p, (float)thick_light(m->thickness));
+}
+
 /* ---- dispatch ---- */
 
 /* The arm styles for every intersection glyph in U+2500..U+257F, transcribed
@@ -431,8 +535,7 @@ static const guint8 box_lines[0x80] = {
 #undef LN
 
 gboolean pt_sprite_has(gunichar cp) {
-  /* U+256D..U+2573, the arcs and the diagonals, arrive with the stroke sink. */
-  return (cp >= 0x2500 && cp <= 0x256c) || (cp >= 0x2574 && cp <= 0x257f);
+  return cp >= 0x2500 && cp <= 0x257f;
 }
 
 gboolean pt_sprite_draw(gunichar cp, const PtSpriteMetrics *m,
@@ -464,6 +567,16 @@ gboolean pt_sprite_draw(gunichar cp, const PtSpriteMetrics *m,
     case 0x254d: dash_h(&mm, sink, user, 2, heavy, heavy); return TRUE;
     case 0x254e: dash_v(&mm, sink, user, 2, light, heavy); return TRUE;
     case 0x254f: dash_v(&mm, sink, user, 2, heavy, heavy); return TRUE;
+    case 0x256d: arc(&mm, sink, user, CORNER_BR); return TRUE;
+    case 0x256e: arc(&mm, sink, user, CORNER_BL); return TRUE;
+    case 0x256f: arc(&mm, sink, user, CORNER_TL); return TRUE;
+    case 0x2570: arc(&mm, sink, user, CORNER_TR); return TRUE;
+    case 0x2571: diagonal(&mm, sink, user, TRUE); return TRUE;
+    case 0x2572: diagonal(&mm, sink, user, FALSE); return TRUE;
+    case 0x2573:
+      diagonal(&mm, sink, user, TRUE);
+      diagonal(&mm, sink, user, FALSE);
+      return TRUE;
     default:
       lines_char(&mm, sink, user, box_lines[cp - 0x2500]);
       return TRUE;

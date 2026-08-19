@@ -709,10 +709,39 @@ static void sprite_rect(void *user, int x, int y, int w, int h, float alpha) {
       &GRAPHENE_RECT_INIT(c->x + x, c->y + y, w, h));
 }
 
-/* The stroke sink lands with the arcs and diagonals, the only shapes in these
- * ranges that are not rectangles. Nothing pt_sprite_has claims yet reaches
- * it. */
-static const PtSpriteSink sprite_sink = { sprite_rect, NULL };
+/* Arcs and diagonals, the only shapes in these ranges that are not
+ * rectangles. GskPath landed in GTK 4.14 and pt's floor is 4.16, so this needs
+ * no fallback. Butt caps, because ghostty strokes these with butt caps: the
+ * lead-in and lead-out lines already reach the cell edge, and a round cap
+ * would push past it. */
+static void sprite_stroke(void *user, const PtSpritePath *path, float width) {
+  SpriteCtx *c = user;
+  GskPathBuilder *b = gsk_path_builder_new();
+  for (int i = 0; i < path->n; i++) {
+    const PtSpriteSeg *s = &path->seg[i];
+    switch (s->verb) {
+      case PT_SPRITE_MOVE:
+        gsk_path_builder_move_to(b, c->x + s->x[0], c->y + s->y[0]);
+        break;
+      case PT_SPRITE_LINE:
+        gsk_path_builder_line_to(b, c->x + s->x[0], c->y + s->y[0]);
+        break;
+      case PT_SPRITE_CUBIC:
+        gsk_path_builder_cubic_to(b, c->x + s->x[0], c->y + s->y[0],
+                                  c->x + s->x[1], c->y + s->y[1],
+                                  c->x + s->x[2], c->y + s->y[2]);
+        break;
+    }
+  }
+  GskPath *p = gsk_path_builder_free_to_path(b);
+  GskStroke *stroke = gsk_stroke_new(width);
+  gsk_stroke_set_line_cap(stroke, GSK_LINE_CAP_BUTT);
+  gtk_snapshot_append_stroke(c->snapshot, p, stroke, &c->fg);
+  gsk_stroke_free(stroke);
+  gsk_path_unref(p);
+}
+
+static const PtSpriteSink sprite_sink = { sprite_rect, sprite_stroke };
 
 /* One cycle of a sine-shaped wave per cell, geometry matched to ghostty's
  * underline_curly (font/sprite/draw/special.zig:162-235): amplitude = cell

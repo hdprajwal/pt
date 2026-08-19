@@ -1,4 +1,5 @@
 #include "pt-sprite.h"
+#include <math.h>
 #include <string.h>
 
 /* Span assertions on their own are not enough for this module. A port with the
@@ -28,6 +29,8 @@ typedef struct {
   int nrect;
   RecRect rect[32];
   int nstroke;
+  PtSpritePath path[4];
+  float width[4];
   guint8 px[REC_SIDE * REC_SIDE];
 } Rec;
 
@@ -46,8 +49,9 @@ static void rec_rect(void *user, int x, int y, int w, int h, float alpha) {
 
 static void rec_stroke(void *user, const PtSpritePath *path, float width) {
   Rec *r = user;
-  (void)path;
-  (void)width;
+  g_assert_cmpint(r->nstroke, <, (int)G_N_ELEMENTS(r->path));
+  r->path[r->nstroke] = *path;
+  r->width[r->nstroke] = width;
   r->nstroke++;
 }
 
@@ -93,6 +97,102 @@ static int rec_runs_col(const Rec *r, int x, Run *out, int max) {
     out[n++] = (Run){ s, y - s };
   }
   return n;
+}
+
+/* ---- arcs and diagonals ---- */
+
+/* Pinned the same way as the rectangles: ghostty's own arc,
+ * lightDiagonalUpperRightToLowerLeft and lightDiagonalUpperLeftToLowerRight,
+ * run against a stub that prints the path it is handed. The lead-in line, the
+ * two control points a quarter of the radius off the centre, and the corner
+ * overshoot on the diagonals are all in these numbers. */
+typedef struct {
+  guint32 cp;
+  int cw, ch, th;
+  int stroke;                 /* ╳ is two strokes */
+  int nseg;
+  float width;
+  struct { PtSpriteVerb verb; float p[6]; } seg[4];
+} PinnedPath;
+
+static const PinnedPath pinned_paths[] = {
+  { 0x256d, 18, 36, 4, 0, 4, 4.0f, {{PT_SPRITE_MOVE, {9.0f, 36.0f}}, {PT_SPRITE_LINE, {9.0f, 27.0f}}, {PT_SPRITE_CUBIC, {9.0f, 20.25f, 11.25f, 18.0f, 18.0f, 18.0f}}, {PT_SPRITE_LINE, {18.0f, 18.0f}}} },  /* ╭ */
+  { 0x256d, 12, 24, 3, 0, 4, 3.0f, {{PT_SPRITE_MOVE, {5.5f, 24.0f}}, {PT_SPRITE_LINE, {5.5f, 17.5f}}, {PT_SPRITE_CUBIC, {5.5f, 13.0f, 7.0f, 11.5f, 11.5f, 11.5f}}, {PT_SPRITE_LINE, {12.0f, 11.5f}}} },  /* ╭ */
+  { 0x256d, 11, 21, 2, 0, 4, 2.0f, {{PT_SPRITE_MOVE, {5.0f, 21.0f}}, {PT_SPRITE_LINE, {5.0f, 15.5f}}, {PT_SPRITE_CUBIC, {5.0f, 11.375f, 6.375f, 10.0f, 10.5f, 10.0f}}, {PT_SPRITE_LINE, {11.0f, 10.0f}}} },  /* ╭ */
+  { 0x256d, 9, 17, 1, 0, 4, 1.0f, {{PT_SPRITE_MOVE, {4.5f, 17.0f}}, {PT_SPRITE_LINE, {4.5f, 13.0f}}, {PT_SPRITE_CUBIC, {4.5f, 9.625f, 5.625f, 8.5f, 9.0f, 8.5f}}, {PT_SPRITE_LINE, {9.0f, 8.5f}}} },  /* ╭ */
+  { 0x256e, 18, 36, 4, 0, 4, 4.0f, {{PT_SPRITE_MOVE, {9.0f, 36.0f}}, {PT_SPRITE_LINE, {9.0f, 27.0f}}, {PT_SPRITE_CUBIC, {9.0f, 20.25f, 6.75f, 18.0f, 0.0f, 18.0f}}, {PT_SPRITE_LINE, {0.0f, 18.0f}}} },  /* ╮ */
+  { 0x256e, 12, 24, 3, 0, 4, 3.0f, {{PT_SPRITE_MOVE, {5.5f, 24.0f}}, {PT_SPRITE_LINE, {5.5f, 17.5f}}, {PT_SPRITE_CUBIC, {5.5f, 13.0f, 4.0f, 11.5f, -0.5f, 11.5f}}, {PT_SPRITE_LINE, {0.0f, 11.5f}}} },  /* ╮ */
+  { 0x256e, 11, 21, 2, 0, 4, 2.0f, {{PT_SPRITE_MOVE, {5.0f, 21.0f}}, {PT_SPRITE_LINE, {5.0f, 15.5f}}, {PT_SPRITE_CUBIC, {5.0f, 11.375f, 3.625f, 10.0f, -0.5f, 10.0f}}, {PT_SPRITE_LINE, {0.0f, 10.0f}}} },  /* ╮ */
+  { 0x256e, 9, 17, 1, 0, 4, 1.0f, {{PT_SPRITE_MOVE, {4.5f, 17.0f}}, {PT_SPRITE_LINE, {4.5f, 13.0f}}, {PT_SPRITE_CUBIC, {4.5f, 9.625f, 3.375f, 8.5f, 0.0f, 8.5f}}, {PT_SPRITE_LINE, {0.0f, 8.5f}}} },  /* ╮ */
+  { 0x256f, 18, 36, 4, 0, 4, 4.0f, {{PT_SPRITE_MOVE, {9.0f, 0.0f}}, {PT_SPRITE_LINE, {9.0f, 9.0f}}, {PT_SPRITE_CUBIC, {9.0f, 15.75f, 6.75f, 18.0f, 0.0f, 18.0f}}, {PT_SPRITE_LINE, {0.0f, 18.0f}}} },  /* ╯ */
+  { 0x256f, 12, 24, 3, 0, 4, 3.0f, {{PT_SPRITE_MOVE, {5.5f, 0.0f}}, {PT_SPRITE_LINE, {5.5f, 5.5f}}, {PT_SPRITE_CUBIC, {5.5f, 10.0f, 4.0f, 11.5f, -0.5f, 11.5f}}, {PT_SPRITE_LINE, {0.0f, 11.5f}}} },  /* ╯ */
+  { 0x256f, 11, 21, 2, 0, 4, 2.0f, {{PT_SPRITE_MOVE, {5.0f, 0.0f}}, {PT_SPRITE_LINE, {5.0f, 4.5f}}, {PT_SPRITE_CUBIC, {5.0f, 8.625f, 3.625f, 10.0f, -0.5f, 10.0f}}, {PT_SPRITE_LINE, {0.0f, 10.0f}}} },  /* ╯ */
+  { 0x256f, 9, 17, 1, 0, 4, 1.0f, {{PT_SPRITE_MOVE, {4.5f, 0.0f}}, {PT_SPRITE_LINE, {4.5f, 4.0f}}, {PT_SPRITE_CUBIC, {4.5f, 7.375f, 3.375f, 8.5f, 0.0f, 8.5f}}, {PT_SPRITE_LINE, {0.0f, 8.5f}}} },  /* ╯ */
+  { 0x2570, 18, 36, 4, 0, 4, 4.0f, {{PT_SPRITE_MOVE, {9.0f, 0.0f}}, {PT_SPRITE_LINE, {9.0f, 9.0f}}, {PT_SPRITE_CUBIC, {9.0f, 15.75f, 11.25f, 18.0f, 18.0f, 18.0f}}, {PT_SPRITE_LINE, {18.0f, 18.0f}}} },  /* ╰ */
+  { 0x2570, 12, 24, 3, 0, 4, 3.0f, {{PT_SPRITE_MOVE, {5.5f, 0.0f}}, {PT_SPRITE_LINE, {5.5f, 5.5f}}, {PT_SPRITE_CUBIC, {5.5f, 10.0f, 7.0f, 11.5f, 11.5f, 11.5f}}, {PT_SPRITE_LINE, {12.0f, 11.5f}}} },  /* ╰ */
+  { 0x2570, 11, 21, 2, 0, 4, 2.0f, {{PT_SPRITE_MOVE, {5.0f, 0.0f}}, {PT_SPRITE_LINE, {5.0f, 4.5f}}, {PT_SPRITE_CUBIC, {5.0f, 8.625f, 6.375f, 10.0f, 10.5f, 10.0f}}, {PT_SPRITE_LINE, {11.0f, 10.0f}}} },  /* ╰ */
+  { 0x2570, 9, 17, 1, 0, 4, 1.0f, {{PT_SPRITE_MOVE, {4.5f, 0.0f}}, {PT_SPRITE_LINE, {4.5f, 4.0f}}, {PT_SPRITE_CUBIC, {4.5f, 7.375f, 5.625f, 8.5f, 9.0f, 8.5f}}, {PT_SPRITE_LINE, {9.0f, 8.5f}}} },  /* ╰ */
+  { 0x2571, 18, 36, 4, 0, 2, 4.0f, {{PT_SPRITE_MOVE, {18.25f, -0.5f}}, {PT_SPRITE_LINE, {-0.25f, 36.5f}}} },  /* ╱ */
+  { 0x2571, 12, 24, 3, 0, 2, 3.0f, {{PT_SPRITE_MOVE, {12.25f, -0.5f}}, {PT_SPRITE_LINE, {-0.25f, 24.5f}}} },  /* ╱ */
+  { 0x2571, 11, 21, 2, 0, 2, 2.0f, {{PT_SPRITE_MOVE, {11.261905f, -0.5f}}, {PT_SPRITE_LINE, {-0.261905f, 21.5f}}} },  /* ╱ */
+  { 0x2571, 9, 17, 1, 0, 2, 1.0f, {{PT_SPRITE_MOVE, {9.264706f, -0.5f}}, {PT_SPRITE_LINE, {-0.264706f, 17.5f}}} },  /* ╱ */
+  { 0x2572, 18, 36, 4, 0, 2, 4.0f, {{PT_SPRITE_MOVE, {-0.25f, -0.5f}}, {PT_SPRITE_LINE, {18.25f, 36.5f}}} },  /* ╲ */
+  { 0x2572, 12, 24, 3, 0, 2, 3.0f, {{PT_SPRITE_MOVE, {-0.25f, -0.5f}}, {PT_SPRITE_LINE, {12.25f, 24.5f}}} },  /* ╲ */
+  { 0x2572, 11, 21, 2, 0, 2, 2.0f, {{PT_SPRITE_MOVE, {-0.261905f, -0.5f}}, {PT_SPRITE_LINE, {11.261905f, 21.5f}}} },  /* ╲ */
+  { 0x2572, 9, 17, 1, 0, 2, 1.0f, {{PT_SPRITE_MOVE, {-0.264706f, -0.5f}}, {PT_SPRITE_LINE, {9.264706f, 17.5f}}} },  /* ╲ */
+  { 0x2573, 18, 36, 4, 0, 2, 4.0f, {{PT_SPRITE_MOVE, {18.25f, -0.5f}}, {PT_SPRITE_LINE, {-0.25f, 36.5f}}} },  /* ╳ */
+  { 0x2573, 18, 36, 4, 1, 2, 4.0f, {{PT_SPRITE_MOVE, {-0.25f, -0.5f}}, {PT_SPRITE_LINE, {18.25f, 36.5f}}} },  /* ╳ */
+  { 0x2573, 12, 24, 3, 0, 2, 3.0f, {{PT_SPRITE_MOVE, {12.25f, -0.5f}}, {PT_SPRITE_LINE, {-0.25f, 24.5f}}} },  /* ╳ */
+  { 0x2573, 12, 24, 3, 1, 2, 3.0f, {{PT_SPRITE_MOVE, {-0.25f, -0.5f}}, {PT_SPRITE_LINE, {12.25f, 24.5f}}} },  /* ╳ */
+  { 0x2573, 11, 21, 2, 0, 2, 2.0f, {{PT_SPRITE_MOVE, {11.261905f, -0.5f}}, {PT_SPRITE_LINE, {-0.261905f, 21.5f}}} },  /* ╳ */
+  { 0x2573, 11, 21, 2, 1, 2, 2.0f, {{PT_SPRITE_MOVE, {-0.261905f, -0.5f}}, {PT_SPRITE_LINE, {11.261905f, 21.5f}}} },  /* ╳ */
+  { 0x2573, 9, 17, 1, 0, 2, 1.0f, {{PT_SPRITE_MOVE, {9.264706f, -0.5f}}, {PT_SPRITE_LINE, {-0.264706f, 17.5f}}} },  /* ╳ */
+  { 0x2573, 9, 17, 1, 1, 2, 1.0f, {{PT_SPRITE_MOVE, {-0.264706f, -0.5f}}, {PT_SPRITE_LINE, {9.264706f, 17.5f}}} },  /* ╳ */
+};
+
+static void test_pinned_paths(void) {
+  Rec r;
+  for (gsize i = 0; i < G_N_ELEMENTS(pinned_paths); i++) {
+    const PinnedPath *p = &pinned_paths[i];
+    g_assert_true(rec_draw(&r, p->cp, p->cw, p->ch, p->th));
+    if (r.nstroke <= p->stroke)
+      g_error("U+%04X %dx%d t%d: %d strokes, wanted stroke %d", p->cp,
+              p->cw, p->ch, p->th, r.nstroke, p->stroke);
+    g_assert_cmpint(r.nrect, ==, 0);
+    const PtSpritePath *got = &r.path[p->stroke];
+    g_assert_cmpfloat(r.width[p->stroke], ==, p->width);
+    if (got->n != p->nseg)
+      g_error("U+%04X %dx%d t%d: %d segments want %d", p->cp, p->cw,
+              p->ch, p->th, got->n, p->nseg);
+    for (int j = 0; j < p->nseg; j++) {
+      g_assert_cmpint(got->seg[j].verb, ==, p->seg[j].verb);
+      int n = p->seg[j].verb == PT_SPRITE_CUBIC ? 3 : 1;
+      for (int k = 0; k < n; k++) {
+        /* The pinned numbers come out of the Zig harness at six decimals, and
+         * a slope like 11/21 is not exact in either binary or decimal, so
+         * these compare to a tolerance rather than bit for bit. */
+        if (fabsf(got->seg[j].x[k] - p->seg[j].p[2 * k]) > 1e-4f ||
+            fabsf(got->seg[j].y[k] - p->seg[j].p[2 * k + 1]) > 1e-4f)
+          g_error("U+%04X %dx%d t%d seg %d point %d: got %g,%g want %g,%g",
+                  p->cp, p->cw, p->ch, p->th, j, k, (double)got->seg[j].x[k],
+                  (double)got->seg[j].y[k], (double)p->seg[j].p[2 * k],
+                  (double)p->seg[j].p[2 * k + 1]);
+      }
+    }
+  }
+}
+
+/* ╳ is the two diagonals together, and nothing else in the range strokes
+ * twice. */
+static void test_cross_is_two_diagonals(void) {
+  Rec r;
+  Rec one;
+  g_assert_true(rec_draw(&r, 0x2573, 12, 24, 3));
+  g_assert_cmpint(r.nstroke, ==, 2);
+  g_assert_true(rec_draw(&one, 0x2571, 12, 24, 3));
+  g_assert_cmpint(memcmp(&r.path[0], &one.path[0], sizeof(PtSpritePath)), ==, 0);
+  g_assert_true(rec_draw(&one, 0x2572, 12, 24, 3));
+  g_assert_cmpint(memcmp(&r.path[1], &one.path[0], sizeof(PtSpritePath)), ==, 0);
 }
 
 /* ---- ghostty's four reference geometries ---- */
@@ -380,6 +480,16 @@ static void test_saturation(void) {
           g_error("U+%04X %dx%d t%d: rect %d,%d %dx%d", cp, g->w, g->h, g->t,
                   b->x, b->y, b->w, b->h);
       }
+      for (int j = 0; j < r.nstroke; j++) {
+        if (!(r.width[j] > 0))
+          g_error("U+%04X %dx%d t%d: stroke width %g", cp, g->w, g->h, g->t,
+                  (double)r.width[j]);
+        for (int k = 0; k < r.path[j].n; k++)
+          for (int c = 0; c < 3; c++) {
+            g_assert_true(isfinite(r.path[j].seg[k].x[c]));
+            g_assert_true(isfinite(r.path[j].seg[k].y[c]));
+          }
+      }
     }
   }
 }
@@ -415,6 +525,8 @@ static void test_not_ours(void) {
 
 int main(void) {
   test_pinned();
+  test_pinned_paths();
+  test_cross_is_two_diagonals();
   test_double_cross_hole();
   test_arms_reach_edges();
   test_ink_fits_the_cell();
