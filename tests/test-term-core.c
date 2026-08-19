@@ -134,8 +134,10 @@ static void test_key_send_echoes(void) {
   ctx.core = core;
   PtTermCoreCallbacks cbs = {0};
   pt_term_core_set_callbacks(core, &cbs, &ctx);
-  pt_term_core_send_key(core, GHOSTTY_KEY_H, GHOSTTY_KEY_ACTION_PRESS, 0, 'h', "h", 1);
-  pt_term_core_send_key(core, GHOSTTY_KEY_I, GHOSTTY_KEY_ACTION_PRESS, 0, 'i', "i", 1);
+  pt_term_core_send_key(core, GHOSTTY_KEY_H, GHOSTTY_KEY_ACTION_PRESS, 0, 0,
+                        'h', "h", 1);
+  pt_term_core_send_key(core, GHOSTTY_KEY_I, GHOSTTY_KEY_ACTION_PRESS, 0, 0,
+                        'i', "i", 1);
   /* Pump the loop until the echo comes back. */
   gint64 deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
   gboolean ok = FALSE;
@@ -1490,9 +1492,9 @@ static void test_reset_keeps_the_child(void) {
   g_assert_cmpint(pt_term_core_shell_pid(core), ==, before);
   g_assert_false(pt_term_core_exited(core, NULL));
 
-  pt_term_core_send_key(core, GHOSTTY_KEY_H, GHOSTTY_KEY_ACTION_PRESS, 0,
+  pt_term_core_send_key(core, GHOSTTY_KEY_H, GHOSTTY_KEY_ACTION_PRESS, 0, 0,
                         'h', "h", 1);
-  pt_term_core_send_key(core, GHOSTTY_KEY_I, GHOSTTY_KEY_ACTION_PRESS, 0,
+  pt_term_core_send_key(core, GHOSTTY_KEY_I, GHOSTTY_KEY_ACTION_PRESS, 0, 0,
                         'i', "i", 1);
   g_assert_true(wait_for_text(core, "hi"));       /* cat echoed it back */
   g_assert_cmpint(pt_term_core_shell_pid(core), ==, before);

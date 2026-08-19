@@ -11,7 +11,9 @@
  * `caps:swapescape` shows up at all.
  *
  * So we keep two tables, exactly as ghostty does. This one is the keycode
- * table and it is the one that decides in almost every case.
+ * table, and it decides whenever the keyval maps to nothing or both candidates
+ * are keys a layout is expected to move around; `should_be_remappable` below
+ * is where that rule lives.
  *
  * Transcribed from ghostty ae52f97, src/input/keycodes.zig, xkb column. That
  * file lists every platform's scancode for each W3C code as
@@ -385,17 +387,88 @@ GhosttyKey pt_keymap_physical_key(guint keycode, guint keyval) {
   return w3c_key;
 }
 
-guint32 pt_keymap_unshifted_codepoint(guint keyval) {
-  guint lower = gdk_keyval_to_lower(keyval);
-  guint32 cp = gdk_keyval_to_unicode(lower);
+/* Ghostty's keyvalUnicodeUnshifted (src/apprt/gtk/key.zig:96-139). The display
+ * holds every keyval the keycode can produce, one per (group, level) pair;
+ * the group is the layout the event was typed under and level 0 is the key
+ * with no modifiers applied. */
+guint32 pt_keymap_unshifted_codepoint(GdkDisplay *display, GdkEvent *event,
+                                      guint keycode) {
+  guint layout = gdk_key_event_get_layout(event);
+  GdkKeymapKey *keys = NULL;
+  guint *keyvals = NULL;
+  int n_entries = 0;
+  if (!gdk_display_map_keycode(display, keycode, &keys, &keyvals, &n_entries))
+    return 0;
+
+  guint32 cp = 0;
+  for (int i = 0; i < n_entries; i++) {
+    if ((guint)keys[i].group == layout && keys[i].level == 0) {
+      cp = gdk_keyval_to_unicode(keyvals[i]);
+      break;
+    }
+  }
+  g_free(keys);
+  g_free(keyvals);
   return cp;
 }
 
+/* Ghostty's translateMods (src/apprt/gtk/key.zig:84-93), which it uses for
+ * mouse events as well as key events, so the caps lock bit belongs here rather
+ * than in the key-only fixups below.
+ *
+ * Ghostty asks the window protocol for these first and only falls back to this
+ * function (winproto.zig:55-63). That matters on X11 alone, where it peeks the
+ * next XKB event to learn about a modifier that is being pressed right now
+ * (winproto/x11.zig:124-160); the Wayland side returns null and takes this
+ * path (winproto/wayland.zig:62-68). pt does not link Xlib and does not want
+ * to, so it always takes the Wayland path, and pt_keymap_mods_for_key covers
+ * the case the X11 peek exists to cover. */
 GhosttyMods pt_keymap_mods(guint state) {
   GhosttyMods mods = 0;
   if (state & GDK_SHIFT_MASK)   mods |= GHOSTTY_MODS_SHIFT;
   if (state & GDK_CONTROL_MASK) mods |= GHOSTTY_MODS_CTRL;
   if (state & GDK_ALT_MASK)     mods |= GHOSTTY_MODS_ALT;
   if (state & GDK_SUPER_MASK)   mods |= GHOSTTY_MODS_SUPER;
+  /* GDK reports one lock mask and does not say which lock it is. Ghostty
+   * assumes caps, and num lock is read off the device instead. */
+  if (state & GDK_LOCK_MASK)    mods |= GHOSTTY_MODS_CAPS_LOCK;
   return mods;
+}
+
+/* A side bit set means the right-hand key, clear means the left-hand one, so
+ * both halves have to be written on every pass. */
+static GhosttyMods sided_mod(GhosttyMods mods, GhosttyMods bit,
+                             GhosttyMods side_bit, gboolean right,
+                             gboolean down) {
+  mods = down ? (GhosttyMods)(mods | bit) : (GhosttyMods)(mods & ~bit);
+  return right ? (GhosttyMods)(mods | side_bit)
+               : (GhosttyMods)(mods & ~side_bit);
+}
+
+/* The switch from ghostty's eventMods (src/apprt/gtk/key.zig:141-206), minus
+ * the num lock line, which needs the event's device and so stays with the
+ * caller that has one. */
+GhosttyMods pt_keymap_mods_for_key(GhosttyMods mods, GhosttyKey key,
+                                   GhosttyKeyAction action) {
+  gboolean down = action != GHOSTTY_KEY_ACTION_RELEASE;
+  switch (key) {
+  case GHOSTTY_KEY_SHIFT_LEFT:
+    return sided_mod(mods, GHOSTTY_MODS_SHIFT, GHOSTTY_MODS_SHIFT_SIDE, FALSE, down);
+  case GHOSTTY_KEY_SHIFT_RIGHT:
+    return sided_mod(mods, GHOSTTY_MODS_SHIFT, GHOSTTY_MODS_SHIFT_SIDE, TRUE, down);
+  case GHOSTTY_KEY_CONTROL_LEFT:
+    return sided_mod(mods, GHOSTTY_MODS_CTRL, GHOSTTY_MODS_CTRL_SIDE, FALSE, down);
+  case GHOSTTY_KEY_CONTROL_RIGHT:
+    return sided_mod(mods, GHOSTTY_MODS_CTRL, GHOSTTY_MODS_CTRL_SIDE, TRUE, down);
+  case GHOSTTY_KEY_ALT_LEFT:
+    return sided_mod(mods, GHOSTTY_MODS_ALT, GHOSTTY_MODS_ALT_SIDE, FALSE, down);
+  case GHOSTTY_KEY_ALT_RIGHT:
+    return sided_mod(mods, GHOSTTY_MODS_ALT, GHOSTTY_MODS_ALT_SIDE, TRUE, down);
+  case GHOSTTY_KEY_META_LEFT:
+    return sided_mod(mods, GHOSTTY_MODS_SUPER, GHOSTTY_MODS_SUPER_SIDE, FALSE, down);
+  case GHOSTTY_KEY_META_RIGHT:
+    return sided_mod(mods, GHOSTTY_MODS_SUPER, GHOSTTY_MODS_SUPER_SIDE, TRUE, down);
+  default:
+    return mods;
+  }
 }

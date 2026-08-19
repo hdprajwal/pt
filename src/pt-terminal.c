@@ -1625,7 +1625,6 @@ static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
 static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
                                guint keycode, GdkModifierType state,
                                gpointer user) {
-  (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   if (t->exited) {
     if (keyval == GDK_KEY_Return) { restart_shell(t); return TRUE; }
@@ -1633,20 +1632,49 @@ static gboolean on_key_pressed(GtkEventControllerKey *ctl, guint keyval,
   }
   if (t->core == NULL) return FALSE;
 
+  /* Everything below the physical key needs the event itself rather than the
+   * four arguments GTK unpacked for us: the layout, the device and the
+   * consumed modifiers are only on there. There is an event for every press
+   * GTK delivers here; the guard is for the getter's own contract, which
+   * returns NULL whenever the controller is not dispatching one. */
+  GdkEvent *event =
+      gtk_event_controller_get_current_event(GTK_EVENT_CONTROLLER(ctl));
+
   GhosttyKey key = pt_keymap_physical_key(keycode, keyval);
   GhosttyMods mods = pt_keymap_mods(state);
-  guint32 unshifted = pt_keymap_unshifted_codepoint(keyval);
+  GhosttyMods consumed_mods = 0;
+  guint32 unshifted = 0;
+  if (event != NULL) {
+    GdkDevice *device = gdk_event_get_device(event);
+    if (device != NULL && gdk_device_get_num_lock_state(device))
+      mods |= GHOSTTY_MODS_NUM_LOCK;
+    /* GDK reports which modifiers the layout already spent on producing the
+     * keyval, and the encoder subtracts them before deciding what to send, so
+     * that Shift+1 encodes as a plain `!` rather than as Shift+!.
+     * (surface.zig:1386-1393.) */
+    consumed_mods = pt_keymap_mods(gdk_key_event_get_consumed_modifiers(event) &
+                                   GDK_MODIFIER_MASK);
+    unshifted = pt_keymap_unshifted_codepoint(
+        gtk_widget_get_display(GTK_WIDGET(t)), event, keycode);
+  }
+  mods = pt_keymap_mods_for_key(mods, key, GHOSTTY_KEY_ACTION_PRESS);
 
+  /* Text for the event, taken straight off the keyval. GTK will not turn
+   * Ctrl+Shift+1 into "!" for us, but the keyval says `exclam` all the same,
+   * so the encoder can be handed the character and work out that this is
+   * Ctrl+! (surface.zig:1400-1414). Control characters are the one exclusion,
+   * and ghostty draws that line at 0x20 rather than by asking whether the
+   * codepoint is printable: the encoder already produces the C0 byte for keys
+   * like escape and backspace, and passing it their text as well makes it
+   * treat the event as committed input method text instead. */
   char utf8[8];
   gsize utf8_len = 0;
   guint32 uc = gdk_keyval_to_unicode(keyval);
-  if (uc != 0 && g_unichar_isprint(uc) &&
-      (state & (GDK_CONTROL_MASK | GDK_ALT_MASK | GDK_SUPER_MASK)) == 0)
-    utf8_len = g_unichar_to_utf8((gunichar)uc, utf8);
+  if (uc >= 0x20) utf8_len = g_unichar_to_utf8((gunichar)uc, utf8);
 
   gboolean consumed =
       pt_term_core_send_key(t->core, key, GHOSTTY_KEY_ACTION_PRESS, mods,
-                            unshifted, utf8, utf8_len);
+                            consumed_mods, unshifted, utf8, utf8_len);
   if (consumed) {
     /* any keypress that writes to the pty drops the selection, and snaps the
      * viewport back to the prompt: typing into scrollback you can't see is how

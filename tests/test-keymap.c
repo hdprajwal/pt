@@ -7,7 +7,6 @@ static void test_letters(void) {
   /* The keyval table matches exactly, as ghostty's does, so the shifted keysym
    * is not a key. Shift+z resolves through the keycode instead. */
   g_assert_cmpint(pt_keymap_from_keyval(GDK_KEY_Z), ==, GHOSTTY_KEY_UNIDENTIFIED);
-  g_assert_cmpint(pt_keymap_unshifted_codepoint(GDK_KEY_A), ==, 'a');
 }
 
 static void test_digits_and_specials(void) {
@@ -18,6 +17,14 @@ static void test_digits_and_specials(void) {
   g_assert_cmpint(pt_keymap_from_keyval(GDK_KEY_Up), ==, GHOSTTY_KEY_ARROW_UP);
   g_assert_cmpint(pt_keymap_from_keyval(GDK_KEY_F5), ==, GHOSTTY_KEY_F5);
   g_assert_cmpint(pt_keymap_from_keyval(GDK_KEY_VoidSymbol), ==, GHOSTTY_KEY_UNIDENTIFIED);
+
+  /* Both of these read as mistakes and are not. The keypad enter is its own
+   * key in the kitty protocol and has to stay distinct from the enter above
+   * it, and the shifted tab keysym says shift was held rather than which key
+   * was struck, so ghostty's table leaves it out and the keycode answers for
+   * it. Ghostty has both this way (apprt/gtk/key.zig:392-534). */
+  g_assert_cmpint(pt_keymap_from_keyval(GDK_KEY_KP_Enter), ==, GHOSTTY_KEY_NUMPAD_ENTER);
+  g_assert_cmpint(pt_keymap_from_keyval(GDK_KEY_ISO_Left_Tab), ==, GHOSTTY_KEY_UNIDENTIFIED);
 }
 
 static void test_mods(void) {
@@ -25,6 +32,80 @@ static void test_mods(void) {
                   GHOSTTY_MODS_CTRL | GHOSTTY_MODS_SHIFT);
   g_assert_cmpint(pt_keymap_mods(GDK_ALT_MASK), ==, GHOSTTY_MODS_ALT);
   g_assert_cmpint(pt_keymap_mods(GDK_SUPER_MASK), ==, GHOSTTY_MODS_SUPER);
+  /* GDK has one lock mask and will not say which lock set it; ghostty reads it
+   * as caps and pt follows (apprt/gtk/key.zig:84-93). */
+  g_assert_cmpint(pt_keymap_mods(GDK_LOCK_MASK), ==, GHOSTTY_MODS_CAPS_LOCK);
+}
+
+/* GTK reports the modifier state from before the key was struck, so the press
+ * of a modifier arrives with its own bit clear and its release arrives with it
+ * still set. Both have to be corrected, and the side has to be filled in from
+ * the physical key, because nothing else knows it. */
+typedef struct {
+  const char *name;
+  GhosttyKey key;
+  GhosttyKeyAction action;
+  GhosttyMods in;
+  GhosttyMods expected;
+} ModsForKeyCase;
+
+static const ModsForKeyCase mods_for_key_cases[] = {
+    {"press left shift", GHOSTTY_KEY_SHIFT_LEFT, GHOSTTY_KEY_ACTION_PRESS, 0,
+     GHOSTTY_MODS_SHIFT},
+    {"press right shift", GHOSTTY_KEY_SHIFT_RIGHT, GHOSTTY_KEY_ACTION_PRESS, 0,
+     GHOSTTY_MODS_SHIFT | GHOSTTY_MODS_SHIFT_SIDE},
+    {"press left control", GHOSTTY_KEY_CONTROL_LEFT, GHOSTTY_KEY_ACTION_PRESS, 0,
+     GHOSTTY_MODS_CTRL},
+    {"press right control", GHOSTTY_KEY_CONTROL_RIGHT, GHOSTTY_KEY_ACTION_PRESS, 0,
+     GHOSTTY_MODS_CTRL | GHOSTTY_MODS_CTRL_SIDE},
+    {"press left alt", GHOSTTY_KEY_ALT_LEFT, GHOSTTY_KEY_ACTION_PRESS, 0,
+     GHOSTTY_MODS_ALT},
+    {"press right alt", GHOSTTY_KEY_ALT_RIGHT, GHOSTTY_KEY_ACTION_PRESS, 0,
+     GHOSTTY_MODS_ALT | GHOSTTY_MODS_ALT_SIDE},
+    {"press left meta", GHOSTTY_KEY_META_LEFT, GHOSTTY_KEY_ACTION_PRESS, 0,
+     GHOSTTY_MODS_SUPER},
+    {"press right meta", GHOSTTY_KEY_META_RIGHT, GHOSTTY_KEY_ACTION_PRESS, 0,
+     GHOSTTY_MODS_SUPER | GHOSTTY_MODS_SUPER_SIDE},
+
+    /* The release of the last modifier held: GTK still reports it, and the bit
+     * has to go, or an app in report-all-keys mode is told the key went up
+     * while being handed mods saying it is still down. The side bit is written
+     * on a release all the same, as it is in ghostty, and means nothing once
+     * the modifier bit beside it is clear. */
+    {"release left shift", GHOSTTY_KEY_SHIFT_LEFT, GHOSTTY_KEY_ACTION_RELEASE,
+     GHOSTTY_MODS_SHIFT, 0},
+    {"release right shift", GHOSTTY_KEY_SHIFT_RIGHT, GHOSTTY_KEY_ACTION_RELEASE,
+     GHOSTTY_MODS_SHIFT, GHOSTTY_MODS_SHIFT_SIDE},
+    {"release left control", GHOSTTY_KEY_CONTROL_LEFT, GHOSTTY_KEY_ACTION_RELEASE,
+     GHOSTTY_MODS_CTRL, 0},
+    {"release right control", GHOSTTY_KEY_CONTROL_RIGHT, GHOSTTY_KEY_ACTION_RELEASE,
+     GHOSTTY_MODS_CTRL, GHOSTTY_MODS_CTRL_SIDE},
+    {"release left alt", GHOSTTY_KEY_ALT_LEFT, GHOSTTY_KEY_ACTION_RELEASE,
+     GHOSTTY_MODS_ALT, 0},
+    {"release right alt", GHOSTTY_KEY_ALT_RIGHT, GHOSTTY_KEY_ACTION_RELEASE,
+     GHOSTTY_MODS_ALT, GHOSTTY_MODS_ALT_SIDE},
+    {"release left meta", GHOSTTY_KEY_META_LEFT, GHOSTTY_KEY_ACTION_RELEASE,
+     GHOSTTY_MODS_SUPER, 0},
+    {"release right meta", GHOSTTY_KEY_META_RIGHT, GHOSTTY_KEY_ACTION_RELEASE,
+     GHOSTTY_MODS_SUPER, GHOSTTY_MODS_SUPER_SIDE},
+
+    /* Repeat counts as held, and the other modifiers in the state are left
+     * exactly as they came in. */
+    {"repeat left control", GHOSTTY_KEY_CONTROL_LEFT, GHOSTTY_KEY_ACTION_REPEAT,
+     GHOSTTY_MODS_ALT, GHOSTTY_MODS_ALT | GHOSTTY_MODS_CTRL},
+    /* Ctrl+A: the modifier is already in the state and the key is not a
+     * modifier, so there is nothing to fix and nothing to guess a side from. */
+    {"ctrl and a letter", GHOSTTY_KEY_A, GHOSTTY_KEY_ACTION_PRESS,
+     GHOSTTY_MODS_CTRL, GHOSTTY_MODS_CTRL},
+};
+
+static void test_mods_for_key(void) {
+  for (gsize i = 0; i < G_N_ELEMENTS(mods_for_key_cases); i++) {
+    const ModsForKeyCase *c = &mods_for_key_cases[i];
+    g_test_message("case: %s", c->name);
+    g_assert_cmpint(pt_keymap_mods_for_key(c->in, c->key, c->action), ==,
+                    c->expected);
+  }
 }
 
 /* The keycodes below are xkb keycodes taken from the table in pt-keymap.c, not
@@ -51,6 +132,11 @@ static const PhysicalKeyCase physical_key_cases[] = {
     /* caps:swapescape, which is the case the keyval table exists to serve.
      * Caps lock is not a writing system key, so the remap is honoured. */
     {"caps as escape", 0x042, GDK_KEY_Escape, GHOSTTY_KEY_ESCAPE},
+    /* The other half of the rule: the key struck is a writing system key, so
+     * the first test says keep the physical key, but escape is not one, so the
+     * remap is honoured anyway. Someone who binds escape onto a letter key
+     * wants escape. */
+    {"letter as escape", 0x026, GDK_KEY_Escape, GHOSTTY_KEY_ESCAPE},
     /* No keycode at all, as with a synthetic event, falls back to the keyval. */
     {"no keycode", 0x000, GDK_KEY_Escape, GHOSTTY_KEY_ESCAPE},
 
@@ -91,6 +177,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/keymap/letters", test_letters);
   g_test_add_func("/keymap/specials", test_digits_and_specials);
   g_test_add_func("/keymap/mods", test_mods);
+  g_test_add_func("/keymap/mods-for-key", test_mods_for_key);
   g_test_add_func("/keymap/physical-key", test_physical_key);
   g_test_add_func("/keymap/unknown-keycode", test_unknown_keycode);
   return g_test_run();

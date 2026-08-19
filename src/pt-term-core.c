@@ -1143,7 +1143,7 @@ void pt_term_core_write(PtTermCore *c, const char *buf, gssize len) {
 
 gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
                                GhosttyKeyAction action, GhosttyMods mods,
-                               guint32 unshifted_cp,
+                               GhosttyMods consumed_mods, guint32 unshifted_cp,
                                const char *utf8, gsize utf8_len) {
   if (c->child_exited) return FALSE;
   ghostty_key_encoder_setopt_from_terminal(c->key_encoder, c->terminal);
@@ -1151,10 +1151,7 @@ gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
   ghostty_key_event_set_action(c->key_event, action);
   ghostty_key_event_set_mods(c->key_event, mods);
   ghostty_key_event_set_unshifted_codepoint(c->key_event, unshifted_cp);
-  GhosttyMods consumed = 0;
-  if (unshifted_cp != 0 && (mods & GHOSTTY_MODS_SHIFT))
-    consumed |= GHOSTTY_MODS_SHIFT;
-  ghostty_key_event_set_consumed_mods(c->key_event, consumed);
+  ghostty_key_event_set_consumed_mods(c->key_event, consumed_mods);
   ghostty_key_event_set_utf8(c->key_event,
                              utf8_len > 0 ? utf8 : NULL, utf8_len);
   char buf[128];
@@ -1165,7 +1162,17 @@ gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
     pty_write_raw(c->pty_fd, buf, written);
     return TRUE;
   }
-  /* Fallback: raw text (e.g. IM-composed input with no matching key). */
+  /* Fallback: raw text (e.g. IM-composed input with no matching key).
+   *
+   * This cannot strip a modifier off a combination and send the bare letter.
+   * With ctrl held the encoder writes the C0 byte from ctrlSeq, or, where that
+   * does not match, the CSI u form, which asks for nothing beyond ctrl and one
+   * codepoint of text (input/key_encode.zig:383-397 and :480-521), and a
+   * keyval never gives us more than one codepoint. With alt held it writes the
+   * esc prefix and the text, or the text alone when alt-as-esc is off. The
+   * presses it declines to encode at all are a dead key mid composition, which
+   * pt never reports, and a lone modifier key in kitty mode (:233), whose
+   * keyval carries no text for this branch to write. */
   if (utf8_len > 0 && action != GHOSTTY_KEY_ACTION_RELEASE) {
     pty_write_raw(c->pty_fd, utf8, utf8_len);
     return TRUE;

@@ -85,10 +85,17 @@ void pt_term_core_set_callbacks(PtTermCore *c, const PtTermCoreCallbacks *cbs,
 void pt_term_core_resize(PtTermCore *c, guint16 cols, guint16 rows,
                          int cell_w, int cell_h);
 void pt_term_core_write(PtTermCore *c, const char *buf, gssize len);
-/* Returns TRUE if the encoder produced bytes (event was consumed). */
+/* Returns TRUE if the encoder produced bytes (event was consumed).
+ *
+ * `consumed_mods` is the subset of `mods` the keyboard layout already spent on
+ * producing `utf8`, and only the toolkit knows it, so it is a parameter rather
+ * than something guessed here. On a US layout Shift+1 gives "!" and consumes
+ * shift, and the encoder subtracts consumed mods from the event before it
+ * encodes, so the app is told "!" and not Shift+!. Pass 0 when there is no
+ * layout in the picture, as a synthetic event has none. */
 gboolean pt_term_core_send_key(PtTermCore *c, GhosttyKey key,
                                GhosttyKeyAction action, GhosttyMods mods,
-                               guint32 unshifted_cp,
+                               GhosttyMods consumed_mods, guint32 unshifted_cp,
                                const char *utf8, gsize utf8_len);
 void pt_term_core_scroll_delta(PtTermCore *c, int rows);
 /* Snap the viewport back to the active area (what typing should do). */
