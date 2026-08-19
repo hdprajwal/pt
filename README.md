@@ -28,13 +28,15 @@ fonts listed below. To build from source instead, read on.
   shipped with the GLib development package)
 - Zig 0.15.x — used to build libghostty-vt. CMake looks for `zig` on `PATH`
   and falls back to `~/.local/opt/zig-0.15.2`
+- `tic`, the terminfo compiler, to build the `xterm-ghostty` entry pt ships
+  (package `ncurses` on Fedora and Arch, `ncurses-bin` on Debian)
 - git and network access on the first configure (the ghostty source is
   fetched at a pinned commit via CMake FetchContent)
 
 On Arch-based systems:
 
 ```sh
-sudo pacman -S --needed base-devel cmake pkgconf gtk4 libadwaita json-glib
+sudo pacman -S --needed base-devel cmake pkgconf ncurses gtk4 libadwaita json-glib
 ```
 
 Fonts: the defaults are JetBrains Mono (terminal) and IBM Plex Sans (UI
@@ -68,6 +70,25 @@ cmake --install build --prefix ~/.local
 ```sh
 ctest --test-dir build
 ```
+
+## Terminfo
+
+pt compiles ghostty's `xterm-ghostty` terminfo entry from
+`share/terminfo/xterm-ghostty.src` and installs it under `share/pt/terminfo`,
+so it is there whether or not ghostty itself is installed on the machine. Every
+pane gets that directory at the front of `TERMINFO_DIRS`, which puts pt's copy
+first without hiding the system database behind it.
+
+`TERM` travels over ssh but terminfo does not, so a remote host that has never
+heard of the entry cannot look it up. The standard remedy is to send it over
+once:
+
+```sh
+infocmp -x xterm-ghostty | ssh host 'tic -x -'
+```
+
+Doing that automatically, the way ghostty's ssh integration does, is follow-up
+work and is not shipped here.
 
 ## Shell prompt integration
 
@@ -322,7 +343,8 @@ pt stands on other people's open source work:
 
 - [ghostty](https://github.com/ghostty-org/ghostty)'s `libghostty-vt` is the
   core of the terminal emulation, and its behavior is the reference for how
-  pt handles the terminal protocol.
+  pt handles the terminal protocol. The `xterm-ghostty` terminfo entry pt
+  compiles and installs is ghostty's too.
 - [GTK4](https://gtk.org) and
   [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/) draw the UI,
   with GLib/GIO and json-glib underneath.
@@ -332,4 +354,6 @@ pt stands on other people's open source work:
 ## License
 
 MIT, see [LICENSE](LICENSE). The `lib-vt` code fetched from ghostty at build
-time is MIT too, and its notice covers the release binaries built from it.
+time is MIT too, and its notice covers the release binaries built from it. The
+terminfo entry in `share/terminfo/` is ghostty's work under the same license,
+and its notice covers the compiled copy in the release tarballs.

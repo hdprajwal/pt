@@ -28,8 +28,9 @@ jobs:
     steps:
       - name: Install build dependencies
         run: |
+          # ncurses is there for tic, which compiles the terminfo entry pt ships.
           dnf install -y gcc cmake make pkgconf-pkg-config git tar xz gzip \
-            gtk4-devel libadwaita-devel json-glib-devel glib2-devel
+            ncurses gtk4-devel libadwaita-devel json-glib-devel glib2-devel
 
       - uses: actions/checkout@v4
 
@@ -72,6 +73,9 @@ jobs:
                    "stage/${NAME}/share/icons/hicolor/scalable/apps"
           install -m755 build/pt "stage/${NAME}/bin/pt"
           install -m644 share/prompt/pt-prompt.* "stage/${NAME}/share/pt/prompt/"
+          # The build compiled this one; it is a directory tree, so it goes
+          # across whole.
+          cp -R build/share/pt/terminfo "stage/${NAME}/share/pt/"
           install -m644 share/applications/dev.hdprajwal.pt.desktop \
             "stage/${NAME}/share/applications/"
           install -m644 share/icons/hicolor/scalable/apps/dev.hdprajwal.pt.svg \

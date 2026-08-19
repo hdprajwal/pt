@@ -36,6 +36,32 @@ pkg_check_modules(ADW  REQUIRED IMPORTED_TARGET libadwaita-1)
 pkg_check_modules(JSON REQUIRED IMPORTED_TARGET json-glib-1.0)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0 gio-2.0)
 
+# pt ships ghostty's terminfo entry rather than trusting the machine to have
+# ghostty installed, so it needs the terminfo compiler at build time.
+find_program(PT_TIC tic)
+if(NOT PT_TIC)
+  message(FATAL_ERROR
+    "tic not found. It is the terminfo compiler and comes with ncurses "
+    "(the `ncurses` package on Fedora and Arch, `ncurses-bin` on Debian).")
+endif()
+
+# Staged inside the build tree as well as installed, because ctest and ./dev.sh
+# run an uninstalled build: without this the tests and dev runs would resolve
+# xterm-ghostty from whatever ghostty the developer happens to have installed
+# system-wide, and a pt install that shipped no entry at all would still look
+# fine here. tic writes both x/xterm-ghostty and g/ghostty, since the entry
+# declares `ghostty` as an alias; the first one stands in for the pair as the
+# output CMake tracks.
+set(PT_TERMINFO_DIR ${CMAKE_BINARY_DIR}/share/pt/terminfo)
+add_custom_command(
+  OUTPUT ${PT_TERMINFO_DIR}/x/xterm-ghostty
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${PT_TERMINFO_DIR}
+  COMMAND ${PT_TIC} -x -o ${PT_TERMINFO_DIR}
+          ${CMAKE_SOURCE_DIR}/share/terminfo/xterm-ghostty.src
+  DEPENDS share/terminfo/xterm-ghostty.src
+  COMMENT "Compiling terminfo")
+add_custom_target(pt-terminfo ALL DEPENDS ${PT_TERMINFO_DIR}/x/xterm-ghostty)
+
 # Compile CSS into the binary as a GResource.
 find_program(GLIB_COMPILE_RESOURCES glib-compile-resources REQUIRED)
 set(PT_RES_C ${CMAKE_BINARY_DIR}/pt-resources.c)
@@ -53,6 +79,9 @@ add_custom_command(
 
 add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-command-palette.c src/pt-settings.c src/pt-overlay.c src/pt-rowlist.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c src/pt-agent-monitor.c ${PT_RES_C})
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
+# The running binary is how pt locates its own data, so a build tree pt has to
+# find build/share/pt/terminfo beside it.
+add_dependencies(pt pt-terminfo)
 
 add_library(ptcore STATIC
   src/pt-agent.c
@@ -88,6 +117,8 @@ install(FILES share/applications/dev.hdprajwal.pt.desktop
 install(FILES share/icons/hicolor/scalable/apps/dev.hdprajwal.pt.svg
         DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
 install(DIRECTORY share/prompt/ DESTINATION ${CMAKE_INSTALL_DATADIR}/pt/prompt)
+install(DIRECTORY ${PT_TERMINFO_DIR}/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/pt/terminfo)
 
 enable_testing()
 
@@ -121,6 +152,11 @@ add_test(NAME session COMMAND test-session)
 
 add_executable(test-term-core tests/test-term-core.c)
 target_link_libraries(test-term-core PRIVATE ptcore)
+# The terminfo tests read the entry this build compiled, so they need its path
+# and the build has to produce it first.
+target_compile_definitions(test-term-core PRIVATE
+  PT_TERMINFO_BUILD_DIR="${PT_TERMINFO_DIR}")
+add_dependencies(test-term-core pt-terminfo)
 add_test(NAME term-core COMMAND test-term-core)
 
 add_executable(test-config tests/test-config.c)

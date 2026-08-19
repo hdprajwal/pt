@@ -3263,6 +3263,79 @@ static void test_write_right_after_spawn_queues(void) {
   pt_term_core_free(c);
 }
 
+/* The entry this build compiled, found in the build's own staging directory
+ * with nothing else on the search path. That is the point of passing the roots
+ * in: this machine has ghostty installed system-wide, so a search that also
+ * looked at /usr/share/terminfo would pass whether or not pt shipped anything.
+ * tic writes the `ghostty` alias beside it, under its own first letter, so
+ * both names have to resolve. */
+static void test_terminfo_found_in_build_dir(void) {
+  const char *roots[] = { PT_TERMINFO_BUILD_DIR, NULL };
+  g_assert_true(pt_terminfo_in_roots(roots, "xterm-ghostty"));
+  g_assert_true(pt_terminfo_in_roots(roots, "ghostty"));
+}
+
+/* The other branch, the one the TERM fallback exists for: an empty directory
+ * holds no entry, so the same lookup says so instead of finding the installed
+ * ghostty's copy. */
+static void test_terminfo_missing_from_empty_dir(void) {
+  char *empty = g_dir_make_tmp("pt-terminfo-XXXXXX", NULL);
+  g_assert_nonnull(empty);
+  const char *roots[] = { empty, NULL };
+  g_assert_false(pt_terminfo_in_roots(roots, "xterm-ghostty"));
+  g_rmdir(empty);
+  g_free(empty);
+}
+
+/* What the shipped entry is for: a child spawned by this build is pointed at
+ * the directory the build compiled it into. The two patterns are the two
+ * halves of the promise — pt's directory comes first, so its entry wins, and
+ * the list still ends in an empty element, which is how ncurses is told to
+ * keep reading the system database for every other TERM. That second half
+ * only holds when this process inherited no TERMINFO_DIRS of its own, which
+ * is why main clears it. */
+static void test_terminfo_dirs_reaches_child(void) {
+  char *cmd = g_strdup_printf(
+      "case \"$TERMINFO_DIRS\" in \"%s\":*) "
+      "case \"$TERMINFO_DIRS\" in *:) echo dirs-ok ;; esac ;; esac; sleep 30",
+      PT_TERMINFO_BUILD_DIR);
+  const char *argv[] = { "/bin/sh", "-c", cmd, NULL };
+  GError *err = NULL;
+  PtTermCore *core = core_new(argv, NULL, &err);
+  g_assert_no_error(err);
+  g_assert_true(wait_for_text(core, "dirs-ok"));
+  pt_term_core_free(core);
+  g_free(cmd);
+}
+
+/* The public guard, over the roots it gathers for itself.
+ *
+ * Asserting only that it answers TRUE would prove nothing on this machine:
+ * /usr/share/terminfo is one of the guard's fixed roots and ghostty is
+ * installed system-wide, so that assertion holds even against a pt that ships
+ * no entry and cannot find its own directory. Clearing the environment does
+ * not help, because the system paths are not read from it.
+ *
+ * So the test goes in through the roots instead. The first root is pt's own
+ * directory, and asking that one root alone is what pins the layout: this
+ * binary sits in the build directory next to build/share/pt/terminfo, which is
+ * the build-tree layout the lookup checks. Break the resolution, or point
+ * PT_TERMINFO_DIR at a directory with no entry in it, and this goes red.
+ *
+ * TERMINFO and TERMINFO_DIRS are cleared in main, so the first root cannot be
+ * something a developer exported. */
+static void test_terminfo_available_for_ghostty(void) {
+  char **roots = pt_terminfo_roots();
+  g_assert_nonnull(roots);
+  g_assert_nonnull(roots[0]);
+  const char *own[] = { roots[0], NULL };
+  g_assert_true(pt_terminfo_in_roots(own, "xterm-ghostty"));
+  g_strfreev(roots);
+  g_assert_true(pt_term_core_terminfo_available("xterm-ghostty"));
+  /* And it is not a function that says yes to everything. */
+  g_assert_false(pt_term_core_terminfo_available("pt-no-such-terminal"));
+}
+
 int main(int argc, char *argv[]) {
   /* Report paths come off $XDG_STATE_HOME, and the pane-token tests write real
      files: point them at a temp dir so a test run never touches the state of
@@ -3271,6 +3344,13 @@ int main(int argc, char *argv[]) {
   char *state_dir = g_dir_make_tmp("pt-termcore-state-XXXXXX", NULL);
   g_assert_nonnull(state_dir);
   g_setenv("XDG_STATE_HOME", state_dir, TRUE);
+  /* The terminfo tests read what this process's own environment does to the
+     lookup, and a developer or CI runner that exports either variable would
+     otherwise fail a correct implementation. Cleared before g_test_init rather
+     than inside the tests, because the child's TERMINFO_DIRS is built once and
+     cached at the first spawn, which happens several tests earlier. */
+  g_unsetenv("TERMINFO");
+  g_unsetenv("TERMINFO_DIRS");
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/termcore/output", test_output_reaches_grid);
   g_test_add_func("/termcore/exit", test_exit_status_reported);
@@ -3420,6 +3500,14 @@ int main(int argc, char *argv[]) {
                   test_free_without_report_is_quiet);
   g_test_add_func("/termcore/write-after-spawn-queues",
                   test_write_right_after_spawn_queues);
+  g_test_add_func("/termcore/terminfo-build-dir",
+                  test_terminfo_found_in_build_dir);
+  g_test_add_func("/termcore/terminfo-empty-dir",
+                  test_terminfo_missing_from_empty_dir);
+  g_test_add_func("/termcore/terminfo-available",
+                  test_terminfo_available_for_ghostty);
+  g_test_add_func("/termcore/terminfo-dirs-child",
+                  test_terminfo_dirs_reaches_child);
   int rc = g_test_run();
   char *sessions = g_build_filename(state_dir, "pt", "agent-sessions", NULL);
   char *pt_dir = g_build_filename(state_dir, "pt", NULL);

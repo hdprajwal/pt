@@ -60,6 +60,23 @@ typedef struct {
                        gpointer user);
 } PtTermCoreCallbacks;
 
+/* ---- terminfo ----
+ *
+ * TRUE when a compiled terminfo entry named `term` exists somewhere ncurses
+ * will look: pt's own shipped directory first, then $TERMINFO, $TERMINFO_DIRS,
+ * ~/.terminfo and the system database. pt ships the xterm-ghostty entry and
+ * puts its directory on the child's TERMINFO_DIRS, so on a correct install
+ * this is TRUE; it is a safety net against an install that lost the data
+ * directory, not a way to turn the shipped entry off. A caller that gets FALSE
+ * should fall back to a TERM every machine has.
+ *
+ * A filesystem check, not a terminfo read — pt does not link ncurses. So it
+ * answers whether ncurses would find a file, not whether that file parses.
+ *
+ * $PT_TERMINFO_DIR overrides where pt believes its own directory is, for a
+ * binary that has been moved away from the data it shipped with. */
+gboolean pt_term_core_terminfo_available(const char *term);
+
 /* argv NULL → spawn the user's shell ($SHELL → passwd → /bin/sh).
  * env_pairs: NULL-terminated "KEY=VALUE" strings set in the child before
  * exec (after TERM). NULL → none. Copied; caller keeps ownership.

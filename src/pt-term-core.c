@@ -856,6 +856,156 @@ static gboolean on_pty_readable(gint fd, GIOCondition cond, gpointer ud) {
   return G_SOURCE_CONTINUE;
 }
 
+/* ---- terminfo ----
+ *
+ * pt compiles and ships the xterm-ghostty entry itself
+ * (share/terminfo/xterm-ghostty.src), because a TERM whose entry cannot be
+ * resolved is worse than a plain one: ncurses programs degrade or refuse to
+ * start. Two things need the shipped copy. The child gets pt's directory on
+ * TERMINFO_DIRS, and the guard at the bottom of this section answers whether
+ * a given TERM resolves at all, so a broken install can fall back instead of
+ * handing panes a name nothing understands. */
+
+/* Where this build or install put the compiled entry, or NULL if it cannot be
+ * found. pt has no prefix baked in and must not gain one: install.sh puts it
+ * under ~/.local, release-local.sh under $PT_PREFIX, and a distro package
+ * somewhere else again. The one thing that always points at the right data is
+ * the running binary, read the way pt_binary_path does it in pt-integration.c,
+ * and two layouts hang off its directory: <dir>/../share/pt/terminfo for an
+ * install, where the binary is <prefix>/bin/pt, and <dir>/share/pt/terminfo
+ * for the build tree, where it is build/pt and every test binary sits beside
+ * it. $PT_TERMINFO_DIR overrides both, for the case neither layout covers: a
+ * binary that has been moved away from the data it shipped with.
+ *
+ * Resolved once and remembered. This walks the filesystem, the answer cannot
+ * change while pt runs, and a pane spawn needs it before the fork, where none
+ * of this work would be safe to do. */
+static const char *terminfo_own_dir(void) {
+  static const char *dir;
+  static gboolean resolved;
+  if (resolved) return dir;
+  resolved = TRUE;
+  const char *override = g_getenv("PT_TERMINFO_DIR");
+  if (override != NULL && override[0] != '\0') {
+    dir = g_strdup(override);
+    return dir;
+  }
+  char *exe = g_file_read_link("/proc/self/exe", NULL);
+  if (exe == NULL) return NULL;
+  char *bin = g_path_get_dirname(exe);
+  char *installed = g_build_filename(bin, "..", "share", "pt", "terminfo",
+                                     NULL);
+  char *in_tree = g_build_filename(bin, "share", "pt", "terminfo", NULL);
+  if (g_file_test(installed, G_FILE_TEST_IS_DIR)) dir = installed;
+  else if (g_file_test(in_tree, G_FILE_TEST_IS_DIR)) dir = in_tree;
+  if (dir != installed) g_free(installed);
+  if (dir != in_tree) g_free(in_tree);
+  g_free(bin);
+  g_free(exe);
+  return dir;
+}
+
+/* The child's TERMINFO_DIRS, as one ready-to-putenv string with pt's own
+ * directory first so the shipped entry resolves even where the system database
+ * has never heard of xterm-ghostty.
+ *
+ * The trailing colon is load-bearing. ncurses reads an empty element of
+ * TERMINFO_DIRS as "the compiled-in system database", so ending the list with
+ * one keeps /usr/share/terminfo and the rest reachable; without it pt's
+ * directory would be the whole database and every other TERM a child cares
+ * about would stop resolving.
+ *
+ * Built once and kept, for the same two reasons as terminfo_own_dir: neither
+ * input changes while pt runs, and the string has to exist before the fork
+ * because the child branch may neither allocate nor read the environment. */
+static const char *terminfo_dirs_env(void) {
+  static const char *env;
+  static gboolean built;
+  if (built) return env;
+  built = TRUE;
+  const char *own = terminfo_own_dir();
+  if (own == NULL) return NULL;
+  const char *inherited = g_getenv("TERMINFO_DIRS");
+  env = g_strdup_printf("TERMINFO_DIRS=%s:%s", own,
+                        inherited != NULL ? inherited : "");
+  return env;
+}
+
+/* Is there a compiled entry for `term` under any of `roots`? ncurses files an
+ * entry under the first letter of its name, and on filesystems where that
+ * letter is not a usable directory name under the hex of its first byte
+ * instead, so both forms are tried in every root.
+ *
+ * This stats paths rather than reading terminfo, which keeps pt from linking
+ * ncurses for a question that is only ever "will ncurses find something".
+ *
+ * The roots are a parameter so tests can point the search at a directory of
+ * their own. On a machine with ghostty installed system-wide there is no other
+ * way to reach the not-found branch. */
+gboolean pt_terminfo_in_roots(const char *const *roots, const char *term) {
+  if (roots == NULL || term == NULL || term[0] == '\0') return FALSE;
+  const char letter[2] = { term[0], '\0' };
+  char hex[3];
+  g_snprintf(hex, sizeof hex, "%02x", (unsigned char)term[0]);
+  const char *forms[2] = { letter, hex };
+  for (int i = 0; roots[i] != NULL; i++) {
+    if (roots[i][0] == '\0') continue;
+    for (int form = 0; form < 2; form++) {
+      char *path = g_build_filename(roots[i], forms[form], term, NULL);
+      gboolean found = g_file_test(path, G_FILE_TEST_EXISTS);
+      g_free(path);
+      if (found) return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/* pt's own directory first, then the places ncurses looks. This is not
+ * ncurses' own order (db_iterator.c reads $TERMINFO, then ~/.terminfo, then
+ * $TERMINFO_DIRS) and does not need to be: the answer is one yes or no over
+ * the whole set, so which root produces it cannot change it. Only the first
+ * entry is deliberate, and it is pt's, so that a test can ask whether the
+ * shipped copy alone would answer.
+ *
+ * Split out for that test. The public guard below cannot show that pt ships
+ * anything: /usr/share/terminfo is a fixed root, so on a machine with ghostty
+ * installed it answers TRUE for xterm-ghostty whether or not pt shipped an
+ * entry, and no amount of clearing the environment removes it. Handing the
+ * roots back lets a test take the first one on its own. */
+char **pt_terminfo_roots(void) {
+  GPtrArray *roots = g_ptr_array_new_with_free_func(g_free);
+  const char *own = terminfo_own_dir();
+  if (own != NULL) g_ptr_array_add(roots, g_strdup(own));
+  const char *terminfo = g_getenv("TERMINFO");
+  if (terminfo != NULL && terminfo[0] != '\0')
+    g_ptr_array_add(roots, g_strdup(terminfo));
+  const char *dirs = g_getenv("TERMINFO_DIRS");
+  if (dirs != NULL) {
+    char **parts = g_strsplit(dirs, ":", -1);
+    /* An empty element stands for the system database, which the fixed roots
+     * below cover already, so it is dropped rather than turned into a path. */
+    for (int i = 0; parts[i] != NULL; i++)
+      if (parts[i][0] != '\0') g_ptr_array_add(roots, g_strdup(parts[i]));
+    g_strfreev(parts);
+  }
+  g_ptr_array_add(roots, g_build_filename(g_get_home_dir(), ".terminfo", NULL));
+  static const char *const system_roots[] = {
+    "/usr/share/terminfo", "/etc/terminfo", "/lib/terminfo",
+    "/usr/lib/terminfo",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(system_roots); i++)
+    g_ptr_array_add(roots, g_strdup(system_roots[i]));
+  g_ptr_array_add(roots, NULL);
+  return (char **)g_ptr_array_free(roots, FALSE);
+}
+
+gboolean pt_term_core_terminfo_available(const char *term) {
+  char **roots = pt_terminfo_roots();
+  gboolean found = pt_terminfo_in_roots((const char *const *)roots, term);
+  g_strfreev(roots);
+  return found;
+}
+
 /* ---- spawn ---- */
 /* The shell a NULL-argv spawn execs, as the *child* will see it: the inherited
  * $SHELL with any env_pairs "SHELL=" override applied on top (last one wins,
@@ -888,6 +1038,7 @@ static int spawn_pty(const char *cwd, const char *const *argv,
   /* Everything the child touches between fork and exec is computed here,
    * before the fork: getenv/getpwuid/allocation are not async-signal-safe,
    * so the child branch only follows precomputed pointers. */
+  const char *terminfo_dirs = terminfo_dirs_env();
   const char *shell_argv0 = NULL;
   if (shell != NULL) {
     shell_argv0 = strrchr(shell, '/');
@@ -900,6 +1051,11 @@ static int spawn_pty(const char *cwd, const char *const *argv,
     if (cwd != NULL) { if (chdir(cwd) != 0) { /* fall through to $HOME */ chdir(g_get_home_dir()); } }
     setenv("TERM", "xterm-256color", 1);
     setenv("COLORTERM", "truecolor", 1);
+    /* putenv rather than setenv because the string was built before the fork,
+     * and before env_pairs so a caller can still override it. NULL only when
+     * pt could not find its own terminfo directory, and then the child keeps
+     * whatever it inherited. */
+    if (terminfo_dirs != NULL) putenv((char *)terminfo_dirs);
     /* Names this pane to anything the child runs: an agent integration writes
      * its session report under this key. Set before env_pairs so a caller can
      * still override it. */
