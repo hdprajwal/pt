@@ -4,6 +4,7 @@
 #include "pt-keymap.h"
 #include "pt-link.h"         /* bare URLs in plain output, matched on hover */
 #include "pt-session.h"      /* PT_FONT_SIZE_DEFAULT, shared with persistence */
+#include "pt-sprite.h"       /* box drawing, drawn from the cell not the font */
 #include <adwaita.h>         /* paste confirmation dialog */
 #include <math.h>
 
@@ -683,6 +684,35 @@ static void draw_rect(GtkSnapshot *snapshot, float x, float y, float w,
                       float h, const GdkRGBA *color) {
   gtk_snapshot_append_color(snapshot, color, &GRAPHENE_RECT_INIT(x, y, w, h));
 }
+
+/* ---- sprite glyphs ---- */
+
+/* pt-sprite.c decides the shapes; this turns them into GSK nodes. Ghostty
+ * rasterizes the same primitives into its glyph atlas so its renderer needs no
+ * special case for them. pt has no atlas, so the nodes go straight into the
+ * snapshot instead. Colour nodes are the cheapest thing GSK has and the GL
+ * renderer batches them, but this is still one node per rectangle: a braille
+ * cell can be eight of them and they cannot be run-merged the way the
+ * background pass merges its spans, because braille dots are separated by
+ * spacing by construction. */
+typedef struct {
+  GtkSnapshot *snapshot;
+  GdkRGBA fg;    /* already carries FAINT's alpha */
+  int x, y;      /* the cell's top-left corner, in widget px */
+} SpriteCtx;
+
+static void sprite_rect(void *user, int x, int y, int w, int h, float alpha) {
+  SpriteCtx *c = user;
+  GdkRGBA col = c->fg;
+  col.alpha *= alpha;
+  gtk_snapshot_append_color(c->snapshot, &col,
+      &GRAPHENE_RECT_INIT(c->x + x, c->y + y, w, h));
+}
+
+/* The stroke sink lands with the arcs and diagonals, the only shapes in these
+ * ranges that are not rectangles. Nothing pt_sprite_has claims yet reaches
+ * it. */
+static const PtSpriteSink sprite_sink = { sprite_rect, NULL };
 
 /* One cycle of a sine-shaped wave per cell, geometry matched to ghostty's
  * underline_curly (font/sprite/draw/special.zig:162-235): amplitude = cell
@@ -1409,6 +1439,23 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
        * setting for this either, so 0.5 is a literal matched to the
        * reference implementation, same as the decoration pass above. */
       float alpha = (cl->style & PT_CELL_STYLE_FAINT) ? 0.5f : 1.0f;
+
+      /* Box drawing is drawn from the cell metrics, never shaped: the font
+       * cuts those glyphs for its own line height, which includes line gap,
+       * so in pt's gapless cell they overhang the row and punch through the
+       * rule above. The sprite always wins over the font here, matching
+       * ghostty's resolver, which checks its sprite face ahead of every
+       * loaded font (font/CodepointResolver.zig:139-145). pt_sprite_has is
+       * asked first so that ordinary text does not have to break its shaped
+       * run just to find out the sprite does not want the cell. */
+      if (single && pt_sprite_has(cp)) {
+        flush_run(snapshot, run_font, run, &run_color, run_x, y, t->baseline);
+        PtSpriteMetrics sm = { t->cell_w, t->cell_h, t->underline_thickness };
+        SpriteCtx sc = { snapshot,
+                         { fg.r / 255.0f, fg.g / 255.0f, fg.b / 255.0f, alpha },
+                         x, y };
+        if (pt_sprite_draw(cp, &sm, &sprite_sink, &sc)) continue;
+      }
 
       /* Block elements are drawn from the cell metrics, never shaped: the
        * font's ink is narrower than the rounded cell width, which seams every
