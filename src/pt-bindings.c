@@ -126,7 +126,7 @@ static gboolean key_append(const char *k, GString *out) {
 }
 
 /* Builds the canonical accel for one `<accel>` word, or returns FALSE. */
-static gboolean accel_build(const char *word, GString *out) {
+static gboolean accel_build(const char *word, int line_no, GString *out) {
   char *low = g_ascii_strdown(word, -1);
   gchar **parts = g_strsplit(low, "+", -1);
   guint n = g_strv_length(parts);
@@ -145,6 +145,15 @@ static gboolean accel_build(const char *word, GString *out) {
       if (slot == NULL || *slot || m[0] == '\0') ok = FALSE;
       else *slot = TRUE;
     }
+  /* A modifier-less accelerator would ride the capture-phase shortcut
+   * controller and swallow the bare key in every widget, so it is refused
+   * here, at parse time, rather than installed. */
+  if (ok && !(m_ctrl || m_shift || m_alt || m_super)) {
+    g_warning("pt: config line %d: accelerator '%s' has no modifier "
+              "(ctrl/shift/alt/super) and would swallow the key everywhere "
+              "— skipped", line_no, word);
+    ok = FALSE;
+  }
   if (ok) {
     if (m_ctrl)  g_string_append(out, "<Control>");
     if (m_shift) g_string_append(out, "<Shift>");
@@ -152,6 +161,16 @@ static gboolean accel_build(const char *word, GString *out) {
     if (m_super) g_string_append(out, "<Super>");
     ok = key_append(parts[n - 1], out);
   }
+  /* Deliberate: a plain ctrl+letter still applies even though it also
+   * reaches the program running in the pane (SIGINT on ctrl+c and
+   * friends). The user asked for it; pt takes the key but says why it
+   * might not be what they wanted. */
+  if (ok && m_ctrl && !m_shift && !m_alt && !m_super &&
+      strlen(parts[n - 1]) == 1 && parts[n - 1][0] >= 'a' &&
+      parts[n - 1][0] <= 'z')
+    g_warning("pt: config line %d: ctrl+%c is also seen by programs running "
+              "in the pane (SIGINT and friends); pt takes it anyway",
+              line_no, parts[n - 1][0]);
   g_strfreev(parts);
   g_free(low);
   return ok;
@@ -208,7 +227,7 @@ static void parse_line(const char *line, int line_no, GPtrArray *out) {
   }
 
   GString *canon = g_string_new(NULL);
-  if (!accel_build(words[1], canon)) {
+  if (!accel_build(words[1], line_no, canon)) {
     g_warning("pt: config line %d: bad accelerator '%s' — skipped", line_no,
               words[1]);
     g_string_free(canon, TRUE);

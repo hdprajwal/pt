@@ -424,7 +424,10 @@ unbind ctrl+b
 A bind line is `bind <accel> <action>` and an unbind line is `unbind <accel>`.
 There is no `=` sign on these lines, on purpose: `=` is itself a key you can
 bind. The accelerator is lowercase modifiers joined by `+`, then a key name.
-Modifiers are `ctrl`, `shift`, `alt` and `super`. Keys are letters, digits,
+Modifiers are `ctrl`, `shift`, `alt` and `super`, and an accelerator needs at
+least one of them — a bare key would be caught before any pane saw it. A plain
+`ctrl+<letter>` is accepted but prints a warning, since programs running in
+the pane see the same chord (Ctrl+C sends SIGINT). Keys are letters, digits,
 `f1` through `f24`, and these named keys:
 
 ```text

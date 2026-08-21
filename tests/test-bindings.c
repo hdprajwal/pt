@@ -95,18 +95,20 @@ static void test_named_keys(void) {
     { "bracketright", "bracketright" },
   };
   for (gsize i = 0; i < G_N_ELEMENTS(keys); i++) {
-    char *line = g_strdup_printf("bind %s paste", keys[i].key);
+    char *line = g_strdup_printf("bind ctrl+%s paste", keys[i].key);
     const char *one[] = { line, NULL };
     GPtrArray *r = pt_bindings_parse(one, NULL, NULL);
+    char *want = g_strdup_printf("<Control>%s", keys[i].gtk);
     if (r->len != 1 ||
         strcmp(((PtBindingLine *)g_ptr_array_index(r, 0))->accel,
-               keys[i].gtk) != 0)
+               want) != 0)
       g_error("key %s -> %s, wanted %s", keys[i].key,
               r->len == 1
                   ? ((PtBindingLine *)g_ptr_array_index(r, 0))->accel
                   : "(skipped)",
-              keys[i].gtk);
+              want);
     pt_bindings_free(r);
+    g_free(want);
     g_free(line);
   }
 }
@@ -251,6 +253,82 @@ static void test_null_and_empty_input(void) {
   pt_bindings_free(b);
 }
 
+/* ---------- warning capture ----------
+ * A few behaviours are a warning plus an outcome rather than an outcome
+ * alone; these route warnings into a buffer so the tests can read them. */
+static GString *log_buf = NULL;
+static guint log_id = 0;
+static char *log_msg = NULL;
+
+static void log_capture(const gchar *domain, GLogLevelFlags level,
+                        const gchar *msg, gpointer user) {
+  (void)domain; (void)level; (void)user;
+  g_string_append_printf(log_buf, "%s\n", msg);
+}
+
+static void log_begin(void) {
+  g_free(log_msg);
+  log_msg = NULL;
+  log_buf = g_string_new(NULL);
+  log_id = g_log_set_handler(NULL, G_LOG_LEVEL_WARNING, log_capture, NULL);
+}
+
+static void log_end(void) {
+  g_log_remove_handler(NULL, log_id);
+  log_msg = g_string_free(log_buf, FALSE);
+  log_buf = NULL;
+}
+
+/* How many times needle appears in the captured warnings. */
+static guint log_count(const char *needle) {
+  guint n = 0;
+  const char *p = log_msg;
+  if (p == NULL) return 0;
+  size_t len = strlen(needle);
+  while ((p = strstr(p, needle)) != NULL) { n++; p += len; }
+  return n;
+}
+
+static void test_no_modifier_refused(void) {
+  /* A modifier-less accelerator would ride the capture-phase controller and
+   * swallow the bare key everywhere, so parse refuses it and says which
+   * config line did it. */
+  const char *bad[] = { "bind t new-tab", "bind enter paste", "bind f5 copy" };
+  for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
+    log_begin();
+    const char *one[] = { bad[i], NULL };
+    GPtrArray *b = pt_bindings_parse(one, NULL, NULL);
+    log_end();
+    g_assert_cmpuint(b->len, ==, 0);
+    pt_bindings_free(b);
+    g_assert_nonnull(strstr(log_msg, "no modifier"));
+    g_assert_nonnull(strstr(log_msg, "line 1"));
+  }
+
+  /* With a modifier the same key is fine. */
+  const char *ok[] = { "bind ctrl+t new-tab", NULL };
+  GPtrArray *b = pt_bindings_parse(ok, NULL, NULL);
+  g_assert_cmpuint(b->len, ==, 1);
+  pt_bindings_free(b);
+}
+
+static void test_ctrl_letter_warns_but_applies(void) {
+  /* Deliberate choice: ctrl+<letter> still applies even though programs in
+   * the pane also see it (SIGINT on ctrl+c). Parse warns once and binds. */
+  const char *lines[] = { "bind ctrl+c copy", "bind ctrl+shift+c copy",
+                          "bind alt+c paste", NULL };
+  log_begin();
+  GPtrArray *b = pt_bindings_parse(lines, NULL, NULL);
+  log_end();
+  g_assert_cmpuint(b->len, ==, 3);
+  g_assert_cmpint(find_accel(b, "<Control>c"), >=, 0);
+  /* Exactly one warning: only plain ctrl+letter carries the risk. */
+  g_assert_cmpuint(log_count("ctrl+c is also seen"), ==, 1);
+  g_assert_null(strstr(log_msg, "ctrl+s"));   /* shift variant not warned */
+  g_assert_null(strstr(log_msg, "alt+c"));
+  pt_bindings_free(b);
+}
+
 int main(void) {
   test_valid_lines();
   test_action_lookup();
@@ -264,6 +342,8 @@ int main(void) {
   test_incomplete_lines();
   test_source_line_numbers();
   test_null_and_empty_input();
+  test_no_modifier_refused();
+  test_ctrl_letter_warns_but_applies();
   g_print("test-bindings: OK\n");
   return 0;
 }
