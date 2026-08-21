@@ -9,6 +9,7 @@
 #include "pt-info-panel.h"
 #include "pt-tab-strip.h"
 #include "pt-statusline.h"
+#include "pt-search-bar.h"
 #include "pt-project-bar.h"
 #include "pt-pane-grid.h"
 #include "pt-command-palette.h"
@@ -51,12 +52,14 @@ struct _PtWindow {
   AdwApplicationWindow parent_instance;
   PtWorkspace *ws;      /* NULL after dispose, like projects used to be */
   GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
+  GtkWidget *searchbar; /* find-in-scrollback revealer; above the statusline */
   GtkWidget *infopanel;  /* right rail; hidden until ⌃I */
   PtAgentMonitor *agents; /* the panel's agent-usage block; polls only while shown */
   GtkWidget *palette;   /* overlay child; hidden unless ⌃K is up */
   GtkWidget *settings;  /* overlay child, same stack as the palette; ⌃, */
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
+  guint search_source;  /* find-bar debounce timer; 0 = none pending */
   guint sidebar_idle;   /* pending coalesced refresh_sidebar; 0 = none */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
   PtConfig *config;
@@ -503,6 +506,9 @@ static PtTerminal *focused_terminal(PtWindow *w) {
 
 static gboolean active_pane_zoomed(PtWindow *w);   /* body below, with the actions */
 
+static void search_update_count(PtWindow *w);   /* find-bar count, below */
+static void focus_active_terminal(PtWindow *w); /* defined with the focus handlers */
+
 static void refresh_statusline(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   PtTerminal *term = focused_terminal(w);
@@ -526,6 +532,104 @@ static void refresh_statusline(PtWindow *w) {
                        has_prog ? &prog : NULL, task,
                        p != NULL ? proj_accent(p) : 0,
                        active_pane_zoomed(w));
+  /* The find bar's count belongs to whatever pane is focused now, and focus
+     moves without any search action happening — so it rides the same
+     refreshes the statusline gets. No-op while the bar is closed. */
+  if (w->searchbar != NULL &&
+      pt_search_bar_is_open(PT_SEARCH_BAR(w->searchbar)))
+    search_update_count(w);
+}
+
+/* ---------- find in scrollback ---------- */
+
+static void search_update_count(PtWindow *w) {
+  int cur = -1, count = 0;
+  PtTerminal *term = focused_terminal(w);
+  if (term != NULL) pt_terminal_search_status(term, &cur, &count);
+  pt_search_bar_set_count(PT_SEARCH_BAR(w->searchbar), cur, count);
+}
+
+/* Run the entry's text against the focused pane right now. Also the landing
+   spot of every step, since a step after new output re-runs the search. */
+static void search_apply(PtWindow *w) {
+  PtTerminal *term = focused_terminal(w);
+  if (term == NULL) return;
+  pt_terminal_search_set_text(term,
+      pt_search_bar_text(PT_SEARCH_BAR(w->searchbar)));
+  search_update_count(w);
+}
+
+/* Typing fires per keystroke; one keystroke can mean walking every grid ref
+   in the scrollback, so the search waits for a 100ms pause first. */
+static gboolean search_debounced(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->search_source = 0;
+  search_apply(w);
+  return G_SOURCE_REMOVE;
+}
+
+/* Closing is more than hiding: pending debounces are cancelled (a timer
+   landing on a closed bar would start a search nobody asked for), the
+   focused pane drops its highlights, and the keyboard goes back to the
+   terminal. */
+static void close_search(PtWindow *w) {
+  g_clear_handle_id(&w->search_source, g_source_remove);
+  pt_search_bar_close(PT_SEARCH_BAR(w->searchbar));
+  PtTerminal *term = focused_terminal(w);
+  if (term != NULL) pt_terminal_search_clear(term);
+  focus_active_terminal(w);
+}
+
+static void on_search_changed(PtSearchBar *sb, const char *text,
+                              gpointer user) {
+  (void)sb;
+  PtWindow *w = PT_WINDOW(user);
+  /* An emptied entry is not worth a debounce round trip: clear now. */
+  if (*text == '\0') {
+    g_clear_handle_id(&w->search_source, g_source_remove);
+    PtTerminal *term = focused_terminal(w);
+    if (term != NULL) pt_terminal_search_clear(term);
+    pt_search_bar_set_count(PT_SEARCH_BAR(w->searchbar), -1, 0);
+    return;
+  }
+  g_clear_handle_id(&w->search_source, g_source_remove);
+  w->search_source = g_timeout_add(100, search_debounced, w);
+}
+
+static void on_search_next(PtSearchBar *sb, gpointer user) {
+  (void)sb;
+  PtWindow *w = PT_WINDOW(user);
+  g_clear_handle_id(&w->search_source, g_source_remove);
+  PtTerminal *term = focused_terminal(w);
+  if (term == NULL) return;
+  pt_terminal_search_step(term, +1);
+  search_update_count(w);
+}
+
+static void on_search_prev(PtSearchBar *sb, gpointer user) {
+  (void)sb;
+  PtWindow *w = PT_WINDOW(user);
+  g_clear_handle_id(&w->search_source, g_source_remove);
+  PtTerminal *term = focused_terminal(w);
+  if (term == NULL) return;
+  pt_terminal_search_step(term, -1);
+  search_update_count(w);
+}
+
+static void on_search_stopped(PtSearchBar *sb, gpointer user) {
+  (void)sb;
+  close_search(PT_WINDOW(user));
+}
+
+/* The toggle behind ⌃⇧F. Opening puts the keyboard in the entry — keys go
+   to the search until Esc or a second ⌃⇧F closes it — closing hands them
+   back to the terminal. */
+static void action_toggle_find(PtWindow *w) {
+  if (pt_search_bar_is_open(PT_SEARCH_BAR(w->searchbar))) {
+    close_search(w);
+    return;
+  }
+  pt_search_bar_open(PT_SEARCH_BAR(w->searchbar));
 }
 
 /* ---------- info panel ---------- */
@@ -1885,7 +1989,7 @@ static void on_info_usage_enable(PtInfoPanel *ip, gpointer user) {
 /* Commands ride the same list as projects and shells, marked is_command with
  * `command` saying which one. */
 enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL,
-       PT_CMD_TOGGLE_PANE_ZOOM };
+       PT_CMD_TOGGLE_PANE_ZOOM, PT_CMD_FIND_SCROLLBACK };
 
 /* Every project, each followed by its shells, then the commands. The palette
  * ranks this flat list and hands back the workspace ids the user picked —
@@ -1978,6 +2082,15 @@ static void action_open_palette(PtWindow *w) {
   };
   g_array_append_val(arr, zm);
 
+  PtCommandPaletteItem find = {
+    .name = g_strdup("Find in scrollback"),
+    .detail = g_strdup("search the focused pane's history · ⌃⇧F"),
+    .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
+    .project_id = PT_WS_ID_NONE, .tab_id = PT_WS_ID_NONE,
+    .command = PT_CMD_FIND_SCROLLBACK,
+  };
+  g_array_append_val(arr, find);
+
   append_recent_sessions_row(arr);
 
   int n = (int)arr->len;
@@ -2050,6 +2163,7 @@ static void on_palette_activated(PtCommandPalette *pal, guint project_id,
     case PT_CMD_TOGGLE_MOUSE_REPORTING: action_toggle_mouse_reporting(w); break;
     case PT_CMD_RESET_TERMINAL:         action_reset_terminal(w); break;
     case PT_CMD_TOGGLE_PANE_ZOOM:       action_toggle_pane_zoom(w); break;
+    case PT_CMD_FIND_SCROLLBACK:        action_toggle_find(w); break;
     default: break;
     }
     return;
@@ -2194,6 +2308,7 @@ typedef enum {
   PT_ACTION_FOCUS_DIRECTION,
   PT_ACTION_PASTE,
   PT_ACTION_COPY,
+  PT_ACTION_FIND,
   PT_ACTION_ZOOM,
   PT_ACTION_ZOOM_PANE,
 } PtActionId;
@@ -2253,6 +2368,10 @@ static const struct {
     .arg = PT_PANE_DIR_DOWN },
   { .accel = "<Control><Shift>v", .id = PT_ACTION_PASTE },
   { .accel = "<Control><Shift>c", .id = PT_ACTION_COPY },
+  /* Find in scrollback (⌃⇧F): the bar is not one of the overlays
+     overlay_open() knows about, so its toggle has to be its own shortcut
+     row rather than something the blocking rule eats. */
+  { .accel = "<Control><Shift>f", .id = PT_ACTION_FIND },
   /* Font zoom: cover =, shifted + (both plain and explicit-shift forms),
    * and the keypad. */
   { .accel = "<Control>equal", .id = PT_ACTION_ZOOM, .arg = +1 },
@@ -2298,6 +2417,7 @@ static gboolean shortcut_dispatch(GtkWidget *wg, GVariant *a, gpointer u) {
       break;
     case PT_ACTION_PASTE:            action_paste(w); break;
     case PT_ACTION_COPY:             action_copy(w); break;
+    case PT_ACTION_FIND:             action_toggle_find(w); break;
     case PT_ACTION_ZOOM:             action_zoom(w, c->arg); break;
     case PT_ACTION_ZOOM_PANE:        action_toggle_pane_zoom(w); break;
   }
@@ -2514,6 +2634,10 @@ static void pt_window_dispose(GObject *obj) {
     g_source_remove(w->status_source);
     w->status_source = 0;
   }
+  if (w->search_source != 0) {
+    g_source_remove(w->search_source);
+    w->search_source = 0;
+  }
   if (w->sidebar_idle != 0) {
     g_source_remove(w->sidebar_idle);
     w->sidebar_idle = 0;
@@ -2590,6 +2714,11 @@ static void pt_window_init(PtWindow *w) {
   w->content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_vexpand(w->content, TRUE);
   gtk_box_append(GTK_BOX(main_col), w->content);
+  /* The find bar sits between the grid and the status line: it slides out of
+     the bottom edge (SLIDE_UP) and, when open, the two read as one bottom
+     chrome strip. */
+  w->searchbar = pt_search_bar_new();
+  gtk_box_append(GTK_BOX(main_col), w->searchbar);
   w->statusline = pt_statusline_new();
   gtk_box_append(GTK_BOX(main_col), w->statusline);
   gtk_box_append(GTK_BOX(body), main_col);
@@ -2633,6 +2762,13 @@ static void pt_window_init(PtWindow *w) {
   g_signal_connect(w->palette, "history-activated",
                    G_CALLBACK(on_palette_history_activated), w);
   g_signal_connect(w->palette, "closed", G_CALLBACK(on_palette_closed), w);
+  g_signal_connect(w->searchbar, "changed",
+                   G_CALLBACK(on_search_changed), w);
+  g_signal_connect(w->searchbar, "next-match", G_CALLBACK(on_search_next), w);
+  g_signal_connect(w->searchbar, "previous-match",
+                   G_CALLBACK(on_search_prev), w);
+  g_signal_connect(w->searchbar, "stopped",
+                   G_CALLBACK(on_search_stopped), w);
   g_signal_connect(w->settings, "changed",
                    G_CALLBACK(on_settings_changed), w);
   g_signal_connect(w->settings, "committed",

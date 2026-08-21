@@ -411,6 +411,19 @@ button.pt-tab-panel:hover, button.pt-tab-panel:hover image { color: var(--pt-tex
 .pt-task-label { font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-mid); }
 .pt-status-hint { font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs); color: var(--pt-text-ghost); }
 
+/* ---- find in scrollback ---- */
+/* Sits directly above the status bar, same surface so the two read as one
+   bottom chrome strip when both are up. */
+.pt-search-bar-box {
+  background-color: var(--pt-surface);
+  border-top: 1px solid var(--pt-border);
+  padding: 4px 14px;
+}
+.pt-search-count {
+  font-family: var(--pt-font-mono); font-size: var(--pt-fs-xs);
+  color: var(--pt-text-mid);
+}
+
 /* ---- command palette ---- */
 .pt-palette-scrim { background-color: var(--pt-scrim); }
 .pt-palette {
