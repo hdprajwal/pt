@@ -22,6 +22,7 @@
 #include "pt-style.h"
 #include "pt-workspace.h"
 #include "pt-agent-session.h"
+#include "pt-agent-latch.h"
 
 /* The window no longer keeps the project/tab structure itself: PtWorkspace
  * (ptcore, headless) owns order and selection, addressed by stable ids. The
@@ -62,7 +63,7 @@ struct _PtWindow {
   GFileMonitor *config_monitor;
   GFileMonitor *theme_monitor;
   GFileMonitor *agent_report_monitor;  /* watches the agent-sessions dir */
-  GHashTable *agent_notified;          /* token → last event name raised */
+  PtAgentLatch *agent_notified;        /* per-pane dedupe for lifecycle reports */
   gboolean limit_notified;             /* a limit-hit episode is latched */
   /* Separate debounces: a themes-dir event must never swallow a pending
    * config reload (or the config edit that armed it would be lost). */
@@ -1277,17 +1278,17 @@ static void notify_agent_event(PtWindow *w, const char *token) {
   }
 
   /* Never for a pane the user is looking at — a focused pane in an active
-   * window is exactly where they would see the agent finish anyway — and
-   * never the same news about the same pane twice in a row. */
+   * window is exactly where they would see the agent finish anyway. */
   gboolean focused = gtk_window_is_active(GTK_WINDOW(w)) &&
                      owner == pt_pane_grid_focused_terminal(owner_grid);
-  const char *last = g_hash_table_lookup(w->agent_notified, token);
-  if (focused || g_strcmp0(last, evname) == 0) {
+  if (focused || !pt_agent_latch_should_notify(w->agent_notified, token,
+                                               evname)) {
     pt_agent_session_report_free(r);
     return;
   }
-  g_hash_table_replace(w->agent_notified, g_strdup(token), g_strdup(evname));
 
+  /* The latch records what was DELIVERED, so it is written only after this
+   * check: an event latched before a bail here could never notify again. */
   GtkApplication *app = gtk_window_get_application(GTK_WINDOW(w));
   if (app == NULL) {
     pt_agent_session_report_free(r);
@@ -1322,6 +1323,7 @@ static void notify_agent_event(PtWindow *w, const char *token) {
   g_application_send_notification(G_APPLICATION(app), id, n);
   g_free(id);
   g_object_unref(n);
+  pt_agent_latch_record(w->agent_notified, token, evname);
   g_free(title);
   g_free(body);
   pt_agent_session_report_free(r);
@@ -1358,8 +1360,7 @@ static void on_agent_report_changed(GFileMonitor *m, GFile *file,
 }
 
 static void watch_agent_reports(PtWindow *w) {
-  w->agent_notified = g_hash_table_new_full(g_str_hash, g_str_equal,
-                                            g_free, g_free);
+  w->agent_notified = pt_agent_latch_new();
   /* pt_agent_session_dir creates the directory, so the monitor has something
    * to watch even on a first launch that has never run an agent. */
   char *dir = pt_agent_session_dir();
@@ -2354,7 +2355,6 @@ static void pt_window_dispose(GObject *obj) {
   g_clear_object(&w->config_monitor);
   g_clear_object(&w->theme_monitor);
   g_clear_object(&w->agent_report_monitor);
-  g_clear_pointer(&w->agent_notified, g_hash_table_unref);
   theme_cache_drop();   /* module-level, but nothing renders past dispose */
   if (w->config_reload_source != 0) {
     g_source_remove(w->config_reload_source);
@@ -2380,6 +2380,10 @@ static void pt_window_dispose(GObject *obj) {
       remove_project_ui(ws, pt_workspace_project_at(ws, 0));
     pt_workspace_free(ws);
   }
+  /* After the workspace teardown, not with the monitors above: a grid signal
+   * landing mid-dispose (ws still set) re-arms through the latch, so the
+   * latch must outlive it. */
+  g_clear_pointer(&w->agent_notified, pt_agent_latch_free);
   G_OBJECT_CLASS(pt_window_parent_class)->dispose(obj);
 }
 
