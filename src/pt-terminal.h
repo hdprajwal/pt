@@ -89,6 +89,17 @@ void pt_terminal_reset(PtTerminal *t);
  * the same one-pane form. */
 void pt_terminal_set_osc52(PtOsc52Mode mode);
 void pt_terminal_set_pane_osc52(PtTerminal *t, PtOsc52Mode mode);
+/* The `bell` config key, pushed into every live terminal like the one above,
+ * and paired with the same one-pane form for a pane built after the config
+ * was applied. */
+void pt_terminal_set_bell(PtBellMode mode);
+void pt_terminal_set_pane_bell(PtTerminal *t, PtBellMode mode);
+/* A bell arrived from this pane while it was unfocused and focus has not come
+ * back since — the tab strip's attention dot. */
+gboolean pt_terminal_bell_pending(PtTerminal *t);
+/* The audio half of a bell, per-pane rate limit included: TRUE at most once a
+ * second, consuming the slot when it answers. */
+gboolean pt_terminal_take_bell_audio(PtTerminal *t);
 /* GObject signals: "exited" (int), "title-changed" (const char*),
  *                  "command-changed" (const char*) — fg program of the pane changed,
  *                  "notification" (const char* title, const char* body) — a

@@ -51,6 +51,7 @@ windowcontrols button.titlebutton.close image { -gtk-icon-size: 16px; }
 .pt-dot.running { background-color: var(--pt-ok); box-shadow: 0 0 0 3px var(--pt-ok-glow); }
 .pt-dot.idle    { background-color: var(--pt-text-dim); box-shadow: none; }
 .pt-dot.error   { background-color: var(--pt-err); box-shadow: none; }
+.pt-dot.attention { background-color: var(--pt-warn); box-shadow: 0 0 0 3px var(--pt-warn-glow); }
 
 /* ---- sidebar (266px, fixed) ---- */
 .pt-sidebar {

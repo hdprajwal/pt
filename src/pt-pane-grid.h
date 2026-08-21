@@ -7,11 +7,11 @@
 G_DECLARE_FINAL_TYPE(PtPaneGrid, pt_pane_grid, PT, PANE_GRID, GtkWidget)
 
 /* Takes ownership of tree; creates a PtTerminal per leaf (cwd from leaf). The
- * two config values are taken here rather than set afterwards because these
+ * config values are taken here rather than set afterwards because these
  * first panes are built inside this call — see pt_pane_grid_set_pane_defaults,
  * which is the same thing for the panes built later. */
 GtkWidget *pt_pane_grid_new(PtSplitNode *tree, gboolean mouse_reporting,
-                            PtOsc52Mode osc52);
+                            PtOsc52Mode osc52, PtBellMode bell);
 /* The env every pane of this grid hands its shell: NULL-terminated
  * "KEY=VALUE" strings, copied (NULL clears). Panes are built deep inside the
  * grid, from split-tree leaves with no project context of their own, so the
@@ -20,12 +20,12 @@ GtkWidget *pt_pane_grid_new(PtSplitNode *tree, gboolean mouse_reporting,
  * shell already running keeps the env it started with. */
 void pt_pane_grid_set_env(PtPaneGrid *g, const char *const *envv);
 /* What a pane this grid builds from here on starts out with: the
- * `mouse-reporting` and `osc52` config values. Only ever applied to panes the
- * grid builds *after* this call, so creating a tab or a split leaves a pane
- * somebody toggled by hand alone — following the file is the config apply's
- * job, and it re-arms every live pane itself. */
+ * `mouse-reporting`, `osc52` and `bell` config values. Only ever applied to
+ * panes the grid builds *after* this call, so creating a tab or a split
+ * leaves a pane somebody toggled by hand alone — following the file is the
+ * config apply's job, and it re-arms every live pane itself. */
 void pt_pane_grid_set_pane_defaults(PtPaneGrid *g, gboolean mouse_reporting,
-                                    PtOsc52Mode osc52);
+                                    PtOsc52Mode osc52, PtBellMode bell);
 PtSplitNode *pt_pane_grid_tree(PtPaneGrid *g);
 void pt_pane_grid_split(PtPaneGrid *g, PtSplitKind kind);
 /* Toggle pane zoom: the focused pane fills the whole grid area while every
@@ -80,6 +80,8 @@ PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
 void pt_pane_grid_queue_input(PtPaneGrid *g, const char *line);
 /* TRUE when any pane in the grid has a foreground process other than the shell. */
 gboolean pt_pane_grid_any_running(PtPaneGrid *g);
+/* TRUE when any pane in the grid is still owed its bell's attention dot. */
+gboolean pt_pane_grid_any_bell_pending(PtPaneGrid *g);
 void pt_pane_grid_sync_cwds(PtPaneGrid *g); /* leaf->cwd ← live terminal cwd */
 /* leaf->agent/agent_session ← the pane's validated agent report. Called on
  * the save path, like sync_cwds: a report is only kept when the agent it

@@ -61,6 +61,12 @@ typedef enum {
 } PtBellMode;
 #define PT_CONFIG_BELL_DEFAULT PT_BELL_VISUAL
 
+/* The two halves of a PtBellMode, named so no caller enumerates the modes
+ * itself — adding a mode means touching these two answers and nothing else.
+ * Pure functions of the mode, so the tests pin them. */
+gboolean pt_bell_visual(PtBellMode mode);  /* attention dot on the tab */
+gboolean pt_bell_audio(PtBellMode mode);   /* the system beep */
+
 /* Whether the info panel may look up Claude Code's plan usage, which means
  * sending the token Claude Code stored to Anthropic. Off, and only the user
  * can turn it on — every other reader in that panel reads a local file, and

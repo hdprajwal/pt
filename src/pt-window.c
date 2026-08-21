@@ -233,6 +233,7 @@ static void render_config(PtWindow *w, const PtConfig *cfg) {
   pt_terminal_set_font(cfg->font_family, cfg->font_size);
   pt_terminal_set_mouse_reporting(cfg->mouse_reporting);
   pt_terminal_set_osc52(cfg->osc52);
+  pt_terminal_set_bell(cfg->bell);
   pt_terminal_set_padding(cfg->window_padding_x, cfg->window_padding_y);
   /* Spawn-time, so editing this reaches the next pane rather than the open
    * ones; ghostty's scrollback-limit works the same way. */
@@ -485,6 +486,7 @@ static void refresh_tabstrip(PtWindow *w) {
     infos[i].id = id;
     infos[i].running = pt_pane_grid_any_running(grid);
     infos[i].last_exit = foc != NULL ? pt_terminal_last_exit(foc) : -1;
+    infos[i].attention = pt_pane_grid_any_bell_pending(grid);
   }
   guint active_ti =
       p != NULL ? pt_workspace_tab_index(w->ws,
@@ -728,6 +730,9 @@ static void on_grid_focus(PtPaneGrid *g, gpointer user) {
     if (tok != NULL) pt_agent_latch_rearm(w->agent_notified, tok);
   }
   refresh_statusline(w);
+  /* Focus entering a pane is what clears its bell's attention flag (the pane
+   * does the clearing; this repaints the strip that showed it). */
+  refresh_tabstrip(w);
 }
 
 static void tab_ui_free(gpointer data);   /* body below, with tab_ui_new */
@@ -936,12 +941,17 @@ static PtOsc52Mode pane_osc52(PtWindow *w) {
   return w->config != NULL ? w->config->osc52 : PT_CONFIG_OSC52_DEFAULT;
 }
 
+static PtBellMode pane_bell(PtWindow *w) {
+  return w->config != NULL ? w->config->bell : PT_CONFIG_BELL_DEFAULT;
+}
+
 static PtTabUI *tab_ui_new(PtWindow *w, PtProjectUI *p, const char *title,
                            PtSplitNode *tree) {
   PtTabUI *t = g_new0(PtTabUI, 1);
   t->window = w;
   t->title = g_strdup(title);
-  t->grid = pt_pane_grid_new(tree, pane_mouse_reporting(w), pane_osc52(w));
+  t->grid = pt_pane_grid_new(tree, pane_mouse_reporting(w), pane_osc52(w),
+                             pane_bell(w));
   g_object_ref_sink(t->grid);
   /* The grid built its first panes above, so this is a back-fill — safe, and
    * still ahead of every spawn: the grid is not parented yet, and a pane only
@@ -1306,13 +1316,36 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
 /* ---------- terminal bell (BEL) ----------
  *
  * A program rang the bell. The core forwarded it unfiltered, and the grid
- * tagged the pane it came from; what a bell turns into — an attention dot on
- * its tab, a beep, both or neither — is decided here, per the `bell` config
- * key. The behaviour itself lands with that key. */
+ * tagged the pane it came from; what a bell is worth is the `bell` config
+ * key's call — an attention dot on its tab (the flag itself was set in the
+ * pane, which knows whether it was focused), a beep through the desktop, or
+ * both. Off never gets this far out of the pane. */
 static void on_grid_bell(PtPaneGrid *g, guint64 pane_id, gpointer user) {
-  (void)g; (void)pane_id;
   PtWindow *w = PT_WINDOW(user);
-  (void)w;
+  if (w->ws == NULL) return;
+  PtBellMode mode = pane_bell(w);
+  if (mode == PT_BELL_OFF) return;
+
+  /* The beep answers "now", so it goes before any repaint work, and it is
+   * rate-limited per pane rather than dropped wholesale: a program ringing
+   * every half second still gets heard once a second. gdk_surface_beep asks
+   * the compositor for the standard system beep — no sound library, no new
+   * dependency, and the user's desktop theme decides what it sounds like. */
+  PtTerminal *sender = pt_pane_grid_pane_by_id(g, pane_id);
+  if (sender != NULL && pt_bell_audio(mode) &&
+      pt_terminal_take_bell_audio(sender)) {
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(w));
+    if (surface != NULL) gdk_surface_beep(surface);
+  }
+
+  /* A pending flag may just have been set on one of this grid's panes. Same
+   * rule as the command and title handlers: only the active project's strip
+   * is live on screen, and a switch back refreshes it anyway. */
+  PtTabUI *t = find_grid_tab(w, g);
+  if (t == NULL) return;
+  if (pt_workspace_tab_project(w->ws, t->id) ==
+      pt_workspace_active_project(w->ws))
+    refresh_tabstrip(w);
 }
 
 /* ---------- agent lifecycle reports ----------
@@ -1584,7 +1617,8 @@ static void action_split(PtWindow *w, PtSplitKind kind) {
    * nothing else — the panes already in the grid are left as they are. */
   set_spawn_env_for(p, PT_PANE_GRID(t->grid));
   pt_pane_grid_set_pane_defaults(PT_PANE_GRID(t->grid),
-                                 pane_mouse_reporting(w), pane_osc52(w));
+                                 pane_mouse_reporting(w), pane_osc52(w),
+                                 pane_bell(w));
   pt_pane_grid_split(PT_PANE_GRID(t->grid), kind);
 }
 

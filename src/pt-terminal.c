@@ -144,6 +144,16 @@ struct _PtTerminal {
   gboolean report_mouse;     /* this pane's copy of `mouse-reporting` */
   PtOsc52Mode osc52;         /* this pane's copy of `osc52` */
   gboolean osc52_asking;     /* a clipboard-write confirmation is up */
+  PtBellMode bell;           /* this pane's copy of `bell` */
+  /* A bell arrived while the pane was unfocused and nothing has answered it
+   * yet: the attention dot on this pane's tab. Set only by a bell, cleared
+   * only by focus — so it survives tab and project switches, which take
+   * focus away without anyone looking at the pane. */
+  gboolean bell_pending;
+  /* The last bell this pane was allowed to beep for (monotonic µs): the
+   * one-per-second audio rate limit, per pane rather than process-wide, so
+   * two panes building at once still both get heard. */
+  gint64 bell_audio_at;
   gboolean link_cursor;      /* the hand cursor is up: a link is under the pointer */
   /* What update_link_cursor last answered for: the pointer's cell and the
    * core's content serial as of that answer. While neither moves the answer
@@ -349,12 +359,17 @@ static void core_notification(PtTermCore *core, const char *title,
   g_signal_emit(t, signals[SIG_NOTIFICATION], 0, title, body);
 }
 
-/* A program in this pane rang the bell. The core gates nothing — whether the
- * pane is focused is decided here and by the window's handlers, since a beep
- * is worth hearing from the pane in front of you even when its dot is not. */
+/* A program in this pane rang the bell. The core gates nothing, and the
+ * window decides what the bell is worth; here only the visual half is
+ * settled, because it needs the pane's own focus state: a dot on the tab of
+ * the pane the user is reading tells them nothing, so an unfocused bell is
+ * what sets the flag. The focused pane's bell still emits — that is the one
+ * case where a beep is worth hearing under every setting but off. */
 static void core_bell(PtTermCore *core, gpointer user) {
   (void)core;
   PtTerminal *t = PT_TERMINAL(user);
+  if (t->bell == PT_BELL_OFF) return;
+  if (!t->focused && pt_bell_visual(t->bell)) t->bell_pending = TRUE;
   g_signal_emit(t, signals[SIG_BELL], 0);
 }
 
@@ -1708,6 +1723,10 @@ static void on_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   t->focused = TRUE;
+  /* The user is reading this pane again, so its unanswered bell is answered:
+   * whatever it had to say is on screen now. The tab strip repaints off the
+   * "focus-changed" the grid emits for this same event. */
+  t->bell_pending = FALSE;
   sync_blink_timer(t);         /* only the focused pane blinks */
   /* Deliberately synchronous, where ghostty defers to a glib idle
    * (apprt/gtk/class/surface.zig:2750): it does so to avoid re-entering
@@ -2620,6 +2639,28 @@ void pt_terminal_set_mouse_reporting(gboolean on) {
 void pt_terminal_set_osc52(PtOsc52Mode mode) {
   for (GSList *l = live_terminals; l != NULL; l = l->next)
     pt_terminal_set_pane_osc52(l->data, mode);
+}
+
+void pt_terminal_set_pane_bell(PtTerminal *t, PtBellMode mode) {
+  t->bell = mode;
+}
+
+void pt_terminal_set_bell(PtBellMode mode) {
+  for (GSList *l = live_terminals; l != NULL; l = l->next)
+    pt_terminal_set_pane_bell(l->data, mode);
+}
+
+gboolean pt_terminal_bell_pending(PtTerminal *t) { return t->bell_pending; }
+
+/* The audio half of a bell, gated here because the limit is per pane: TRUE
+   at most once a second, and only when the answer is yes does the timestamp
+   move — a suppressed beep must not push the next one further away, or a
+   program that rings twice a second would never be heard at all. */
+gboolean pt_terminal_take_bell_audio(PtTerminal *t) {
+  gint64 now = g_get_monotonic_time();
+  if (now - t->bell_audio_at < G_USEC_PER_SEC) return FALSE;
+  t->bell_audio_at = now;
+  return TRUE;
 }
 
 void pt_terminal_reset(PtTerminal *t) {

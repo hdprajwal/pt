@@ -34,6 +34,9 @@ char *pt_style_css(const PtResolvedTheme *rt, const PtConfig *cfg) {
   const PtColor *ok = &rt->tokens[PT_TOK_OK];
   g_string_append_printf(css, "  --pt-ok-glow: rgba(%d,%d,%d,0.18);\n",
                          ok->r, ok->g, ok->b);
+  const PtColor *warn = &rt->tokens[PT_TOK_WARN];
+  g_string_append_printf(css, "  --pt-warn-glow: rgba(%d,%d,%d,0.18);\n",
+                         warn->r, warn->g, warn->b);
   /* fonts */
   g_string_append_printf(css, "  --pt-font-sans: \"%s\", sans-serif;\n",
                          cfg->ui_font_family);

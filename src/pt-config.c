@@ -56,6 +56,14 @@ void pt_config_free(PtConfig *c) {
   g_free(c);
 }
 
+gboolean pt_bell_visual(PtBellMode mode) {
+  return mode == PT_BELL_VISUAL || mode == PT_BELL_BOTH;
+}
+
+gboolean pt_bell_audio(PtBellMode mode) {
+  return mode == PT_BELL_AUDIBLE || mode == PT_BELL_BOTH;
+}
+
 /* ---- field table ----
  * One row per key the app reads and writes back. Parsing, copy, equality and
  * the in-place rewrite all walk this table, so a new setting is one row plus

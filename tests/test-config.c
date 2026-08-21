@@ -184,6 +184,21 @@ static void test_rewrite_bell(void) {
   pt_config_free(c);
 }
 
+static void test_bell_halves(void) {
+  /* The two questions everything downstream asks, pinned per mode so a new
+   * mode has to answer them deliberately rather than fall out of a default. */
+  const struct { PtBellMode m; gboolean visual, audio; } cases[] = {
+    { PT_BELL_VISUAL,  TRUE,  FALSE },
+    { PT_BELL_AUDIBLE, FALSE, TRUE  },
+    { PT_BELL_BOTH,    TRUE,  TRUE  },
+    { PT_BELL_OFF,     FALSE, FALSE },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(cases); i++) {
+    g_assert_cmpint(pt_bell_visual(cases[i].m), ==, cases[i].visual);
+    g_assert_cmpint(pt_bell_audio(cases[i].m), ==, cases[i].audio);
+  }
+}
+
 static void test_rewrite_osc52(void) {  /* Absent from the old text: appended, and round-trips. */
   PtConfig *c = pt_config_new();
   c->osc52 = PT_OSC52_ASK;
@@ -510,6 +525,7 @@ int main(void) {
   test_rewrite_osc52();
   test_parse_bell();
   test_rewrite_bell();
+  test_bell_halves();
   test_parse_term();
   test_parse_scrollback_limit();
   test_parse_window_padding();
