@@ -288,8 +288,83 @@ static void test_helper_codex_writes_report(void) {
   g_assert_cmpstr(r->session_id, ==, "019fdd5e-918f-7aa1-9843-a59fe0fa012c");
   g_assert_cmpstr(r->cwd, ==, "/tmp/y");
   g_assert_cmpint(r->pid, >, 0);
+  g_assert_cmpint(r->event, ==, PT_AGENT_EVENT_TURN_COMPLETE);
   pt_agent_session_report_free(r);
   g_free(path); g_free(dir);
+}
+
+/* An approval-shaped notify is the "codex wants you" case, spelled through
+ * whatever type name carries "approval". */
+static void test_helper_codex_approval(void) {
+  char *dir = g_dir_make_tmp("pt-helper-XXXXXX", NULL);
+  int code = -1;
+  run_helper_full("codex-notify",
+      "{\"type\":\"apply_patch_approval_request\","
+      "\"thread-id\":\"th-2\",\"cwd\":\"/tmp/y\"}",
+      NULL, "beadbeadbeadbead", dir, &code);
+  g_assert_cmpint(code, ==, 0);
+  char *path = g_build_filename(dir, "pt", "agent-sessions",
+                                "beadbeadbeadbead.json", NULL);
+  PtAgentSessionReport *r = pt_agent_session_report_load(path);
+  g_assert_nonnull(r);
+  g_assert_cmpint(r->event, ==, PT_AGENT_EVENT_NEEDS_INPUT);
+  /* still a full report: the lifecycle write overwrites the registration */
+  g_assert_cmpstr(r->session_id, ==, "th-2");
+  g_assert_cmpint(r->pid, >, 0);
+  pt_agent_session_report_free(r);
+  g_free(path); g_free(dir);
+}
+
+/* A notify with neither a turn-complete nor an approval type is a plain
+ * report: it refreshes the registration and carries no event. */
+static void test_helper_codex_other_type(void) {
+  char *dir = g_dir_make_tmp("pt-helper-XXXXXX", NULL);
+  int code = -1;
+  run_helper_full("codex-notify",
+      "{\"type\":\"something-new\",\"thread-id\":\"th-3\",\"cwd\":\"/y\"}",
+      NULL, "deaddeaddeaddead", dir, &code);
+  g_assert_cmpint(code, ==, 0);
+  char *path = g_build_filename(dir, "pt", "agent-sessions",
+                                "deaddeaddeaddead.json", NULL);
+  PtAgentSessionReport *r = pt_agent_session_report_load(path);
+  g_assert_nonnull(r);
+  g_assert_cmpint(r->event, ==, PT_AGENT_EVENT_NONE);
+  pt_agent_session_report_free(r);
+  g_free(path); g_free(dir);
+}
+
+/* The lifecycle hooks run `pt agent-report claude-event <name>` with the hook
+ * JSON on stdin. Stop means the agent finished its turn; Notification means
+ * it is waiting on the user. Both must land as full reports — they overwrite
+ * the file the SessionStart hook wrote. */
+static void test_helper_claude_event(void) {
+  struct {
+    const char *name; PtAgentEvent event;
+  } cases[] = {
+    { "Stop", PT_AGENT_EVENT_TURN_COMPLETE },
+    { "Notification", PT_AGENT_EVENT_NEEDS_INPUT },
+    { "SubagentStop", PT_AGENT_EVENT_NONE },   /* not one of ours */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(cases); i++) {
+    char *dir = g_dir_make_tmp("pt-helper-XXXXXX", NULL);
+    int code = -1;
+    run_helper_full("claude-event", cases[i].name,
+        "{\"session_id\":\"sid-1\",\"cwd\":\"/tmp/z\","
+        "\"hook_event_name\":\"Stop\"}",
+        "f00df00df00df00d", dir, &code);
+    g_assert_cmpint(code, ==, 0);
+    char *path = g_build_filename(dir, "pt", "agent-sessions",
+                                  "f00df00df00df00d.json", NULL);
+    PtAgentSessionReport *r = pt_agent_session_report_load(path);
+    g_assert_nonnull(r);
+    g_assert_cmpint(r->agent, ==, PT_AGENT_CLAUDE);
+    g_assert_cmpstr(r->session_id, ==, "sid-1");
+    g_assert_cmpstr(r->cwd, ==, "/tmp/z");
+    g_assert_cmpint(r->pid, >, 0);
+    g_assert_cmpint(r->event, ==, cases[i].event);
+    pt_agent_session_report_free(r);
+    g_free(path); g_free(dir);
+  }
 }
 
 static void test_helper_no_token_is_noop(void) {
@@ -330,6 +405,12 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/agent-session/ancestor", test_agent_ancestor);
   g_test_add_func("/agent-session/helper-claude", test_helper_claude_writes_report);
   g_test_add_func("/agent-session/helper-codex", test_helper_codex_writes_report);
+  g_test_add_func("/agent-session/helper-codex-approval",
+                  test_helper_codex_approval);
+  g_test_add_func("/agent-session/helper-codex-other",
+                  test_helper_codex_other_type);
+  g_test_add_func("/agent-session/helper-claude-event",
+                  test_helper_claude_event);
   g_test_add_func("/agent-session/helper-no-token", test_helper_no_token_is_noop);
   g_test_add_func("/agent-session/helper-no-session-id",
                   test_helper_no_session_id_is_noop);
