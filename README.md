@@ -242,6 +242,25 @@ There is no bar when there is nothing above the screen, and none inside a
 full-screen app such as `less` or `nvim`: that app owns the pane and keeps no
 history of its own. Quitting it brings both back.
 
+## Finding text in history
+
+Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd> (or pick "Find in
+scrollback" from the palette) and a search bar opens at the bottom of the
+window. Typing searches the focused pane's whole history, case-insensitively,
+and every hit is highlighted in place — the current one brighter than the
+rest. <kbd>Enter</kbd> jumps to the next match, <kbd>Shift</kbd>+<kbd>Enter</kbd>
+to the previous one, wrapping around at either end. The count next to the
+entry says which match you are on.
+
+<kbd>Esc</kbd> closes the bar and clears the highlights. The search belongs to
+the pane that was focused when you opened it: switch panes or tabs and the
+highlights go with it, and typing in the bar again searches whatever pane is
+focused now.
+
+Searching only reaches what the pane kept. Once a pane's history passes the
+scrollback limit, the oldest lines are gone for good, so they cannot be
+found.
+
 ## Selecting and copying text
 
 Left-click and drag selects. Double-click selects a word, triple-click selects
