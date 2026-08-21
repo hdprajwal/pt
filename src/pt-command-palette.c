@@ -69,7 +69,9 @@ static void filter_items(PtCommandPalette *p, const char *q) {
 /* ---------- recent agent sessions ---------- */
 /* The copy glyph on a session row. Its gesture sits in the capture phase on
  * the child, so it claims the press before the row's own click controller
- * ever sees it: copying must not also resume the session. */
+ * ever sees it: copying must not also resume the session. Primary button
+ * only — a right-click on the glyph belongs to whoever owns it, not to the
+ * copy. */
 static void on_copy_pressed(GtkGestureClick *g, int n, double x, double y,
                             gpointer user) {
   (void)n; (void)x; (void)y;
@@ -86,6 +88,7 @@ static void append_copy_button(GtkWidget *row, const char *session_id) {
   gtk_widget_add_css_class(copy, "pt-palette-shortcut");
   gtk_widget_set_tooltip_text(copy, "copy session id");
   GtkGesture *click = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
   g_signal_connect(click, "pressed", G_CALLBACK(on_copy_pressed),
                    (gpointer)session_id);
   gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click),
