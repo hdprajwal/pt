@@ -205,9 +205,10 @@ starts in the focused pane's directory.
 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> zooms the focused pane: it takes
 over the whole tab area while every other pane keeps running, hidden. The
 status bar shows a small `⤢ zoomed` chip while it lasts, and pressing the
-binding again puts every pane back — each split lands exactly where it was,
-because pt sets the dividers back from what it remembers rather than trusting
-the resized layout.
+binding again puts every pane back — pt sets each divider from what it
+remembers rather than trusting the resized layout. If the window kept its
+size the splits land exactly where they were; if it changed, a divider can
+end up a pixel or two off.
 
 Zoom is a view on the grid, not a change to it, so it does not survive much:
 splitting or closing a pane, moving focus to another pane, switching tabs or
