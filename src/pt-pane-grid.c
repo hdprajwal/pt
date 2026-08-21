@@ -2,6 +2,7 @@
 
 #include "pt-agent.h"
 #include "pt-agent-session.h"
+#include "pt-zoom-state.h"
 
 enum { SIG_STRUCTURE, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
        SIG_EMPTIED, SIG_NOTIFICATION, N_SIGNALS };
@@ -19,10 +20,9 @@ struct _PtPaneGrid {
   gboolean pane_mouse_reporting;
   PtOsc52Mode pane_osc52;
   /* Pane zoom (view-level, never saved): the focused pane fills the grid while
-   * the other panes stay alive but hidden. `ratio_restores` counts the un-zoom
-   * ticks still pending; sync stays suspended until the last one lands. */
-  gboolean zoomed;
-  guint ratio_restores;
+   * the other panes stay alive but hidden. See pt-zoom-state.h for the two
+   * fields and their rules. */
+  PtZoomState zoom;
 };
 
 G_DEFINE_FINAL_TYPE(PtPaneGrid, pt_pane_grid, GTK_TYPE_WIDGET)
@@ -212,7 +212,7 @@ static void on_paned_position(GObject *obj, GParamSpec *spec, gpointer user) {
    * nothing like the saved ratios, and the position writes those allocations
    * fire would clobber them. Un-zoom puts every ratio back before this
    * resumes — that is what makes a zoom round-trip lossless. */
-  if (g->zoomed) return;
+  if (pt_zoom_state_sync_suspended(&g->zoom)) return;
   if (gtk_widget_get_parent(GTK_WIDGET(paned)) == NULL) return;
   PtSplitNode *node = g_object_get_data(obj, "pt-node");
   if (node == NULL) return;
@@ -256,8 +256,7 @@ static void rebuild(PtPaneGrid *g) {
    * arm their flags, so a split or close under a zoom lands on the real
    * layout by construction. Reset here, not in the callers: rebuild is the
    * one place every structural change goes through. */
-  g->zoomed = FALSE;
-  g->ratio_restores = 0;
+  g->zoom = (PtZoomState){0};
   clear_paned_nodes(g->root_widget);
   detach_terminals(g->tree);
   if (g->root_widget != NULL) {
@@ -396,8 +395,9 @@ static void show_everything(GtkWidget *w) {
  * apply_ratio_tick above — a tick, not an idle, because a just-shown child has
  * no size until a frame allocates one — and "pt-ratio-applied" only arms after
  * the write, so GTK's own reallocation passes cannot sneak a degenerate split
- * into the tree on the way back. The last of these ticks drops `zoomed`,
- * which resumes ratio syncing. */
+ * into the tree on the way back. Zoom itself is already off by the time any of
+ * these run; each one just drains the pending counter, and syncing resumes
+ * when the last lands. */
 static gboolean restore_ratio_tick(GtkWidget *w, GdkFrameClock *clock,
                                    gpointer data) {
   (void)clock;
@@ -410,45 +410,62 @@ static gboolean restore_ratio_tick(GtkWidget *w, GdkFrameClock *clock,
     gtk_paned_set_position(GTK_PANED(w), (int)(total * node->ratio));
     g_object_set_data(G_OBJECT(w), "pt-ratio-applied", GINT_TO_POINTER(1));
   }
-  /* node NULL means torn down mid-restore: count it anyway so `zoomed` can
-   * never wedge on. */
-  if (--g->ratio_restores == 0) g->zoomed = FALSE;
+  /* node NULL means torn down mid-restore: count it anyway so the pending
+   * counter can never wedge on. */
+  pt_zoom_state_restore_done(&g->zoom);
   return G_SOURCE_REMOVE;
 }
 
 static void arm_ratio_restore(GtkWidget *w, PtPaneGrid *g) {
   if (w == NULL || !GTK_IS_PANED(w)) return;
   g_object_set_data(G_OBJECT(w), "pt-ratio-applied", NULL);
-  g->ratio_restores++;
+  g->zoom.ratio_restores++;
   gtk_widget_add_tick_callback(w, restore_ratio_tick, g, NULL);
   arm_ratio_restore(gtk_paned_get_start_child(GTK_PANED(w)), g);
   arm_ratio_restore(gtk_paned_get_end_child(GTK_PANED(w)), g);
 }
 
-/* Restore the real layout: every hidden child back on, then a tick per paned
- * to re-apply the saved ratios. `zoomed` — and with it position syncing —
- * stays on until the last tick lands. */
+/* Restore the real layout after a leave: every hidden child back on, then a
+ * tick per paned to re-apply the saved ratios. Zoom itself ended when the
+ * state said so — the chip and the toggle see it at once — while divider
+ * syncing stays suspended until the last pending tick lands. Idempotent by
+ * construction: once zoom is off this returns without touching anything, so
+ * key repeat or an unzoom from a focus move racing the next frame cannot arm
+ * a second sweep against the pending counter. */
 static void unzoom_pending(PtPaneGrid *g) {
-  if (!g->zoomed) return;
+  if (!pt_zoom_state_leave(&g->zoom)) return;
   show_everything(g->root_widget);
-  g_assert(g->ratio_restores == 0);
+  /* Arms one tick per paned; nothing at all when root is missing or a lone
+   * terminal (no paneds to restore) — then the counter simply stays at 0 and
+   * nothing pends. */
   arm_ratio_restore(g->root_widget, g);
 }
 
 gboolean pt_pane_grid_toggle_zoom(PtPaneGrid *g) {
   g_return_val_if_fail(PT_IS_PANE_GRID(g), FALSE);
   /* A single-pane tab fills the grid already; an empty one has no focus. */
-  if (g->focused == NULL || pt_split_count_leaves(g->tree) < 2) return FALSE;
-  /* Mid-un-zoom (restore ticks pending): already on the way out, and arming a
-   * second sweep would double-count the pending counter. */
-  if (!g->zoomed && g->ratio_restores > 0) return FALSE;
-  if (g->zoomed) {
-    unzoom_pending(g);
-    return FALSE;
+  gboolean can_zoom =
+      g->focused != NULL && pt_split_count_leaves(g->tree) >= 2;
+  switch (pt_zoom_state_toggle(&g->zoom, can_zoom)) {
+    case PT_ZOOM_TOGGLE_ENTER:
+      /* Only really zoomed once the widgets hid: no focused terminal to
+       * walk to means the state flips straight back. */
+      if (!hide_toward_leaf(g->root_widget, g->focused)) {
+        pt_zoom_state_leave(&g->zoom);
+        return FALSE;
+      }
+      return TRUE;
+    case PT_ZOOM_TOGGLE_LEAVE:
+      show_everything(g->root_widget);
+      arm_ratio_restore(g->root_widget, g);
+      return FALSE;
+    case PT_ZOOM_TOGGLE_IGNORED:
+      /* Single-pane or empty grid, or mid-un-zoom (restore ticks pending):
+       * already on the way out, and arming a second sweep would double-count
+       * the pending counter. */
+      return FALSE;
   }
-  if (!hide_toward_leaf(g->root_widget, g->focused)) return FALSE;
-  g->zoomed = TRUE;
-  return TRUE;
+  g_assert_not_reached();
 }
 
 void pt_pane_grid_unzoom(PtPaneGrid *g) {
@@ -458,7 +475,7 @@ void pt_pane_grid_unzoom(PtPaneGrid *g) {
 
 gboolean pt_pane_grid_get_zoomed(PtPaneGrid *g) {
   g_return_val_if_fail(PT_IS_PANE_GRID(g), FALSE);
-  return g->zoomed;
+  return pt_zoom_state_active(&g->zoom);
 }
 
 void pt_pane_grid_focus_next(PtPaneGrid *g) {
