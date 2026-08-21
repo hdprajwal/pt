@@ -708,6 +708,16 @@ static void on_grid_focus(PtPaneGrid *g, gpointer user) {
   (void)g;
   PtWindow *w = PT_WINDOW(user);
   if (w->ws == NULL) return;
+  /* The user is looking at this pane again, so its last raised lifecycle
+   * event is old news by the time the next one lands. Re-arming here is what
+   * keeps turn N+1's turn-complete notifying after turn N's did: Claude's
+   * Stop hook always reports the same name, and without a re-arm the latch
+   * would swallow every turn after the first. */
+  PtTerminal *foc = pt_pane_grid_focused_terminal(g);
+  if (foc != NULL) {
+    const char *tok = pt_term_core_pane_token(pt_terminal_core(foc));
+    if (tok != NULL) pt_agent_latch_rearm(w->agent_notified, tok);
+  }
   refresh_statusline(w);
 }
 
