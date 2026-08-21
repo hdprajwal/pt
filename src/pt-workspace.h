@@ -88,6 +88,14 @@ PtWsId pt_workspace_tab_project(const PtWorkspace *ws, PtWsId tab);
 const char *pt_workspace_project_name(const PtWorkspace *ws, PtWsId project);
 const char *pt_workspace_project_path(const PtWorkspace *ws, PtWsId project);
 int         pt_workspace_project_accent(const PtWorkspace *ws, PtWsId project);
+/* The first project whose path equals `path`, trailing slashes ignored on
+ * both sides — the same directory spelled "/a/pt" and "/a/pt/" is one
+ * project, not two. A project whose data slot answers TRUE through
+ * `is_missing` (borrowed; NULL treats every project as present) is skipped:
+ * a directory known to be gone cannot take the match. PT_WS_ID_NONE when
+ * nothing matches, or `path` is NULL or empty. */
+PtWsId pt_workspace_project_by_path(const PtWorkspace *ws, const char *path,
+                                    gboolean (*is_missing)(gpointer data));
 
 /* One opaque slot per id — where the UI hangs its PtProjectUI/PtTabUI. The
  * workspace never touches what it points at; the slot is dropped (not freed)

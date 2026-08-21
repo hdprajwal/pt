@@ -12,3 +12,8 @@
  * shows a project path spells it the same way. */
 void pt_path_home_abbrev(const char *path, const char *home,
                          char *buf, gsize cap);
+
+/* `path` with every trailing slash stripped — the root "/" stays "/" — so the
+ * two sides of a project-path comparison can be run through here and "/a/pt"
+ * matches "/a/pt/". NULL gives NULL; the result is newly allocated. */
+char *pt_path_normalize(const char *path);

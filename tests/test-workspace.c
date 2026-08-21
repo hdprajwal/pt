@@ -498,6 +498,50 @@ static void test_ids_never_reused(void) {
   pt_workspace_free(ws);
 }
 
+/* ---------- project_by_path ---------- */
+
+static int gone_marker;
+static gboolean flag_missing(gpointer data) {
+  return data == &gone_marker;
+}
+
+static void test_project_by_path(void) {
+  PtWorkspace *ws = pt_workspace_new();
+  PtWsId a = pt_workspace_add_project(ws, "alpha", "/tmp/a", -1);
+  PtWsId b = pt_workspace_add_project(ws, "beta", "/tmp/b/", -1);
+
+  /* Exact match, and the trailing-slash spelling of either side: the same
+   * directory spelled both ways is one project. */
+  g_assert_cmpuint(pt_workspace_project_by_path(ws, "/tmp/a", NULL), ==, a);
+  g_assert_cmpuint(pt_workspace_project_by_path(ws, "/tmp/a/", NULL), ==, a);
+  g_assert_cmpuint(pt_workspace_project_by_path(ws, "/tmp/b/", NULL), ==, b);
+  g_assert_cmpuint(pt_workspace_project_by_path(ws, "/tmp/b", NULL), ==, b);
+  /* No data predicate yet, so every slot counts as present. */
+  g_assert_cmpuint(
+      pt_workspace_project_by_path(ws, "/tmp/a", flag_missing), ==, a);
+
+  /* No match at all, an empty path, no path. */
+  g_assert_cmpuint(pt_workspace_project_by_path(ws, "/tmp/c", NULL), ==,
+                   PT_WS_ID_NONE);
+  g_assert_cmpuint(pt_workspace_project_by_path(ws, "", NULL), ==,
+                   PT_WS_ID_NONE);
+  g_assert_cmpuint(pt_workspace_project_by_path(ws, NULL, NULL), ==,
+                   PT_WS_ID_NONE);
+
+  /* A data slot answering TRUE through the predicate is skipped: the
+   * missing-flagged project cannot take the match even though its path
+   * would. */
+  int live = 0;
+  pt_workspace_set_data(ws, a, &live);
+  pt_workspace_set_data(ws, b, &gone_marker);
+  g_assert_cmpuint(
+      pt_workspace_project_by_path(ws, "/tmp/a", flag_missing), ==, a);
+  g_assert_cmpuint(pt_workspace_project_by_path(ws, "/tmp/b", flag_missing),
+                   ==, PT_WS_ID_NONE);
+
+  pt_workspace_free(ws);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/workspace/empty", test_empty);
@@ -526,5 +570,6 @@ int main(int argc, char *argv[]) {
                   test_set_active_rejects_wrong_ids);
   g_test_add_func("/workspace/data-slots", test_data_slots);
   g_test_add_func("/workspace/ids-never-reused", test_ids_never_reused);
+  g_test_add_func("/workspace/project-by-path", test_project_by_path);
   return g_test_run();
 }

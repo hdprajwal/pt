@@ -1982,6 +1982,14 @@ static void action_open_palette(PtWindow *w) {
                   (PtCommandPaletteItem *)g_array_free(arr, FALSE), n);
 }
 
+/* What pt_workspace_project_by_path asks about each project's data slot: a
+ * project flagged missing cannot take the match — the dir check at the top
+ * of the activation already ran, but if flag and reality ever disagree,
+ * skipping beats stacking a second project on the same path. */
+static gboolean project_is_missing(gpointer data) {
+  return data != NULL && ((PtProjectUI *)data)->missing;
+}
+
 static void on_palette_history_activated(PtCommandPalette *pal, int agent,
                                          const char *session_id,
                                          const char *cwd, gpointer user) {
@@ -1998,19 +2006,11 @@ static void on_palette_history_activated(PtCommandPalette *pal, int agent,
   /* The session's project may already be open: then it takes the new tab.
    * Otherwise the project is opened for it — by hand rather than through
    * project_ui_new, whose first tab would be a plain shell instead of the
-   * resume this whole path exists to deliver. */
+   * resume this whole path exists to deliver. Trailing slashes are ignored
+   * on both sides, so a report's "/a/pt/" still meets an open "/a/pt". */
   PtProjectUI *p = NULL;
-  for (guint i = 0; i < pt_workspace_project_count(w->ws); i++) {
-    PtWsId id = pt_workspace_project_at(w->ws, i);
-    if (g_strcmp0(pt_workspace_project_path(w->ws, id), cwd) == 0) {
-      PtProjectUI *cand = pt_workspace_get_data(w->ws, id);
-      /* A project flagged missing cannot be here — the dir check above
-       * already ran — but if the flag and reality ever disagree, doing
-       * nothing beats stacking a second project on the same path. */
-      if (!cand->missing) p = cand;
-      break;
-    }
-  }
+  PtWsId hit = pt_workspace_project_by_path(w->ws, cwd, project_is_missing);
+  if (hit != PT_WS_ID_NONE) p = pt_workspace_get_data(w->ws, hit);
   gboolean new_project = p == NULL;
   if (new_project) {
     char *name = g_path_get_basename(cwd);
