@@ -106,7 +106,8 @@ add_library(ptcore STATIC
   src/pt-theme.c
   src/pt-session.c
   src/pt-term-core.c
-  src/pt-workspace.c)
+  src/pt-workspace.c
+  src/pt-zoom-state.c)
 target_include_directories(ptcore PUBLIC src)
 # Static: the shared imported target leaves the binary with a RUNPATH into
 # the build tree and a runtime dependency no user machine can satisfy.
@@ -222,3 +223,7 @@ add_executable(test-keymap tests/test-keymap.c src/pt-keymap.c)
 target_include_directories(test-keymap PRIVATE src)
 target_link_libraries(test-keymap PRIVATE PkgConfig::GTK ghostty-vt PkgConfig::GLIB)
 add_test(NAME keymap COMMAND test-keymap)
+
+add_executable(test-zoom-state tests/test-zoom-state.c)
+target_link_libraries(test-zoom-state PRIVATE ptcore)
+add_test(NAME zoom-state COMMAND test-zoom-state)
