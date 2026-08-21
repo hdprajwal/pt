@@ -645,7 +645,10 @@ void pt_pane_grid_queue_input(PtPaneGrid *g, const char *line) {
   if (t == NULL || line[0] == '\0') return;
   PtTermCore *core = pt_terminal_core(t);
   if (core != NULL)
-    pt_term_core_write(core, line, -1);   /* live shell: straight to the pty */
+    /* Spawned: straight to the pty. The tty queues the bytes until the shell
+     * reads them, so a call that lands between spawn and first prompt rides
+     * out startup — see the caller invariant on pt_pane_grid_queue_input. */
+    pt_term_core_write(core, line, -1);
   else
     /* Not spawned yet — a tab created this same tick, before its first
      * allocation. The startup-input slot is still free: the restore path
