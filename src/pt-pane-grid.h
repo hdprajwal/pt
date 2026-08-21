@@ -102,4 +102,7 @@ void pt_pane_grid_focus_terminal(PtPaneGrid *g); /* grab focus on focused pane *
  *              const char *body) — a program in *any* pane of this grid asked
  *              for a desktop notification (OSC 9 / OSC 777). Unlike the two
  *              above this is not restricted to the focused pane: an unwatched
- *              pane is exactly where these come from. */
+ *              pane is exactly where these come from.
+ *          "bell" (guint64 pane_id) — a program in *any* pane of this grid
+ *              rang the terminal bell (BEL). Forwarded unfiltered like the
+ *              notification above; what it turns into is the receiver's call. */

@@ -5,7 +5,7 @@
 #include "pt-zoom-state.h"
 
 enum { SIG_STRUCTURE, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
-       SIG_EMPTIED, SIG_NOTIFICATION, N_SIGNALS };
+       SIG_EMPTIED, SIG_NOTIFICATION, SIG_BELL, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtPaneGrid {
@@ -76,6 +76,14 @@ static void on_term_notification(PtTerminal *t, const char *title,
                 pt_terminal_id(t), title, body);
 }
 
+/* Forwarded from every pane, like the notification above: the whole point of
+ * a bell is that it comes from a pane the user is not looking at. The pane id
+ * rides along because the window needs the pane back — to beep for it, and to
+ * ask whether it was focused. */
+static void on_term_bell(PtTerminal *t, gpointer user) {
+  g_signal_emit(PT_PANE_GRID(user), signals[SIG_BELL], 0, pt_terminal_id(t));
+}
+
 /* Is `leaf` still a live leaf of `n`? Compares by pointer identity only, so a
  * dangling `leaf` (freed by a manual close before the idle ran) is never
  * dereferenced — we only deref the tree nodes we walk. */
@@ -143,6 +151,7 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   g_signal_connect(term, "command-changed", G_CALLBACK(on_term_command), g);
   g_signal_connect(term, "title-changed", G_CALLBACK(on_term_title), g);
   g_signal_connect(term, "notification", G_CALLBACK(on_term_notification), g);
+  g_signal_connect(term, "bell", G_CALLBACK(on_term_bell), g);
   GtkEventController *focus = gtk_event_controller_focus_new();
   g_signal_connect(focus, "enter", G_CALLBACK(on_term_focus_enter), g);
   gtk_widget_add_controller(term, focus);
@@ -770,6 +779,9 @@ static void pt_pane_grid_class_init(PtPaneGridClass *klass) {
       G_TYPE_UINT64, G_TYPE_STRING, G_TYPE_STRING);
   signals[SIG_EMPTIED] = g_signal_new("emptied", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[SIG_BELL] = g_signal_new("bell", PT_TYPE_PANE_GRID,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1,
+      G_TYPE_UINT64);
 }
 
 static void pt_pane_grid_init(PtPaneGrid *g) {

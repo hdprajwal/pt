@@ -58,6 +58,13 @@ typedef struct {
    * core drops it before it can cost the rate limit anything. */
   void (*notification)(PtTermCore *core, const char *title, const char *body,
                        gpointer user);
+  /* A program rang the terminal bell (BEL, 0x07). Unlike notification above,
+   * the core has no opinion about which bells are worth acting on: a bell
+   * from the pane the user is reading may still deserve its beep, and what a
+   * bell should look like is pure presentation anyway. Fires inside the pty-
+   * read path, so keep the handler to forwarding and let the main loop do
+   * whatever UI work the bell turns into. */
+  void (*bell)(PtTermCore *core, gpointer user);
 } PtTermCoreCallbacks;
 
 /* ---- terminfo ----

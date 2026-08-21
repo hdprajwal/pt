@@ -95,4 +95,7 @@ void pt_terminal_set_pane_osc52(PtTerminal *t, PtOsc52Mode mode);
  *                      program asked for a desktop notification with OSC 9 or
  *                      OSC 777. Already filtered, capped and rate-limited by
  *                      the core, and never emitted while the pane is focused;
- *                      `title` is "" when the sequence carried none. */
+ *                      `title` is "" when the sequence carried none.
+ *                  "bell" (void) — a program rang the terminal bell (BEL).
+ *                      Unfiltered: every bell arrives here, focused pane or
+ *                      not, and what it turns into is decided downstream. */

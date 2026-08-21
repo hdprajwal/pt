@@ -67,7 +67,7 @@ static gboolean th_dark = TRUE;
 static char *font_family;   /* NULL -> PT_FONT_FAMILY_DEFAULT */
 
 enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_COMMAND_CHANGED,
-       SIG_NOTIFICATION, N_SIGNALS };
+       SIG_NOTIFICATION, SIG_BELL, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 /* Whether the per-frame/per-event g_debug lines run at all. g_debug formats
@@ -347,6 +347,15 @@ static void core_notification(PtTermCore *core, const char *title,
   (void)core;
   PtTerminal *t = PT_TERMINAL(user);
   g_signal_emit(t, signals[SIG_NOTIFICATION], 0, title, body);
+}
+
+/* A program in this pane rang the bell. The core gates nothing — whether the
+ * pane is focused is decided here and by the window's handlers, since a beep
+ * is worth hearing from the pane in front of you even when its dot is not. */
+static void core_bell(PtTermCore *core, gpointer user) {
+  (void)core;
+  PtTerminal *t = PT_TERMINAL(user);
+  g_signal_emit(t, signals[SIG_BELL], 0);
 }
 
 static void core_command(PtTermCore *core, const char *comm, gpointer user) {
@@ -1102,7 +1111,8 @@ static void ensure_core(PtTerminal *t) {
                               .exited = core_exited,
                               .title = core_title, .command = core_command,
                               .clipboard_write = core_clipboard_write,
-                              .notification = core_notification };
+                              .notification = core_notification,
+                              .bell = core_bell };
   pt_term_core_set_callbacks(t->core, &cbs, t);
   pt_term_core_set_osc52(t->core, t->osc52);
   /* Same reason as the scheme below: a pane spawned after a config change has
@@ -2682,6 +2692,8 @@ static void pt_terminal_class_init(PtTerminalClass *klass) {
   signals[SIG_NOTIFICATION] = g_signal_new("notification", PT_TYPE_TERMINAL,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
       G_TYPE_STRING, G_TYPE_STRING);
+  signals[SIG_BELL] = g_signal_new("bell", PT_TYPE_TERMINAL,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void pt_terminal_init(PtTerminal *t) {

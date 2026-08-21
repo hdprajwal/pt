@@ -190,6 +190,15 @@ static GhosttyString effect_xtversion(GhosttyTerminal t, void *ud) {
                           .len = sizeof name - 1 };
 }
 
+/* The BEL hook (GHOSTTY_TERMINAL_OPT_BELL): the parser saw 0x07 and there is
+ * nothing to decode or gate, so this is a straight hand-off — what the bell
+ * should do is entirely the consumer's call. */
+static void effect_bell(GhosttyTerminal t, void *ud) {
+  (void)t;
+  PtTermCore *c = ud;
+  if (c->cbs.bell != NULL) c->cbs.bell(c, c->cbs_user);
+}
+
 static void effect_title_changed(GhosttyTerminal t, void *ud) {
   PtTermCore *c = ud;
   GhosttyString title = {0};
@@ -1265,6 +1274,8 @@ PtTermCore *pt_term_core_new(const char *cwd, const char *const *argv,
                        (const void *)effect_xtversion);
   ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
                        (const void *)effect_title_changed);
+  ghostty_terminal_set(c->terminal, GHOSTTY_TERMINAL_OPT_BELL,
+                       (const void *)effect_bell);
 
   c->fd_source = g_unix_fd_add(c->pty_fd, G_IO_IN | G_IO_HUP,
                                on_pty_readable, c);

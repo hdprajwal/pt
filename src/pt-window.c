@@ -140,6 +140,9 @@ static void mark_dirty(PtWindow *w);   /* persistence hook; body in Task 12 */
 static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
                                  const char *title, const char *body,
                                  gpointer user);
+/* Wired up in tab_ui_new like the one above; the body lands with the rest of
+ * the bell code further on. */
+static void on_grid_bell(PtPaneGrid *g, guint64 pane_id, gpointer user);
 
 /* ---------- config ---------- */
 
@@ -953,6 +956,7 @@ static PtTabUI *tab_ui_new(PtWindow *w, PtProjectUI *p, const char *title,
   g_signal_connect(t->grid, "emptied", G_CALLBACK(on_grid_emptied), w);
   g_signal_connect(t->grid, "notification",
                    G_CALLBACK(on_grid_notification), w);
+  g_signal_connect(t->grid, "bell", G_CALLBACK(on_grid_bell), w);
   return t;
 }
 
@@ -960,7 +964,7 @@ static void tab_ui_free(gpointer data) {
   PtTabUI *t = data;
   g_free(t->title);
   if (t->grid != NULL) {
-    /* The six handlers above all carry the window, and the grid can outlive
+    /* The handlers above all carry the window, and the grid can outlive
      * this tab (pt-pane-grid's close idle holds its own ref). Drop them here
      * or a background shell exiting in the same frame as window close would
      * emit "emptied" into a finalized window. */
@@ -1297,6 +1301,18 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
   g_application_send_notification(G_APPLICATION(app), id, n);
   g_free(id);
   g_object_unref(n);
+}
+
+/* ---------- terminal bell (BEL) ----------
+ *
+ * A program rang the bell. The core forwarded it unfiltered, and the grid
+ * tagged the pane it came from; what a bell turns into — an attention dot on
+ * its tab, a beep, both or neither — is decided here, per the `bell` config
+ * key. The behaviour itself lands with that key. */
+static void on_grid_bell(PtPaneGrid *g, guint64 pane_id, gpointer user) {
+  (void)g; (void)pane_id;
+  PtWindow *w = PT_WINDOW(user);
+  (void)w;
 }
 
 /* ---------- agent lifecycle reports ----------
