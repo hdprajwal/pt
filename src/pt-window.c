@@ -18,6 +18,7 @@
 #include "pt-git-monitor.h"
 #include "pt-path.h"
 #include "pt-config.h"
+#include "pt-bindings.h"
 #include "pt-theme.h"
 #include "pt-style.h"
 #include "pt-workspace.h"
@@ -1893,6 +1894,52 @@ enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL,
  * (see PtCommandPaletteItem). */
 /* The trigger row lives in the main list; the sessions themselves are loaded
  * by the palette when it is picked (see enter_history_mode). */
+
+/* Defined beside the shortcut table, which owns the runtime bindings. */
+static const char *binding_accel_for_name(PtWindow *w, const char *name);
+
+/* GTK accel spelling to compact glyphs: <Control><Shift>z reads ⌃⇧Z, the way
+ * the existing rows spell chords. */
+static char *binding_pretty(const char *accel) {
+  static const struct { const char *name, *glyph; } mods[] = {
+    { "Control", "⌃" }, { "Shift", "⇧" }, { "Alt", "⌥" }, { "Super", "⌘" },
+  };
+  GString *s = g_string_new(NULL);
+  const char *p = accel;
+  while (p != NULL && *p == '<') {
+    const char *end = strchr(p + 1, '>');
+    if (end == NULL) break;
+    gsize len = (gsize)(end - (p + 1));
+    for (gsize i = 0; i < G_N_ELEMENTS(mods); i++)
+      if (strlen(mods[i].name) == len &&
+          strncmp(p + 1, mods[i].name, len) == 0)
+        g_string_append(s, mods[i].glyph);
+    p = end + 1;
+  }
+  if (p != NULL && *p != '\0') {
+    if (p[1] == '\0' && g_ascii_isalnum(p[0]))
+      g_string_append_c(s, g_ascii_toupper(p[0]));
+    else
+      g_string_append(s, p);
+  }
+  return g_string_free(s, FALSE);
+}
+
+/* Project i's palette label: the plain ^N while the switch stays on its
+ * default key, the rebound chord spelled out when it is not, and nothing at
+ * all once an unbind has taken the shortcut away. */
+static char *project_binding_label(PtWindow *w, guint i) {
+  if (i >= 9) return NULL;
+  char *name = g_strdup_printf("switch-project-%u", i + 1);
+  const char *accel = binding_accel_for_name(w, name);
+  g_free(name);
+  if (accel == NULL) return NULL;   /* unbound: nothing to advertise */
+  char *def = g_strdup_printf("<Control>%u", i + 1);
+  gboolean stock = strcmp(accel, def) == 0;
+  g_free(def);
+  if (stock) return g_strdup_printf("^%u", i + 1);
+  return binding_pretty(accel);
+}
 static void append_recent_sessions_row(GArray *arr) {
   PtCommandPaletteItem sess = {
     .name = g_strdup("Recent agent sessions"),
@@ -1924,7 +1971,7 @@ static void action_open_palette(PtWindow *w) {
       .detail = p->is_repo
           ? g_strdup_printf("%s · %s", shown_path, p->git.branch)
           : g_strdup(shown_path),
-      .shortcut = i < 9 ? g_strdup_printf("^%u", i + 1) : NULL,
+      .shortcut = project_binding_label(w, i),
       .accent = accent, .is_shell = FALSE,
       .project_id = id, .tab_id = PT_WS_ID_NONE, .command = -1,
     };
@@ -1966,17 +2013,30 @@ static void action_open_palette(PtWindow *w) {
   };
   g_array_append_val(arr, rst);
 
-  /* Like mouse reporting, the row says which way the toggle currently points. */
+  /* Like mouse reporting, the row says which way the toggle currently points,
+   * and names the chord that flips it — which is only ⌃⇧Z while pane-zoom
+   * still sits on its default key. */
+  const char *pz_accel = binding_accel_for_name(w, "pane-zoom");
+  char *pz_note = NULL;
+  if (pz_accel != NULL && strcmp(pz_accel, "<Control><Shift>z") != 0) {
+    char *pretty = binding_pretty(pz_accel);
+    pz_note = g_strdup_printf("off · %s gives the focused pane the whole grid",
+                              pretty);
+    g_free(pretty);
+  }
   PtCommandPaletteItem zm = {
     .name = g_strdup("Toggle pane zoom"),
-    .detail = g_strdup(active_pane_zoomed(w)
-        ? "on · the focused pane fills the grid"
-        : "off · ⌃⇧Z gives the focused pane the whole grid"),
+    .detail = active_pane_zoomed(w)
+        ? g_strdup("on · the focused pane fills the grid")
+        : g_strdup(pz_note != NULL ? pz_note
+                                   : "off · ⌃⇧Z gives the focused pane the "
+                                     "whole grid"),
     .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
     .project_id = PT_WS_ID_NONE, .tab_id = PT_WS_ID_NONE,
     .command = PT_CMD_TOGGLE_PANE_ZOOM,
   };
   g_array_append_val(arr, zm);
+  g_free(pz_note);
 
   append_recent_sessions_row(arr);
 
@@ -2175,98 +2235,129 @@ static gboolean sc_settings(GtkWidget *wg, GVariant *a, gpointer u) {
 }
 /* Every other accelerator is one row in the table below and goes through one
  * callback: the blocking rule is the same for all of them, so it is written
- * once, and the row says which action to run and with what argument. */
-typedef enum {
-  PT_ACTION_SWITCH_PROJECT,
-  PT_ACTION_SWITCH_TAB,
-  PT_ACTION_NEW_TAB,
-  PT_ACTION_ADD_PROJECT,
-  PT_ACTION_TOGGLE_SIDEBAR,
-  PT_ACTION_TOGGLE_INFOPANEL,
-  PT_ACTION_NEXT_TAB,
-  PT_ACTION_PREV_TAB,
-  PT_ACTION_NEXT_PROJECT,
-  PT_ACTION_PREV_PROJECT,
-  PT_ACTION_SPLIT,
-  PT_ACTION_CLOSE_PANE,
-  PT_ACTION_FOCUS_NEXT,
-  PT_ACTION_FOCUS_PREV,
-  PT_ACTION_FOCUS_DIRECTION,
-  PT_ACTION_PASTE,
-  PT_ACTION_COPY,
-  PT_ACTION_ZOOM,
-  PT_ACTION_ZOOM_PANE,
-} PtActionId;
+ * once, and the row says which action to run and with what argument. The ids
+ * themselves live in pt-bindings.h beside the action-name table, so the two
+ * can never disagree about what a configured shortcut may say. */
 
-/* accel spells the trigger; arg is the action's argument: project/tab index,
- * PtSplitKind, PtPaneDirection, zoom delta. The Tab chords are not here — see
- * on_tab_chord for why they cannot be. */
+/* The name column is what `bind` lines speak: one spelling per (id, arg).
+ * Rows sharing an id with different args have distinct names, and the four
+ * font-zoom-in aliases share theirs — rebinding the action retires them all,
+ * which is the deal: one action, one binding. */
 static const struct {
   const char *accel;
+  const char *name;
   PtActionId id;
   int arg;
 } shortcuts[] = {
-  { .accel = "<Control>1", .id = PT_ACTION_SWITCH_PROJECT, .arg = 0 },
-  { .accel = "<Control>2", .id = PT_ACTION_SWITCH_PROJECT, .arg = 1 },
-  { .accel = "<Control>3", .id = PT_ACTION_SWITCH_PROJECT, .arg = 2 },
-  { .accel = "<Control>4", .id = PT_ACTION_SWITCH_PROJECT, .arg = 3 },
-  { .accel = "<Control>5", .id = PT_ACTION_SWITCH_PROJECT, .arg = 4 },
-  { .accel = "<Control>6", .id = PT_ACTION_SWITCH_PROJECT, .arg = 5 },
-  { .accel = "<Control>7", .id = PT_ACTION_SWITCH_PROJECT, .arg = 6 },
-  { .accel = "<Control>8", .id = PT_ACTION_SWITCH_PROJECT, .arg = 7 },
-  { .accel = "<Control>9", .id = PT_ACTION_SWITCH_PROJECT, .arg = 8 },
-  { .accel = "<Alt>1", .id = PT_ACTION_SWITCH_TAB, .arg = 0 },
-  { .accel = "<Alt>2", .id = PT_ACTION_SWITCH_TAB, .arg = 1 },
-  { .accel = "<Alt>3", .id = PT_ACTION_SWITCH_TAB, .arg = 2 },
-  { .accel = "<Alt>4", .id = PT_ACTION_SWITCH_TAB, .arg = 3 },
-  { .accel = "<Alt>5", .id = PT_ACTION_SWITCH_TAB, .arg = 4 },
-  { .accel = "<Alt>6", .id = PT_ACTION_SWITCH_TAB, .arg = 5 },
-  { .accel = "<Alt>7", .id = PT_ACTION_SWITCH_TAB, .arg = 6 },
-  { .accel = "<Alt>8", .id = PT_ACTION_SWITCH_TAB, .arg = 7 },
-  { .accel = "<Alt>9", .id = PT_ACTION_SWITCH_TAB, .arg = 8 },
-  { .accel = "<Control>n", .id = PT_ACTION_ADD_PROJECT },
-  { .accel = "<Control>b", .id = PT_ACTION_TOGGLE_SIDEBAR },
+  { .accel = "<Control>1", .name = "switch-project-1",
+    .id = PT_ACTION_SWITCH_PROJECT, .arg = 0 },
+  { .accel = "<Control>2", .name = "switch-project-2",
+    .id = PT_ACTION_SWITCH_PROJECT, .arg = 1 },
+  { .accel = "<Control>3", .name = "switch-project-3",
+    .id = PT_ACTION_SWITCH_PROJECT, .arg = 2 },
+  { .accel = "<Control>4", .name = "switch-project-4",
+    .id = PT_ACTION_SWITCH_PROJECT, .arg = 3 },
+  { .accel = "<Control>5", .name = "switch-project-5",
+    .id = PT_ACTION_SWITCH_PROJECT, .arg = 4 },
+  { .accel = "<Control>6", .name = "switch-project-6",
+    .id = PT_ACTION_SWITCH_PROJECT, .arg = 5 },
+  { .accel = "<Control>7", .name = "switch-project-7",
+    .id = PT_ACTION_SWITCH_PROJECT, .arg = 6 },
+  { .accel = "<Control>8", .name = "switch-project-8",
+    .id = PT_ACTION_SWITCH_PROJECT, .arg = 7 },
+  { .accel = "<Control>9", .name = "switch-project-9",
+    .id = PT_ACTION_SWITCH_PROJECT, .arg = 8 },
+  { .accel = "<Alt>1", .name = "switch-tab-1",
+    .id = PT_ACTION_SWITCH_TAB, .arg = 0 },
+  { .accel = "<Alt>2", .name = "switch-tab-2",
+    .id = PT_ACTION_SWITCH_TAB, .arg = 1 },
+  { .accel = "<Alt>3", .name = "switch-tab-3",
+    .id = PT_ACTION_SWITCH_TAB, .arg = 2 },
+  { .accel = "<Alt>4", .name = "switch-tab-4",
+    .id = PT_ACTION_SWITCH_TAB, .arg = 3 },
+  { .accel = "<Alt>5", .name = "switch-tab-5",
+    .id = PT_ACTION_SWITCH_TAB, .arg = 4 },
+  { .accel = "<Alt>6", .name = "switch-tab-6",
+    .id = PT_ACTION_SWITCH_TAB, .arg = 5 },
+  { .accel = "<Alt>7", .name = "switch-tab-7",
+    .id = PT_ACTION_SWITCH_TAB, .arg = 6 },
+  { .accel = "<Alt>8", .name = "switch-tab-8",
+    .id = PT_ACTION_SWITCH_TAB, .arg = 7 },
+  { .accel = "<Alt>9", .name = "switch-tab-9",
+    .id = PT_ACTION_SWITCH_TAB, .arg = 8 },
+  { .accel = "<Control>n", .name = "add-project",
+    .id = PT_ACTION_ADD_PROJECT },
+  { .accel = "<Control>b", .name = "toggle-sidebar",
+    .id = PT_ACTION_TOGGLE_SIDEBAR },
   /* ⌃I costs the terminal its Ctrl+I (which a shell reads as Tab): this
    * window-level controller runs in the CAPTURE phase and takes it first. That
    * is the requested binding. */
-  { .accel = "<Control>i", .id = PT_ACTION_TOGGLE_INFOPANEL },
-  { .accel = "<Control>t", .id = PT_ACTION_NEW_TAB },
-  { .accel = "<Control><Shift>t", .id = PT_ACTION_NEW_TAB },
+  { .accel = "<Control>i", .name = "toggle-infopanel",
+    .id = PT_ACTION_TOGGLE_INFOPANEL },
+  { .accel = "<Control>t", .name = "new-tab", .id = PT_ACTION_NEW_TAB },
+  { .accel = "<Control><Shift>t", .name = "new-tab",
+    .id = PT_ACTION_NEW_TAB },
   /* ⌃PgDn / ⌃PgUp cycle tabs too: no compositor claims those, so shells stay
-   * reachable as a "next" on desktops that own ⌥⇥. */
-  { .accel = "<Control>Page_Down", .id = PT_ACTION_NEXT_TAB },
-  { .accel = "<Control>Page_Up", .id = PT_ACTION_PREV_TAB },
-  { .accel = "<Control><Shift>d", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_H },
-  { .accel = "<Control><Shift>s", .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_V },
-  { .accel = "<Control><Shift>w", .id = PT_ACTION_CLOSE_PANE },
-  { .accel = "<Control><Shift>o", .id = PT_ACTION_FOCUS_NEXT },
+   * reachable as a "next" on desktops that own ⌥⇥. Rebinding next-tab or
+   * prev-tab retires these aliases with their siblings. */
+  { .accel = "<Control>Page_Down", .name = "next-tab",
+    .id = PT_ACTION_NEXT_TAB },
+  { .accel = "<Control>Page_Up", .name = "prev-tab",
+    .id = PT_ACTION_PREV_TAB },
+  { .accel = "<Control><Shift>d", .name = "split-h",
+    .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_H },
+  { .accel = "<Control><Shift>s", .name = "split-v",
+    .id = PT_ACTION_SPLIT, .arg = PT_SPLIT_V },
+  { .accel = "<Control><Shift>w", .name = "close-pane",
+    .id = PT_ACTION_CLOSE_PANE },
+  { .accel = "<Control><Shift>o", .name = "focus-next",
+    .id = PT_ACTION_FOCUS_NEXT },
   /* Ghostty parity: Ctrl+Super+] / [ cycle next / previous pane. */
-  { .accel = "<Control><Super>bracketright", .id = PT_ACTION_FOCUS_NEXT },
-  { .accel = "<Control><Super>bracketleft", .id = PT_ACTION_FOCUS_PREV },
-  { .accel = "<Control><Alt>Left", .id = PT_ACTION_FOCUS_DIRECTION,
-    .arg = PT_PANE_DIR_LEFT },
-  { .accel = "<Control><Alt>Right", .id = PT_ACTION_FOCUS_DIRECTION,
-    .arg = PT_PANE_DIR_RIGHT },
-  { .accel = "<Control><Alt>Up", .id = PT_ACTION_FOCUS_DIRECTION,
-    .arg = PT_PANE_DIR_UP },
-  { .accel = "<Control><Alt>Down", .id = PT_ACTION_FOCUS_DIRECTION,
-    .arg = PT_PANE_DIR_DOWN },
-  { .accel = "<Control><Shift>v", .id = PT_ACTION_PASTE },
-  { .accel = "<Control><Shift>c", .id = PT_ACTION_COPY },
+  { .accel = "<Control><Super>bracketright", .name = "focus-next",
+    .id = PT_ACTION_FOCUS_NEXT },
+  { .accel = "<Control><Super>bracketleft", .name = "focus-prev",
+    .id = PT_ACTION_FOCUS_PREV },
+  { .accel = "<Control><Alt>Left", .name = "focus-left",
+    .id = PT_ACTION_FOCUS_DIRECTION, .arg = PT_PANE_DIR_LEFT },
+  { .accel = "<Control><Alt>Right", .name = "focus-right",
+    .id = PT_ACTION_FOCUS_DIRECTION, .arg = PT_PANE_DIR_RIGHT },
+  { .accel = "<Control><Alt>Up", .name = "focus-up",
+    .id = PT_ACTION_FOCUS_DIRECTION, .arg = PT_PANE_DIR_UP },
+  { .accel = "<Control><Alt>Down", .name = "focus-down",
+    .id = PT_ACTION_FOCUS_DIRECTION, .arg = PT_PANE_DIR_DOWN },
+  { .accel = "<Control><Shift>v", .name = "paste", .id = PT_ACTION_PASTE },
+  { .accel = "<Control><Shift>c", .name = "copy", .id = PT_ACTION_COPY },
   /* Font zoom: cover =, shifted + (both plain and explicit-shift forms),
-   * and the keypad. */
-  { .accel = "<Control>equal", .id = PT_ACTION_ZOOM, .arg = +1 },
-  { .accel = "<Control>plus", .id = PT_ACTION_ZOOM, .arg = +1 },
-  { .accel = "<Control><Shift>plus", .id = PT_ACTION_ZOOM, .arg = +1 },
-  { .accel = "<Control>KP_Add", .id = PT_ACTION_ZOOM, .arg = +1 },
-  { .accel = "<Control>minus", .id = PT_ACTION_ZOOM, .arg = -1 },
-  { .accel = "<Control>underscore", .id = PT_ACTION_ZOOM, .arg = -1 },
-  { .accel = "<Control>KP_Subtract", .id = PT_ACTION_ZOOM, .arg = -1 },
-  { .accel = "<Control>0", .id = PT_ACTION_ZOOM, .arg = 0 },
+   * and the keypad. All four aliases answer to font-zoom-in together. */
+  { .accel = "<Control>equal", .name = "font-zoom-in",
+    .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control>plus", .name = "font-zoom-in",
+    .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control><Shift>plus", .name = "font-zoom-in",
+    .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control>KP_Add", .name = "font-zoom-in",
+    .id = PT_ACTION_ZOOM, .arg = +1 },
+  { .accel = "<Control>minus", .name = "font-zoom-out",
+    .id = PT_ACTION_ZOOM, .arg = -1 },
+  { .accel = "<Control>underscore", .name = "font-zoom-out",
+    .id = PT_ACTION_ZOOM, .arg = -1 },
+  { .accel = "<Control>KP_Subtract", .name = "font-zoom-out",
+    .id = PT_ACTION_ZOOM, .arg = -1 },
+  { .accel = "<Control>0", .name = "font-zoom-reset",
+    .id = PT_ACTION_ZOOM, .arg = 0 },
   /* Pane zoom (⌃⇧Z): the focused pane fills the grid. Distinct from the font
    * zoom rows above; appended at the end so parallel branches merge clean. */
-  { .accel = "<Control><Shift>z", .id = PT_ACTION_ZOOM_PANE },
+  { .accel = "<Control><Shift>z", .name = "pane-zoom",
+    .id = PT_ACTION_ZOOM_PANE },
 };
+
+/* The direction args above are spelled as literals in the action-name table,
+ * because the enum lives behind GTK and the parser must not know it. These
+ * asserts are the tripwire if that order ever changes. */
+G_STATIC_ASSERT(PT_PANE_DIR_LEFT == 0);
+G_STATIC_ASSERT(PT_PANE_DIR_RIGHT == 1);
+G_STATIC_ASSERT(PT_PANE_DIR_UP == 2);
+G_STATIC_ASSERT(PT_PANE_DIR_DOWN == 3);
 
 /* What a table row's callback carries: the window (the only per-instance part)
  * plus the row's action. One array of these per window, not one heap block per
@@ -2311,6 +2402,100 @@ static void add_shortcut(GtkShortcutController *ctl, const char *accel,
   g_warn_if_fail(trig != NULL);   /* never ship a silent, unparseable binding */
   gtk_shortcut_controller_add_shortcut(ctl,
       gtk_shortcut_new(trig, gtk_callback_action_new(fn, data, destroy)));
+}
+
+/* ---------- configured bindings ----------
+ * The config's bind/unbind lines speak in action names; this layer resolves
+ * them onto the table above at install time and keeps the result around so
+ * the palette can show what a shortcut actually is now. */
+typedef struct {
+  char *accel;    /* GTK spelling */
+  char *name;     /* action-name space spelling */
+  PtActionId id;
+  int arg;
+} RtBinding;
+
+static void rt_binding_free(gpointer p) {
+  RtBinding *r = p;
+  g_free(r->accel);
+  g_free(r->name);
+  g_free(r);
+}
+
+static void rt_array_unref(gpointer p) { g_ptr_array_unref(p); }
+
+static GPtrArray *runtime_bindings(PtWindow *w) {
+  return g_object_get_data(G_OBJECT(w), "pt-runtime-bindings");
+}
+
+/* The accel an action answers to now, or NULL when nothing does. */
+static const char *binding_accel_for_name(PtWindow *w, const char *name) {
+  GPtrArray *rt = runtime_bindings(w);
+  if (rt == NULL) return NULL;
+  for (guint i = 0; i < rt->len; i++) {
+    const RtBinding *r = g_ptr_array_index(rt, i);
+    if (strcmp(r->name, name) == 0) return r->accel;
+  }
+  return NULL;
+}
+
+static void rt_add(GPtrArray *rt, const char *accel, const char *name,
+                   PtActionId id, int arg) {
+  RtBinding *r = g_new0(RtBinding, 1);
+  r->accel = g_strdup(accel);
+  r->name = g_strdup(name);
+  r->id = id;
+  r->arg = arg;
+  g_ptr_array_add(rt, r);
+}
+
+/* One action, one binding: a bind retires every row that answers to the same
+ * action name as well as any row already on its accelerator. An unbind drops
+ * rows by accelerator alone. */
+static void apply_bindings(PtWindow *w) {
+  guint n = pt_config_n_binding_lines(w->config);
+  const char **lines = g_new(const char *, (gsize)n + 1);
+  int *nos = g_new(int, n);
+  for (guint i = 0; i < n; i++) {
+    lines[i] = pt_config_binding_line(w->config, i);
+    nos[i] = pt_config_binding_line_no(w->config, i);
+  }
+  lines[n] = NULL;
+
+  GPtrArray *parsed = pt_bindings_parse(lines, nos, NULL);
+  GPtrArray *rt = runtime_bindings(w);
+  for (guint i = 0; i < parsed->len; i++) {
+    const PtBindingLine *b = g_ptr_array_index(parsed, i);
+    if (!b->is_unbind) {
+      /* The one GTK-facing step: the grammar promised a parseable accel, and
+       * this is where GTK gets to agree. */
+      guint keyval;
+      GdkModifierType mods;
+      if (!gtk_accelerator_parse(b->accel, &keyval, &mods) || keyval == 0) {
+        g_warning("pt: config line %d: accelerator '%s' did not parse — "
+                  "skipped", b->line_no, b->accel);
+        continue;
+      }
+    }
+    for (guint j = rt->len; j-- > 0;) {
+      const RtBinding *r = g_ptr_array_index(rt, j);
+      gboolean same_accel = strcmp(r->accel, b->accel) == 0;
+      gboolean same_action =
+          !b->is_unbind && g_ascii_strcasecmp(r->name, b->action) == 0;
+      if (same_accel || same_action)
+        g_ptr_array_remove_index(rt, j);
+    }
+    if (!b->is_unbind) {
+      PtActionId id;
+      int arg;
+      gboolean found = pt_bindings_action_lookup(b->action, &id, &arg);
+      g_warn_if_fail(found);
+      if (found) rt_add(rt, b->accel, b->action, id, arg);
+    }
+  }
+  g_free(nos);
+  g_free(lines);
+  pt_bindings_free(parsed);
 }
 
 /* ⌃⇥ / ⌃⇧⇥ cycle projects — the axis of ⌃1…9 — and ⌥⇥ / ⌥⇧⇥ cycle tabs within
@@ -2365,15 +2550,24 @@ static void install_shortcuts(PtWindow *w) {
                                              GTK_PHASE_CAPTURE);
   add_shortcut(ctl, "<Control>k", sc_palette, w, NULL);
   add_shortcut(ctl, "<Control>comma", sc_settings, w, NULL);
-  /* One allocation for the whole table, owned by the window: the rows are
-   * static, so the only thing a callback needs on top of its row is w. */
-  ShortcutCtx *ctxs = g_new(ShortcutCtx, G_N_ELEMENTS(shortcuts));
+  /* The defaults first, then the config's overrides on top: one owned array
+   * of effective rows per window, kept for the palette's shortcut labels. */
+  GPtrArray *rt = g_ptr_array_new_with_free_func(rt_binding_free);
+  g_object_set_data_full(G_OBJECT(w), "pt-runtime-bindings", rt,
+                         rt_array_unref);
+  for (gsize i = 0; i < G_N_ELEMENTS(shortcuts); i++)
+    rt_add(rt, shortcuts[i].accel, shortcuts[i].name, shortcuts[i].id,
+           shortcuts[i].arg);
+  if (w->config != NULL) apply_bindings(w);
+
+  ShortcutCtx *ctxs = g_new(ShortcutCtx, rt->len);
   g_object_set_data_full(G_OBJECT(w), "pt-shortcut-ctxs", ctxs, g_free);
-  for (gsize i = 0; i < G_N_ELEMENTS(shortcuts); i++) {
+  for (guint i = 0; i < rt->len; i++) {
+    const RtBinding *r = g_ptr_array_index(rt, i);
     ctxs[i].w = w;
-    ctxs[i].id = shortcuts[i].id;
-    ctxs[i].arg = shortcuts[i].arg;
-    add_shortcut(ctl, shortcuts[i].accel, shortcut_dispatch, &ctxs[i], NULL);
+    ctxs[i].id = r->id;
+    ctxs[i].arg = r->arg;
+    add_shortcut(ctl, r->accel, shortcut_dispatch, &ctxs[i], NULL);
   }
   gtk_widget_add_controller(GTK_WIDGET(w), GTK_EVENT_CONTROLLER(ctl));
 
@@ -2667,7 +2861,6 @@ static void pt_window_init(PtWindow *w) {
   g_signal_connect(w->infopanel, "usage-enable",
                    G_CALLBACK(on_info_usage_enable), w);
 
-  install_shortcuts(w);
   g_signal_connect(w, "close-request", G_CALLBACK(on_close_request), NULL);
   /* Crash leftovers: reports whose panes died with a previous process. Live
    * panes rewrite theirs; a week is comfortably past any real session. */
@@ -2676,6 +2869,10 @@ static void pt_window_init(PtWindow *w) {
    * just made sure exists. */
   watch_agent_reports(w);
   restore_state(w);
+  /* The config's bind lines ride on the shortcut table, so this waits for
+   * init_config (inside restore_state) rather than sitting beside the other
+   * controllers. Everything here is synchronous; no key lands in between. */
+  install_shortcuts(w);
   refresh_sidebar(w);
   show_active_grid(w);
 
