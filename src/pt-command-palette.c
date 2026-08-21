@@ -1,14 +1,17 @@
 #include "pt-command-palette.h"
+#include "pt-agent-history.h"
+#include "pt-agent-session.h"
 #include "pt-fuzzy.h"
 #include "pt-accent.h"
 #include "pt-overlay.h"
+#include "pt-path.h"
 #include "pt-rowlist.h"
 
 /* The palette never scrolls: it shows the six best matches and nothing else. */
 #define PT_COMMAND_PALETTE_ROWS  6
 #define PT_COMMAND_PALETTE_WIDTH 620
 
-enum { SIG_ACTIVATED, SIG_CLOSED, N_SIGNALS };
+enum { SIG_ACTIVATED, SIG_HISTORY_ACTIVATED, SIG_CLOSED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtCommandPalette {
@@ -17,6 +20,7 @@ struct _PtCommandPalette {
   GtkWidget *entry;     /* GtkText holding the query */
   GtkWidget *list;      /* box the rows live in */
   PtRowList *rows;      /* rebuilt per query */
+  GtkWidget *scope;     /* the query bar's scope label */
   PtCommandPaletteItem *items; /* owned; NULL when closed */
   int n_items;
   int *scores;          /* one per item, refilled per query; sized with items */
@@ -37,6 +41,8 @@ static void free_items(PtCommandPalette *p) {
     g_free(p->items[i].name);
     g_free(p->items[i].detail);
     g_free(p->items[i].shortcut);
+    g_free(p->items[i].history_session_id);
+    g_free(p->items[i].history_cwd);
   }
   g_clear_pointer(&p->items, g_free);
   g_clear_pointer(&p->scores, g_free);
@@ -60,9 +66,93 @@ static void filter_items(PtCommandPalette *p, const char *q) {
                                     PT_COMMAND_PALETTE_ROWS);
 }
 
+/* ---------- recent agent sessions ---------- */
+/* The copy glyph on a session row. Its gesture sits in the capture phase on
+ * the child, so it claims the press before the row's own click controller
+ * ever sees it: copying must not also resume the session. */
+static void on_copy_pressed(GtkGestureClick *g, int n, double x, double y,
+                            gpointer user) {
+  (void)n; (void)x; (void)y;
+  gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
+  GtkWidget *label = gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(g));
+  GdkClipboard *clip =
+      gdk_display_get_clipboard(gtk_widget_get_display(label));
+  gdk_clipboard_set_text(clip, user);   /* borrowed from the item */
+}
+
+static void append_copy_button(GtkWidget *row, const char *session_id) {
+  GtkWidget *copy = gtk_label_new("⧉");
+  gtk_widget_set_valign(copy, GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class(copy, "pt-palette-shortcut");
+  gtk_widget_set_tooltip_text(copy, "copy session id");
+  GtkGesture *click = gtk_gesture_click_new();
+  g_signal_connect(click, "pressed", G_CALLBACK(on_copy_pressed),
+                   (gpointer)session_id);
+  gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(click),
+                                             GTK_PHASE_CAPTURE);
+  gtk_widget_add_controller(copy, GTK_EVENT_CONTROLLER(click));
+  gtk_box_append(GTK_BOX(row), copy);
+}
+
+/* Swap the row model to recent agent sessions: one item per readable report,
+ * newest first. Built here rather than by the window so the trigger row stays
+ * a plain command and the window never learns how reports are read. Escape
+ * closes — back out is ^K again, not a third list to track. */
+static void enter_history_mode(PtCommandPalette *p) {
+  char *dir = pt_agent_session_dir();
+  GPtrArray *hist = pt_agent_history_load(dir);
+  g_free(dir);
+  GDateTime *now = g_date_time_new_now_local();
+  GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtCommandPaletteItem));
+
+  if (hist->len == 0) {
+    /* The friendly empty state, as a dead row so Enter on it does nothing. */
+    PtCommandPaletteItem none = {
+      .name = g_strdup("No recent agent sessions"),
+      .detail = g_strdup("one lands here when an agent starts in a pane"),
+      .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = FALSE,
+      .is_history = TRUE, .history_dead = TRUE,
+      .project_id = 0, .tab_id = 0, .command = -1,
+    };
+    g_array_append_val(arr, none);
+  }
+  for (guint i = 0; i < hist->len; i++) {
+    PtAgentHistoryEntry *e = g_ptr_array_index(hist, i);
+    gboolean dead = e->cwd == NULL ||
+                    !g_file_test(e->cwd, G_FILE_TEST_IS_DIR);
+    char shown[512];
+    if (e->cwd != NULL)
+      pt_path_home_abbrev(e->cwd, g_get_home_dir(), shown, sizeof shown);
+    char *rel = pt_agent_history_relative_time(e->ts, now);
+    const char *agent = pt_agent_session_kind_name(e->agent);
+    PtCommandPaletteItem it = {
+      .name = dead ? g_strdup("[missing]") : g_path_get_basename(e->cwd),
+      .detail = g_strdup_printf("%s · %s · %s", agent != NULL ? agent : "?",
+                                dead ? "?" : shown, rel),
+      .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = FALSE,
+      .is_history = TRUE, .history_dead = dead, .history_agent = e->agent,
+      .history_session_id = g_strdup(e->session_id),
+      .history_cwd = g_strdup(e->cwd),
+      /* Switch-target ids mean nothing here; activation goes through
+       * "history-activated" with copied strings instead. */
+      .project_id = 0, .tab_id = 0, .command = -1,
+    };
+    g_free(rel);
+    g_array_append_val(arr, it);
+  }
+  g_date_time_unref(now);
+  g_ptr_array_unref(hist);
+
+  /* Swap in the new block through open()'s own path: it drops the old items,
+   * resizes the score room and rebuilds. The query is cleared — a filter that
+   * matched projects says nothing about sessions. */
+  int n = (int)arr->len;
+  pt_command_palette_open(p, (PtCommandPaletteItem *)g_array_free(arr, FALSE),
+                          n);
+  gtk_label_set_text(GTK_LABEL(p->scope), "recent agent sessions");
+}
+
 /* ---------- row rendering ---------- */
-/* One row per *shown* position, so the index a click reports indexes shown[]
- * — the same space `selected` lives in. */
 static GtkWidget *build_row(gpointer items, guint idx, gpointer user) {
   PtCommandPalette *p = user;
   const PtCommandPaletteItem *it =
@@ -93,10 +183,14 @@ static GtkWidget *build_row(gpointer items, guint idx, gpointer user) {
   gtk_box_append(GTK_BOX(row), detail);
 
   GtkWidget *kind = gtk_label_new(it->is_command ? "COMMAND"
-                                  : it->is_shell ? "SHELL" : "PROJECT");
+                                  : it->is_shell ? "SHELL"
+                                  : it->is_history ? "AGENT" : "PROJECT");
   gtk_widget_set_valign(kind, GTK_ALIGN_CENTER);
   gtk_widget_add_css_class(kind, "pt-palette-kind");
   gtk_box_append(GTK_BOX(row), kind);
+
+  if (it->is_history && !it->history_dead)
+    append_copy_button(row, it->history_session_id);
 
   GtkWidget *sc = gtk_label_new(it->shortcut != NULL ? it->shortcut : "");
   gtk_widget_set_valign(sc, GTK_ALIGN_CENTER);
@@ -130,9 +224,31 @@ static void activate_selected(PtCommandPalette *p) {
     pt_command_palette_close(p);
     return;
   }
-  /* Copy before emitting: the handler switches projects, and close() below
-   * frees the array the item lives in. */
   const PtCommandPaletteItem *it = &p->items[p->shown[p->selected]];
+  /* The mode switch never reaches the window, and it swaps the items block
+   * `it` lives in — handled first, with nothing read from `it` afterwards. */
+  if (it->is_command && it->command == PT_COMMAND_PALETTE_RECENT_SESSIONS) {
+    enter_history_mode(p);
+    return;
+  }
+  /* A dead session row (cwd gone on disk, or the empty-list note) answers
+   * like a dead id: the palette closes and nothing else happens. */
+  if (it->is_history) {
+    if (it->history_dead) {
+      pt_command_palette_close(p);
+      return;
+    }
+    /* Copy before emitting: close() below frees the strings. */
+    int agent = (int)it->history_agent;
+    char *session_id = g_strdup(it->history_session_id);
+    char *cwd = g_strdup(it->history_cwd);
+    g_signal_emit(p, signals[SIG_HISTORY_ACTIVATED], 0,
+                  agent, session_id, cwd);
+    g_free(session_id);
+    g_free(cwd);
+    pt_command_palette_close(p);
+    return;
+  }
   guint project_id = it->project_id;
   guint tab_id = it->tab_id;
   int command = it->is_command ? it->command : -1;
@@ -233,6 +349,9 @@ void pt_command_palette_open(PtCommandPalette *p, PtCommandPaletteItem *items,
    * not on the typing path. */
   p->scores = p->n_items > 0 ? g_new0(int, (gsize)p->n_items) : NULL;
   p->selected = 0;
+  /* Every open starts from the main list; enter_history_mode re-opens with
+   * its own label after this. */
+  gtk_label_set_text(GTK_LABEL(p->scope), "projects · shells · commands");
   pt_overlay_open(p->overlay);
 
   /* Setting the text fires "changed" only when it actually changes, so rebuild
@@ -274,6 +393,10 @@ static void pt_command_palette_class_init(PtCommandPaletteClass *klass) {
   signals[SIG_ACTIVATED] = g_signal_new("activated", PT_TYPE_COMMAND_PALETTE,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
       G_TYPE_UINT, G_TYPE_UINT, G_TYPE_INT);
+  signals[SIG_HISTORY_ACTIVATED] =
+      g_signal_new("history-activated", PT_TYPE_COMMAND_PALETTE,
+          G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3,
+          G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING);
   signals[SIG_CLOSED] = g_signal_new("closed", PT_TYPE_COMMAND_PALETTE,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
@@ -303,6 +426,7 @@ static void pt_command_palette_init(PtCommandPalette *p) {
   gtk_widget_set_valign(scope, GTK_ALIGN_CENTER);
   gtk_widget_add_css_class(scope, "pt-palette-scope");
   gtk_box_append(GTK_BOX(query), scope);
+  p->scope = scope;
   gtk_box_append(panel, query);
 
   p->list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
