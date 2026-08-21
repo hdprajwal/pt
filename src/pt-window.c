@@ -1623,6 +1623,21 @@ static gboolean active_mouse_reporting(PtWindow *w) {
   return term != NULL && pt_terminal_mouse_reporting(term);
 }
 
+/* Pane zoom, not font zoom: the focused pane filling the grid. */
+static gboolean active_pane_zoomed(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  return t != NULL && pt_pane_grid_get_zoomed(PT_PANE_GRID(t->grid));
+}
+
+static void action_toggle_pane_zoom(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  if (t == NULL) return;
+  pt_pane_grid_toggle_zoom(PT_PANE_GRID(t->grid));
+  /* The statusline's zoomed chip rides this refresh; nothing else signals the
+   * toggle. */
+  refresh_statusline(w);
+}
+
 /* ---------- project add/remove ---------- */
 static void on_folder_chosen(GObject *src, GAsyncResult *res, gpointer user) {
   PtWindow *w = PT_WINDOW(user);
@@ -1863,7 +1878,8 @@ static void on_info_usage_enable(PtInfoPanel *ip, gpointer user) {
 /* ---------- command palette ---------- */
 /* Commands ride the same list as projects and shells, marked is_command with
  * `command` saying which one. */
-enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL };
+enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL,
+       PT_CMD_TOGGLE_PANE_ZOOM };
 
 /* Every project, each followed by its shells, then the commands. The palette
  * ranks this flat list and hands back the workspace ids the user picked —
@@ -1928,6 +1944,18 @@ static void action_open_palette(PtWindow *w) {
   };
   g_array_append_val(arr, rst);
 
+  /* Like mouse reporting, the row says which way the toggle currently points. */
+  PtCommandPaletteItem zm = {
+    .name = g_strdup("Toggle pane zoom"),
+    .detail = g_strdup(active_pane_zoomed(w)
+        ? "on · the focused pane fills the grid"
+        : "off · ⌃⇧Z gives the focused pane the whole grid"),
+    .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
+    .project_id = PT_WS_ID_NONE, .tab_id = PT_WS_ID_NONE,
+    .command = PT_CMD_TOGGLE_PANE_ZOOM,
+  };
+  g_array_append_val(arr, zm);
+
   int n = (int)arr->len;
   pt_command_palette_open(PT_COMMAND_PALETTE(w->palette),
                   (PtCommandPaletteItem *)g_array_free(arr, FALSE), n);
@@ -1945,7 +1973,8 @@ static void on_palette_activated(PtCommandPalette *pal, guint project_id,
   if (command >= 0) {
     switch (command) {
     case PT_CMD_TOGGLE_MOUSE_REPORTING: action_toggle_mouse_reporting(w); break;
-    case PT_CMD_RESET_TERMINAL: action_reset_terminal(w); break;
+    case PT_CMD_RESET_TERMINAL:         action_reset_terminal(w); break;
+    case PT_CMD_TOGGLE_PANE_ZOOM:       action_toggle_pane_zoom(w); break;
     default: break;
     }
     return;
@@ -2091,6 +2120,7 @@ typedef enum {
   PT_ACTION_PASTE,
   PT_ACTION_COPY,
   PT_ACTION_ZOOM,
+  PT_ACTION_ZOOM_PANE,
 } PtActionId;
 
 /* accel spells the trigger; arg is the action's argument: project/tab index,
@@ -2158,6 +2188,9 @@ static const struct {
   { .accel = "<Control>underscore", .id = PT_ACTION_ZOOM, .arg = -1 },
   { .accel = "<Control>KP_Subtract", .id = PT_ACTION_ZOOM, .arg = -1 },
   { .accel = "<Control>0", .id = PT_ACTION_ZOOM, .arg = 0 },
+  /* Pane zoom (⌃⇧Z): the focused pane fills the grid. Distinct from the font
+   * zoom rows above; appended at the end so parallel branches merge clean. */
+  { .accel = "<Control><Shift>z", .id = PT_ACTION_ZOOM_PANE },
 };
 
 /* What a table row's callback carries: the window (the only per-instance part)
@@ -2191,6 +2224,7 @@ static gboolean shortcut_dispatch(GtkWidget *wg, GVariant *a, gpointer u) {
     case PT_ACTION_PASTE:            action_paste(w); break;
     case PT_ACTION_COPY:             action_copy(w); break;
     case PT_ACTION_ZOOM:             action_zoom(w, c->arg); break;
+    case PT_ACTION_ZOOM_PANE:        action_toggle_pane_zoom(w); break;
   }
   return TRUE;
 }
