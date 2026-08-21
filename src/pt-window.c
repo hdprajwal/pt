@@ -1082,10 +1082,19 @@ static void sync_git_monitors(PtWindow *w) {
  * window acts through, and the index wrappers translate exactly where an index
  * is the caller's native language (shortcut table, sidebar and tab-strip
  * signals, the palette). A dead id no-ops. */
+/* Zoom is per-grid view state, and walking away from a tab puts its grid
+ * back: coming back later must not land on a half-forgotten zoomed view the
+ * user has long stopped expecting. */
+static void reset_zoom_before_switch(PtWindow *w) {
+  PtTabUI *t = active_tab(active_project(w));
+  if (t != NULL) pt_pane_grid_unzoom(PT_PANE_GRID(t->grid));
+}
+
 static void switch_project_id(PtWindow *w, PtWsId project) {
   if (w->ws == NULL ||
       pt_workspace_project_index(w->ws, project) == PT_WS_INDEX_NONE)
     return;
+  reset_zoom_before_switch(w);
   pt_workspace_set_active_project(w->ws, project);
   sync_git_monitors(w);
   refresh_sidebar(w);
@@ -1121,6 +1130,7 @@ static void switch_tab_id(PtWindow *w, PtWsId tab) {
   if (w->ws == NULL ||
       pt_workspace_tab_project(w->ws, tab) == PT_WS_ID_NONE)
     return;
+  reset_zoom_before_switch(w);
   pt_workspace_set_active_tab(w->ws, tab);
   show_active_grid(w);
   refresh_infopanel(w);

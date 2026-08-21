@@ -463,6 +463,11 @@ gboolean pt_pane_grid_get_zoomed(PtPaneGrid *g) {
 
 void pt_pane_grid_focus_next(PtPaneGrid *g) {
   if (g->focused == NULL) return;
+  /* Policy: an explicit focus move always leaves zoom first. Skipping hidden
+   * leaves would cycle focus through panes the user cannot see; landing on
+   * one silently would move focus nowhere visible. Un-zooming shows the pane
+   * the move lands on — the grid comes back with it. */
+  pt_pane_grid_unzoom(g);
   g->focused = pt_split_next_leaf(g->tree, g->focused);
   pt_pane_grid_focus_terminal(g);
   g_signal_emit(g, signals[SIG_FOCUS], 0);
@@ -471,6 +476,7 @@ void pt_pane_grid_focus_next(PtPaneGrid *g) {
 
 void pt_pane_grid_focus_prev(PtPaneGrid *g) {
   if (g->focused == NULL) return;
+  pt_pane_grid_unzoom(g);   /* same policy as focus_next */
   PtSplitNode *leaf = pt_split_prev_leaf(g->tree, g->focused);
   if (leaf == g->focused) return;
   g->focused = leaf;
@@ -493,6 +499,10 @@ static gboolean leaf_center(PtPaneGrid *g, PtSplitNode *leaf,
 
 void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir) {
   if (g->focused == NULL || g->tree == NULL) return;
+  /* Same policy as focus_next: a directional move leaves zoom first, so the
+   * geometry below sees the real layout — and every pane is visible to land
+   * on. */
+  pt_pane_grid_unzoom(g);
   double cx, cy;
   if (!leaf_center(g, g->focused, &cx, &cy)) return;
 
@@ -582,6 +592,7 @@ PtTerminal *pt_pane_grid_pane_by_token(PtPaneGrid *g, const char *token) {
 gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id) {
   PtSplitNode *leaf = leaf_by_id(g, id);
   if (leaf == NULL) return FALSE;
+  pt_pane_grid_unzoom(g);   /* a clicked notification asks for its pane shown */
   g->focused = leaf;
   pt_pane_grid_focus_terminal(g);
   g_signal_emit(g, signals[SIG_FOCUS], 0);
