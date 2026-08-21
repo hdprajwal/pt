@@ -120,7 +120,7 @@ static void enter_history_mode(PtCommandPalette *p) {
     PtAgentHistoryEntry *e = g_ptr_array_index(hist, i);
     gboolean dead = e->cwd == NULL ||
                     !g_file_test(e->cwd, G_FILE_TEST_IS_DIR);
-    char shown[512];
+    char shown[512] = "";   /* dead rows show "?" below, never a stale buffer */
     if (e->cwd != NULL)
       pt_path_home_abbrev(e->cwd, g_get_home_dir(), shown, sizeof shown);
     char *rel = pt_agent_history_relative_time(e->ts, now);
