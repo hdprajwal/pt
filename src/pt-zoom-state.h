@@ -50,6 +50,10 @@ gboolean pt_zoom_state_leave(PtZoomState *z);
 /* One restore tick landed (or gave up): the paned it served is done. */
 void pt_zoom_state_restore_done(PtZoomState *z);
 
+/* A restore tick found its paned unallocated yet again. TRUE when it should
+ * stop waiting and finish best-effort this frame rather than G_SOURCE_CONTINUE. */
+gboolean pt_zoom_state_tick_starved(guint starved_ticks);
+
 gboolean pt_zoom_state_busy(const PtZoomState *z);    /* restore in flight */
 gboolean pt_zoom_state_active(const PtZoomState *z);  /* what the chip shows */
 gboolean pt_zoom_state_sync_suspended(const PtZoomState *z);

@@ -406,9 +406,26 @@ static gboolean restore_ratio_tick(GtkWidget *w, GdkFrameClock *clock,
   if (node != NULL && node->kind != PT_SPLIT_LEAF) {
     int total = (node->kind == PT_SPLIT_H) ? gtk_widget_get_width(w)
                                            : gtk_widget_get_height(w);
-    if (total <= 0) return G_SOURCE_CONTINUE; /* not allocated yet */
-    gtk_paned_set_position(GTK_PANED(w), (int)(total * node->ratio));
-    g_object_set_data(G_OBJECT(w), "pt-ratio-applied", GINT_TO_POINTER(1));
+    if (total <= 0) {
+      /* Not allocated yet. Patience is bounded: a window minimized for the
+       * whole restore never sizes its paneds, and waiting forever would keep
+       * the pending counter up and divider syncing suspended for good. After
+       * a fixed run of starved frames this paned gives up: no position write
+       * (there is no size to compute one from) and no arming, so the saved
+       * ratio stays untouched in the tree for the next rebuild rather than
+       * being clobbered by whatever degenerate allocation GTK guessed. */
+      guint starved = GPOINTER_TO_UINT(
+          g_object_get_data(G_OBJECT(w), "pt-restore-starved"));
+      if (!pt_zoom_state_tick_starved(++starved)) {
+        g_object_set_data(G_OBJECT(w), "pt-restore-starved",
+                          GUINT_TO_POINTER(starved));
+        return G_SOURCE_CONTINUE;
+      }
+    } else {
+      gtk_paned_set_position(GTK_PANED(w), (int)(total * node->ratio));
+      g_object_set_data(G_OBJECT(w), "pt-ratio-applied", GINT_TO_POINTER(1));
+    }
+    g_object_set_data(G_OBJECT(w), "pt-restore-starved", NULL);
   }
   /* node NULL means torn down mid-restore: count it anyway so the pending
    * counter can never wedge on. */

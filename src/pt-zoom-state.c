@@ -20,6 +20,10 @@ void pt_zoom_state_restore_done(PtZoomState *z) {
   if (z->ratio_restores > 0) z->ratio_restores--;
 }
 
+gboolean pt_zoom_state_tick_starved(guint starved_ticks) {
+  return starved_ticks >= PT_ZOOM_RESTORE_MAX_STARVED_TICKS;
+}
+
 gboolean pt_zoom_state_busy(const PtZoomState *z) {
   return z->ratio_restores > 0;
 }
