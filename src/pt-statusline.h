@@ -13,7 +13,8 @@ GtkWidget *pt_statusline_new(void);
  * progress NULL → the track and the task label are hidden outright; there is no
  * indeterminate mode, because a bar that moves without data is a lie.
  * task_label is the foreground command (e.g. "cargo"); may be NULL.
- * accent indexes the project accent cycle and colours the fill. */
+ * accent indexes the project accent cycle and colours the fill.
+ * zoomed shows the pane-zoom chip next to the run state. */
 void pt_statusline_update(PtStatusline *sl, gboolean running, int last_exit,
                           const PtProgress *progress, const char *task_label,
-                          int accent);
+                          int accent, gboolean zoomed);

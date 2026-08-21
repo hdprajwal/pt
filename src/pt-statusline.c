@@ -15,6 +15,7 @@ struct _PtStatusline {
   GtkWidget parent_instance;
   GtkWidget *box;
   GtkWidget *state;   /* "● running" / "✓ exit 0" / "✗ exit 2" */
+  GtkWidget *zoom;    /* "⤢ zoomed"; hidden unless pane zoom is on */
   GtkWidget *track;   /* progress groove; hidden with no parsed progress */
   GtkWidget *fill;    /* accent-coloured child of the track */
   GtkWidget *task;    /* "cargo  128/214"; hidden with the track */
@@ -34,7 +35,7 @@ static void set_state_class(GtkWidget *wdg, const char *keep) {
 
 void pt_statusline_update(PtStatusline *sl, gboolean running, int last_exit,
                           const PtProgress *progress, const char *task_label,
-                          int accent) {
+                          int accent, gboolean zoomed) {
   g_return_if_fail(PT_IS_STATUSLINE(sl));
 
   if (running) {
@@ -53,6 +54,8 @@ void pt_statusline_update(PtStatusline *sl, gboolean running, int last_exit,
     gtk_label_set_text(GTK_LABEL(sl->state), "✓");
     set_state_class(sl->state, "ok");
   }
+
+  gtk_widget_set_visible(sl->zoom, zoomed);
 
   /* No parsed progress → no bar at all. */
   double fraction = -1.0;
@@ -110,6 +113,11 @@ static void pt_statusline_init(PtStatusline *sl) {
   gtk_widget_add_css_class(sl->state, "ok");
   gtk_label_set_xalign(GTK_LABEL(sl->state), 0.0f);
   gtk_box_append(GTK_BOX(sl->box), sl->state);
+
+  sl->zoom = gtk_label_new("⤢ zoomed");
+  gtk_widget_add_css_class(sl->zoom, "pt-zoom-chip");
+  gtk_widget_set_visible(sl->zoom, FALSE);
+  gtk_box_append(GTK_BOX(sl->box), sl->zoom);
 
   sl->track = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_widget_add_css_class(sl->track, "pt-progress-track");

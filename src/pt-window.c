@@ -501,6 +501,8 @@ static PtTerminal *focused_terminal(PtWindow *w) {
                    : NULL;
 }
 
+static gboolean active_pane_zoomed(PtWindow *w);   /* body below, with the actions */
+
 static void refresh_statusline(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   PtTerminal *term = focused_terminal(w);
@@ -522,7 +524,8 @@ static void refresh_statusline(PtWindow *w) {
   }
   pt_statusline_update(PT_STATUSLINE(w->statusline), running, last_exit,
                        has_prog ? &prog : NULL, task,
-                       p != NULL ? proj_accent(p) : 0);
+                       p != NULL ? proj_accent(p) : 0,
+                       active_pane_zoomed(w));
 }
 
 /* ---------- info panel ---------- */
