@@ -9,6 +9,20 @@
 
 #define PT_AGENT_REPORT_VERSION 1
 
+/* Why the agent reported, beyond "it is running". A lifecycle report carries
+ * one of these so pt can raise a desktop notification when it lands while the
+ * pane is not being watched. NONE is both "no event" and "an event name this
+ * build never saw" — an unknown name must read as absence, because a report
+ * written by a newer integration still has to resume. */
+typedef enum {
+  PT_AGENT_EVENT_NONE = 0,
+  PT_AGENT_EVENT_TURN_COMPLETE,   /* the agent finished its turn */
+  PT_AGENT_EVENT_NEEDS_INPUT,     /* permission prompt / waiting for input */
+} PtAgentEvent;
+
+const char *pt_agent_session_event_name(PtAgentEvent ev);
+PtAgentEvent pt_agent_session_event_from_name(const char *name);
+
 /* Machine names ("claude", "codex") — what report files and state.json
  * spell. pt_agent_label() is for humans; this one is a wire format and
  * never changes spelling. PT_AGENT_NONE and unknown names map to NULL/NONE. */
@@ -24,12 +38,16 @@ typedef struct {
   char *session_id;
   char *cwd;
   int pid;          /* the agent process itself, not the hook that reported */
+  PtAgentEvent event;   /* NONE when the report carried no lifecycle event */
 } PtAgentSessionReport;
 
-/* Atomic (temp + rename via g_file_set_contents). Creates the directory. */
+/* Atomic (temp + rename via g_file_set_contents). Creates the directory.
+ * `event` != NONE adds the "event" member — a lifecycle report must still
+ * carry every field, because it overwrites the resume-registration file. */
 gboolean pt_agent_session_report_write(const char *path, PtAgentKind agent,
                                        const char *session_id, const char *cwd,
-                                       int pid, GError **err);
+                                       int pid, PtAgentEvent event,
+                                       GError **err);
 /* NULL on missing file, malformed JSON, unknown agent name, empty session_id,
  * a session_id holding anything outside [A-Za-z0-9._-], a version newer than
  * PT_AGENT_REPORT_VERSION, or pid <= 0. */

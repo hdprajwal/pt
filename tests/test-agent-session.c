@@ -28,7 +28,8 @@ static void test_report_roundtrip(void) {
   char *path = g_build_filename(dir, "tok.json", NULL);
   GError *err = NULL;
   g_assert_true(pt_agent_session_report_write(path, PT_AGENT_CLAUDE,
-                                              "abc-123", "/tmp/x", 4242, &err));
+                                              "abc-123", "/tmp/x", 4242,
+                                              PT_AGENT_EVENT_NONE, &err));
   g_assert_no_error(err);
   PtAgentSessionReport *r = pt_agent_session_report_load(path);
   g_assert_nonnull(r);
@@ -36,7 +37,66 @@ static void test_report_roundtrip(void) {
   g_assert_cmpstr(r->session_id, ==, "abc-123");
   g_assert_cmpstr(r->cwd, ==, "/tmp/x");
   g_assert_cmpint(r->pid, ==, 4242);
+  g_assert_cmpint(r->event, ==, PT_AGENT_EVENT_NONE);
   pt_agent_session_report_free(r);
+  g_remove(path); g_rmdir(dir); g_free(path); g_free(dir);
+}
+
+/* A report from an older integration has no "event" member at all, and one
+ * from a newer one may name an event this build never heard of. Both must
+ * load as NONE rather than poison the resume half of the report. */
+static void test_report_event_optional(void) {
+  char *dir = g_dir_make_tmp("pt-agent-XXXXXX", NULL);
+  struct { const char *name; const char *text; } cases[] = {
+    { "old.json",
+      "{\"version\":1,\"agent\":\"claude\",\"session_id\":\"abc\","
+      "\"cwd\":\"/tmp/x\",\"pid\":7}" },
+    { "future-event.json",
+      "{\"version\":1,\"agent\":\"claude\",\"session_id\":\"abc\","
+      "\"cwd\":\"/tmp/x\",\"pid\":7,\"event\":\"teleported\"}" },
+    { "wrong-type-event.json",
+      "{\"version\":1,\"agent\":\"claude\",\"session_id\":\"abc\","
+      "\"cwd\":\"/tmp/x\",\"pid\":7,\"event\":42}" },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(cases); i++) {
+    char *p = g_build_filename(dir, cases[i].name, NULL);
+    g_assert_true(g_file_set_contents(p, cases[i].text, -1, NULL));
+    PtAgentSessionReport *r = pt_agent_session_report_load(p);
+    g_assert_nonnull(r);
+    g_assert_cmpstr(r->session_id, ==, "abc");
+    g_assert_cmpint(r->event, ==, PT_AGENT_EVENT_NONE);
+    pt_agent_session_report_free(r);
+    g_remove(p); g_free(p);
+  }
+  g_rmdir(dir); g_free(dir);
+}
+
+/* A lifecycle report overwrites the resume-registration file, so it must come
+ * back with every field intact plus the event. */
+static void test_report_event_roundtrip(void) {
+  char *dir = g_dir_make_tmp("pt-agent-XXXXXX", NULL);
+  char *path = g_build_filename(dir, "tok.json", NULL);
+  GError *err = NULL;
+  g_assert_true(pt_agent_session_report_write(path, PT_AGENT_CODEX,
+                                              "abc-123", "/tmp/x", 4242,
+                                              PT_AGENT_EVENT_NEEDS_INPUT,
+                                              &err));
+  g_assert_no_error(err);
+  PtAgentSessionReport *r = pt_agent_session_report_load(path);
+  g_assert_nonnull(r);
+  g_assert_cmpint(r->agent, ==, PT_AGENT_CODEX);
+  g_assert_cmpstr(r->session_id, ==, "abc-123");
+  g_assert_cmpstr(r->cwd, ==, "/tmp/x");
+  g_assert_cmpint(r->pid, ==, 4242);
+  g_assert_cmpint(r->event, ==, PT_AGENT_EVENT_NEEDS_INPUT);
+  pt_agent_session_report_free(r);
+
+  /* and the other direction, with the member spelled as the wire format */
+  char *text = NULL;
+  g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+  g_assert_nonnull(strstr(text, "\"event\""));
+  g_assert_nonnull(strstr(text, "needs-input"));
+  g_free(text);
   g_remove(path); g_rmdir(dir); g_free(path); g_free(dir);
 }
 
@@ -75,6 +135,22 @@ static void test_report_load_rejects(void) {
   char *missing = g_build_filename(dir, "absent.json", NULL);
   g_assert_null(pt_agent_session_report_load(missing));
   g_free(missing); g_rmdir(dir); g_free(dir);
+}
+
+static void test_event_names(void) {
+  g_assert_cmpstr(pt_agent_session_event_name(PT_AGENT_EVENT_TURN_COMPLETE),
+                  ==, "turn-complete");
+  g_assert_cmpstr(pt_agent_session_event_name(PT_AGENT_EVENT_NEEDS_INPUT),
+                  ==, "needs-input");
+  g_assert_null(pt_agent_session_event_name(PT_AGENT_EVENT_NONE));
+  g_assert_cmpint(pt_agent_session_event_from_name("turn-complete"), ==,
+                  PT_AGENT_EVENT_TURN_COMPLETE);
+  g_assert_cmpint(pt_agent_session_event_from_name("needs-input"), ==,
+                  PT_AGENT_EVENT_NEEDS_INPUT);
+  g_assert_cmpint(pt_agent_session_event_from_name("weird"), ==,
+                  PT_AGENT_EVENT_NONE);
+  g_assert_cmpint(pt_agent_session_event_from_name(NULL), ==,
+                  PT_AGENT_EVENT_NONE);
 }
 
 static void test_report_matches(void) {
@@ -241,8 +317,13 @@ static void test_helper_no_session_id_is_noop(void) {
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/agent-session/kind-names", test_kind_names);
+  g_test_add_func("/agent-session/event-names", test_event_names);
   g_test_add_func("/agent-session/token", test_token);
   g_test_add_func("/agent-session/report-roundtrip", test_report_roundtrip);
+  g_test_add_func("/agent-session/report-event-optional",
+                  test_report_event_optional);
+  g_test_add_func("/agent-session/report-event-roundtrip",
+                  test_report_event_roundtrip);
   g_test_add_func("/agent-session/report-rejects", test_report_load_rejects);
   g_test_add_func("/agent-session/matches", test_report_matches);
   g_test_add_func("/agent-session/resume-command", test_resume_command);

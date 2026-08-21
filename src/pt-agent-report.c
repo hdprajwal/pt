@@ -83,7 +83,7 @@ int pt_agent_report_cli(int argc, char *argv[]) {
   GError *err = NULL;
   gboolean ok = pt_agent_session_report_write(path, kind, session,
                                               cwd != NULL ? cwd : "", pid,
-                                              &err);
+                                              PT_AGENT_EVENT_NONE, &err);
   if (!ok) fprintf(stderr, "pt agent-report: %s\n",
                    err != NULL ? err->message : "write failed");
   g_clear_error(&err);

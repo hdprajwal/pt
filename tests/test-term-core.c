@@ -3228,7 +3228,8 @@ static void test_free_unlinks_report(void) {
   g_assert_no_error(err);
   char *path = pt_agent_session_report_path(pt_term_core_pane_token(core));
   g_assert_true(pt_agent_session_report_write(path, PT_AGENT_CLAUDE, "x",
-                                              "/tmp", 1, NULL));
+                                              "/tmp", 1, PT_AGENT_EVENT_NONE,
+                                              NULL));
   g_assert_true(g_file_test(path, G_FILE_TEST_EXISTS));
   pt_term_core_free(core);
   g_assert_false(g_file_test(path, G_FILE_TEST_EXISTS));
