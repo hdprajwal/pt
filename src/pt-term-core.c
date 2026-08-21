@@ -2679,7 +2679,18 @@ gboolean pt_term_core_search_rows(PtTermCore *c, PtSearchRows *out) {
   out->rows = g_new0(char *, out->n_rows);
   out->maps = g_new0(GArray *, out->n_rows);
 
+  /* The row cap keeps a query bounded: the oldest rows past it come back
+     as empty entries rather than being walked, so the payload's indices —
+     and therefore every match's row — stay absolute SCREEN rows. */
+  int first = out->n_rows > PT_SEARCH_MAX_ROWS
+                  ? out->n_rows - PT_SEARCH_MAX_ROWS : 0;
+
   for (int y = 0; y < out->n_rows; y++) {
+    if (y < first) {
+      out->rows[y] = g_strdup("");
+      out->maps[y] = g_array_new(FALSE, FALSE, sizeof(guint16));
+      continue;
+    }
     GString *text = g_string_sized_new((gsize)c->cols + 1);
     GArray *map = g_array_sized_new(FALSE, FALSE, sizeof(guint16),
                                     (guint)c->cols);

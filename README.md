@@ -259,7 +259,8 @@ focused now.
 
 Searching only reaches what the pane kept. Once a pane's history passes the
 scrollback limit, the oldest lines are gone for good, so they cannot be
-found.
+found. A history longer than twenty thousand rows searches only its newest
+rows, because reading more than that back would make every search stutter.
 
 ## Selecting and copying text
 
