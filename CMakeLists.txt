@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(pt C)
+project(pt VERSION 0.6.0 LANGUAGES C)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_C_STANDARD 11)
@@ -78,8 +78,45 @@ add_custom_command(
           src/icons/scalable/actions/pt-git-branch-symbolic.svg
   COMMENT "Compiling GResources")
 
+# ---- version ----
+# `pt version` has to answer "which build is this?" precisely enough to tell a
+# stale install apart from a fresh one. The release number alone cannot: every
+# build between two tags carries the same one, and a ~/.local/bin/pt that is
+# months behind the tree looks identical to one built a minute ago. git describe
+# adds the commit and a -dirty marker on top of it.
+#
+# The configure-depends is what keeps that honest — without it the describe is
+# frozen at the last configure and a rebuild after a commit keeps reporting the
+# old hash. A linked worktree has a .git *file* rather than a directory, so
+# there is no HEAD to watch there and the guard below skips it rather than
+# naming a path that does not exist (a missing configure-depends re-runs cmake
+# on every build).
+find_package(Git QUIET)
+set(PT_GIT_DESCRIBE "unknown")
+if(GIT_FOUND)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" describe --tags --always --dirty --broken
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE PT_GIT_DESCRIBE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(NOT PT_GIT_DESCRIBE)
+    set(PT_GIT_DESCRIBE "unknown")
+  endif()
+  if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/.git/HEAD"
+      "${CMAKE_CURRENT_SOURCE_DIR}/.git/index")
+  endif()
+endif()
+string(TIMESTAMP PT_BUILD_DATE "%Y-%m-%d")
+
 add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-command-palette.c src/pt-settings.c src/pt-overlay.c src/pt-rowlist.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c src/pt-agent-monitor.c ${PT_RES_C})
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
+target_compile_definitions(pt PRIVATE
+  PT_VERSION="${PROJECT_VERSION}"
+  PT_GIT_DESCRIBE="${PT_GIT_DESCRIBE}"
+  PT_BUILD_DATE="${PT_BUILD_DATE}")
 # The running binary is how pt locates its own data, so a build tree pt has to
 # find build/share/pt/terminfo beside it.
 add_dependencies(pt pt-terminfo)

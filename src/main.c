@@ -24,7 +24,38 @@ static void on_activate(AdwApplication *app, gpointer user_data) {
   gtk_window_present(GTK_WINDOW(pt_window_new(app)));
 }
 
+/* What `pt version` prints. Three things, because the question behind it is
+ * always "am I running what I think I am":
+ *
+ *   - the release, for talking about it,
+ *   - `git describe`, because the release alone cannot separate two builds
+ *     from the same tag — the commit and the -dirty marker can,
+ *   - the binary's own path, resolved through /proc/self/exe rather than
+ *     argv[0] (a shell function or a PATH hit can make argv[0] lie). A stale
+ *     ~/.local/bin/pt shadowing a freshly built one is otherwise invisible,
+ *     and it is the failure this command exists to make obvious.
+ */
+static void print_version(void) {
+  g_print("pt %s (%s, built %s)\n", PT_VERSION, PT_GIT_DESCRIBE,
+          PT_BUILD_DATE);
+  char *exe = g_file_read_link("/proc/self/exe", NULL);
+  if (exe != NULL) {
+    g_print("%s\n", exe);
+    g_free(exe);
+  }
+}
+
 int main(int argc, char *argv[]) {
+  /* Before GTK, for the same reason as the two subcommands below: asking a pt
+   * which version it is must not wake the running instance through
+   * GApplication, and must answer over ssh with no display. */
+  if (argc >= 2 && (g_strcmp0(argv[1], "version") == 0 ||
+                    g_strcmp0(argv[1], "--version") == 0 ||
+                    g_strcmp0(argv[1], "-V") == 0)) {
+    print_version();
+    return 0;
+  }
+
   /* First of all: this one runs inside an agent, as a hook or notify command,
    * where there is no display and where reaching GTK — or worse, waking the
    * running instance through GApplication — would hang the agent it reports

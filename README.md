@@ -19,6 +19,24 @@ tag as an argument to pin a version). You still need the runtime libraries from
 your package manager: GTK4 ≥ 4.16, libadwaita, and json-glib — plus the
 fonts listed below. To build from source instead, read on.
 
+## Which version am I running
+
+```sh
+pt version        # also `pt --version`, `pt -V`
+```
+
+```text
+pt 0.6.0 (v0.6.0-73-ga981a58, built 2026-08-21)
+/home/hdprajwal/.local/bin/pt
+```
+
+The release, the exact commit it was built from (`-dirty` when the tree had
+uncommitted changes), and the path of the binary that answered. That last line
+is the point: an installed `pt` earlier on your `PATH` than a freshly built one
+is otherwise invisible, and a bug you already fixed will keep happening until
+you notice. The command runs before GTK and before the single-instance
+handshake, so it never wakes a running pt and works over ssh with no display.
+
 ## Requirements
 
 - Linux with a C11 compiler, CMake ≥ 3.19, and pkg-config
