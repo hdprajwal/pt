@@ -696,6 +696,15 @@ static void action_toggle_find(PtWindow *w) {
     return;
   }
   pt_search_bar_open(PT_SEARCH_BAR(w->searchbar));
+  /* The entry keeps its last query across a close — deliberately, so a
+     repeat search is one keystroke — but the pane behind it does not: close
+     cleared the needle with the highlights. Reopening therefore showed a
+     query with nothing standing behind it, blank count and all, and Enter
+     stepped a pane with no needle and did nothing until the text was
+     edited. Run it again here so what the bar says is true the moment it
+     slides in. The text is selected, so typing still replaces it. */
+  if (*pt_search_bar_text(PT_SEARCH_BAR(w->searchbar)) != '\0')
+    search_apply(w);
 }
 
 /* ---------- info panel ---------- */

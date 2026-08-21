@@ -2712,9 +2712,23 @@ gboolean pt_term_core_search_rows(PtTermCore *c, PtSearchRows *out) {
       if (ghostty_grid_ref_graphemes(&ref, cps, G_N_ELEMENTS(cps_stack),
                                      &glen) == GHOSTTY_OUT_OF_SPACE) {
         /* Far past anything a real grapheme carries; retried at the size
-         * the library asked for rather than truncated mid-cluster. */
-        cps = g_new(uint32_t, glen);
-        ghostty_grid_ref_graphemes(&ref, cps, glen, &glen);
+         * the library asked for rather than truncated mid-cluster.
+         *
+         * The retry's answer is checked where the first call's is not, and
+         * the asymmetry is the point: on the first call a refusal leaves
+         * glen the 0 it was initialized to and the cell simply reads blank,
+         * while here a refusal would leave g_new's uninitialized heap under
+         * a glen the encode loop below trusts — an out-of-bounds read
+         * feeding invalid code points (surrogates included) into
+         * g_utf8_casefold. A count larger than the buffer that was asked
+         * for says the same thing. Either way the cell reads blank, which
+         * keeps the text and its column map in lockstep. */
+        size_t cap = glen;
+        cps = g_new(uint32_t, cap);
+        if (ghostty_grid_ref_graphemes(&ref, cps, cap, &glen) !=
+                GHOSTTY_SUCCESS ||
+            glen > cap)
+          glen = 0;
       }
 
       guint16 colx = (guint16)x;
