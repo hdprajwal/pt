@@ -2679,18 +2679,20 @@ gboolean pt_term_core_search_rows(PtTermCore *c, PtSearchRows *out) {
   out->rows = g_new0(char *, out->n_rows);
   out->maps = g_new0(GArray *, out->n_rows);
 
-  /* The row cap keeps a query bounded: the oldest rows past it come back
-     as empty entries rather than being walked, so the payload's indices —
-     and therefore every match's row — stay absolute SCREEN rows. */
+  /* The row cap keeps a query bounded: the oldest rows past it are left as
+     the NULLs g_new0 already put there instead of being walked, so the
+     payload's indices — and therefore every match's row — stay absolute
+     SCREEN rows. NULL rather than an empty row on purpose. The cap only
+     binds on a pane given a scrollback-limit well above the 10MB default,
+     which at eighty columns retains under ten thousand rows; when it does
+     bind, though, an empty string plus an empty GArray per row skipped is two
+     heap allocations to say nothing, thousands of them on every keystroke the
+     search bar debounces into a query. pt_search_find skips NULL entries and
+     pt_search_rows_clear frees over them. */
   int first = out->n_rows > PT_SEARCH_MAX_ROWS
                   ? out->n_rows - PT_SEARCH_MAX_ROWS : 0;
 
-  for (int y = 0; y < out->n_rows; y++) {
-    if (y < first) {
-      out->rows[y] = g_strdup("");
-      out->maps[y] = g_array_new(FALSE, FALSE, sizeof(guint16));
-      continue;
-    }
+  for (int y = first; y < out->n_rows; y++) {
     GString *text = g_string_sized_new((gsize)c->cols + 1);
     GArray *map = g_array_sized_new(FALSE, FALSE, sizeof(guint16),
                                     (guint)c->cols);
@@ -2733,15 +2735,26 @@ gboolean pt_term_core_search_rows(PtTermCore *c, PtSearchRows *out) {
           g_string_append_c(text, ' ');
         }
       } else {
-        char u8[16 * 4];
+        /* Four bytes is the most any code point encodes to, so glen * 4 holds
+         * the whole cluster whatever glen is. The encode buffer has to grow
+         * with the retry above: sized at the stack cps count instead, a
+         * cluster long enough to need the retry would be cut off partway
+         * through — exactly the truncation the retry exists to avoid, and
+         * silently, since the bytes that did fit still fold and still match.
+         * Same stack-then-heap shape as the code point buffer, and the
+         * common case (glen 1 or 2) never leaves the stack. */
+        char u8_stack[G_N_ELEMENTS(cps_stack) * 4];
+        char *u8 = glen <= G_N_ELEMENTS(cps_stack) ? u8_stack
+                                                   : g_new(char, glen * 4);
         gsize nbytes = 0;
-        for (size_t i = 0; i < glen && nbytes + 4 <= sizeof u8; i++)
+        for (size_t i = 0; i < glen; i++)
           nbytes += (gsize)utf8_encode_cp(cps[i], u8 + nbytes);
         gchar *folded = g_utf8_casefold(u8, (gssize)nbytes);
         for (const char *p = folded; *p != '\0'; p++)
           g_array_append_val(map, colx);
         g_string_append_len(text, folded, -1);
         g_free(folded);
+        if (u8 != u8_stack) g_free(u8);
       }
       if (cps != cps_stack) g_free(cps);
     }

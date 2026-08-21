@@ -39,14 +39,22 @@ typedef struct {
  * the way folding a whole row would (ß becomes "ss" and grows two bytes):
  * the map is built from the folded bytes themselves. A caller matches a
  * similarly case-folded needle against these strings with plain byte
- * comparison and still lands on the right cells. */
+ * comparison and still lands on the right cells.
+ *
+ * `maps[i]->len == strlen(rows[i])` on every present row: text and map are
+ * appended to together and trimmed together, and pt_search_find relies on it
+ * rather than range-checking each lookup. An entry may instead be NULL on
+ * both sides at once — that is a row the producer chose not to walk (see
+ * PT_SEARCH_MAX_ROWS) and it matches nothing, which keeps every index in the
+ * payload an absolute screen row without paying an allocation per skip. */
 typedef struct {
   char **rows;
   GArray **maps;
   int n_rows;
 } PtSearchRows;
 
-/* Frees everything PtSearchRows owns and zeroes it. NULL-safe. */
+/* Frees everything PtSearchRows owns and zeroes it. NULL-safe, and safe over
+ * the NULL entries a capped extraction leaves in both arrays. */
 void pt_search_rows_clear(PtSearchRows *g);
 
 /* Find every occurrence of `needle` in the given prepared rows. `rows` and
@@ -54,8 +62,14 @@ void pt_search_rows_clear(PtSearchRows *g);
  * PtSearchRows documents above — case-folded text, per-byte column maps —
  * and `needle` is case-folded by this call, so the caller hands raw user
  * input. Rows are searched in order and a row's matches left to right,
- * non-overlapping; the result is sorted by row. Empty (or absent) needle,
- * or no hit anywhere, is an empty array rather than NULL. Caller frees with
+ * non-overlapping; the result is sorted by row. A NULL row (or map) is
+ * skipped, so a capped extraction costs nothing to search past.
+ *
+ * Two hits that cover the identical cells of one row are reported once:
+ * folding grows some cells to several bytes ("ß" -> "ss") that all name the
+ * same column, and a needle that fits inside one is otherwise found once per
+ * byte and counted that many times. Empty (or absent) needle, or no hit
+ * anywhere, is an empty array rather than NULL. Caller frees with
  * g_array_unref. */
 GArray *pt_search_find(const char *const *rows, const GArray *const *col_maps,
                        int n_rows, const char *needle);

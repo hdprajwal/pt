@@ -457,9 +457,12 @@ void pt_term_core_line_clear(PtLine *l);
  * PT_SEARCH_MAX_ROWS below — a pane whose retained history is longer than
  * that searches only its newest rows, because a full walk of a huge buffer
  * would hold the UI thread for seconds on every query. Rows older than the
- * cap come back as empty entries so match rows keep their absolute SCREEN
- * index (the axis pt_term_core_scrollbar's offset is counted from), and
- * nothing about them can match.
+ * cap come back as NULL entries — present, so match rows keep their absolute
+ * SCREEN index (the axis pt_term_core_scrollbar's offset is counted from),
+ * but neither walked nor allocated for: an empty string and an empty GArray
+ * per row skipped is two allocations to say nothing, and a pane whose limit
+ * lets it run well past the cap pays them thousands of times per query.
+ * Nothing about them can match.
  *
  * Answers the terminal's live state (the parser's own view), not the cached
  * render state a frame draws from. FALSE, leaving *out untouched, when the

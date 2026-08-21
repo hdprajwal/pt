@@ -22,17 +22,38 @@ static void row_matches(const char *text, const GArray *map,
   const char *p = text;
   while ((p = strstr(p, needle)) != NULL) {
     gsize at = (gsize)(p - text);
-    /* A match cannot be shorter than its needle, so the last byte is
-     * always inside the map. */
-    guint16 first = 0, last = 0;
-    if (at < map->len) first = g_array_index(map, guint16, at);
-    gsize end_byte = at + needle_len - 1;
-    if (end_byte < map->len) last = g_array_index(map, guint16, end_byte);
+    gsize end_byte = at + needle_len - 1;   /* a match spans >= 1 byte */
+    /* map->len == strlen(text) is a hard invariant of whoever built these
+     * rows: pt_term_core_search_rows appends to text and map together, one
+     * map entry per folded byte, and trims trailing blanks off both at once.
+     * So both ends of a match have a column behind them, and this asserts it
+     * instead of clamping. A silent fall back to column 0 would paint the
+     * highlight at the left margin, which reads as a drawing bug and buries
+     * the actual one — an extraction that fell out of lockstep. */
+    g_assert(end_byte < map->len);
+    guint16 first = g_array_index(map, guint16, at);
+    guint16 last = g_array_index(map, guint16, end_byte);
     PtSearchMatch m = { .row = row,
                         .start_col = first,
                         .end_col = last + 1 };
-    g_array_append_val(out, m);
     p += needle_len;          /* non-overlapping, left to right */
+    /* Case folding can make one cell contribute several bytes — "ß" folds to
+     * "ss" — and every one of them maps back to that single column. A needle
+     * short enough to sit inside such a cell therefore hits once per byte and
+     * comes out on the identical rect each time: "s" in "straße" is found at
+     * three byte offsets covering two cells. Painting the same rect twice is
+     * invisible, but counting it twice is not — it inflates the bar's N/M and
+     * makes Enter step twice through one cell before moving on. Byte order is
+     * ascending within a row, so a duplicate is always the match just
+     * appended and one look back is enough. */
+    if (out->len > 0) {
+      const PtSearchMatch *prev =
+          &g_array_index(out, PtSearchMatch, out->len - 1);
+      if (prev->row == m.row && prev->start_col == m.start_col &&
+          prev->end_col == m.end_col)
+        continue;
+    }
+    g_array_append_val(out, m);
   }
 }
 

@@ -120,6 +120,128 @@ static void test_case_folding(void) {
   pt_search_rows_clear(&grid);
 }
 
+/* ---- one cell, one match, however many folded bytes it grew into ---- */
+static void test_duplicate_cell_match(void) {
+  /* The same "straße" fixture, searched for a needle short enough to fit
+   * inside the folded ß. "s" is found at three byte offsets — 0, and both
+   * halves of the "ss" that ß folded to — but bytes 4 and 5 name the one
+   * column, so the last two describe the identical rect. Two matches, not
+   * three: a third would paint nothing new and would still count, showing
+   * "3" in the bar and making Enter stop twice on column 4. */
+  TestCell cells[] = {
+    { "s", 1 }, { "t", 1 }, { "r", 1 }, { "a", 1 },
+    { "ß", 1 }, { "e", 1 },
+  };
+  const TestCell *rows[] = { cells };
+  int counts[] = { 6 };
+  PtSearchRows grid;
+  build_grid(rows, counts, 1, &grid);
+
+  GArray *m = pt_search_find((const char *const *)grid.rows,
+                             (const GArray *const *)grid.maps, 1, "s");
+  g_assert_cmpint(count_matches(m), ==, 2);
+  g_assert_true(match_at(m, 0, 0, 0, 1));
+  g_assert_true(match_at(m, 1, 0, 4, 5));
+  g_array_unref(m);
+
+  /* Only an IDENTICAL rect collapses. Two neighbouring cells that each fold
+   * to "ss" are two matches even though the needle is the same, because they
+   * cover different columns. */
+  TestCell pair[] = { { "ß", 1 }, { "ß", 1 } };
+  const TestCell *prows[] = { pair };
+  int pcounts[] = { 2 };
+  PtSearchRows pgrid;
+  build_grid(prows, pcounts, 1, &pgrid);
+  GArray *p = pt_search_find((const char *const *)pgrid.rows,
+                             (const GArray *const *)pgrid.maps, 1, "s");
+  g_assert_cmpint(count_matches(p), ==, 2);
+  g_assert_true(match_at(p, 0, 0, 0, 1));
+  g_assert_true(match_at(p, 1, 0, 1, 2));
+  g_array_unref(p);
+
+  pt_search_rows_clear(&grid);
+  pt_search_rows_clear(&pgrid);
+}
+
+/* ---- reading a payload with holes in it ----
+ *
+ * The matcher's half of the capped-extraction contract, with no terminal in
+ * the way: a NULL entry is skipped, it still occupies its index so the rows
+ * around it keep their absolute screen number, and pt_search_rows_clear frees
+ * over it. /search/extraction-cap below drives the same contract from the
+ * producing end against a real pane; this pins what the consumer promises,
+ * including the half-NULL entry the extraction never produces but which must
+ * not be read as half usable. */
+static void test_capped_payload(void) {
+  TestCell hit[64];
+  int n;
+  ascii_row("needle here", hit, &n);
+
+  /* Six rows, only the newest two walked — the shape of a cap at four. */
+  PtSearchRows grid;
+  memset(&grid, 0, sizeof grid);
+  grid.n_rows = 6;
+  grid.rows = g_new0(char *, 6);
+  grid.maps = g_new0(GArray *, 6);
+  build_row(hit, n, &grid.rows[4], &grid.maps[4]);
+  build_row(hit, n, &grid.rows[5], &grid.maps[5]);
+
+  GArray *m = pt_search_find((const char *const *)grid.rows,
+                             (const GArray *const *)grid.maps,
+                             grid.n_rows, "needle");
+  /* Two hits, and their rows are 4 and 5 — absolute screen rows, not 0 and 1
+     as they would be had the skipped rows been left out of the payload
+     instead of nulled inside it. */
+  g_assert_cmpint(count_matches(m), ==, 2);
+  g_assert_true(match_at(m, 0, 4, 0, 6));
+  g_assert_true(match_at(m, 1, 5, 0, 6));
+  g_array_unref(m);
+
+  /* A half-NULL entry is skipped just as completely: neither half is usable
+     without the other. */
+  grid.rows[0] = g_strdup("needle");
+  GArray *half = pt_search_find((const char *const *)grid.rows,
+                                (const GArray *const *)grid.maps,
+                                grid.n_rows, "needle");
+  g_assert_cmpint(count_matches(half), ==, 2);
+  g_array_unref(half);
+
+  pt_search_rows_clear(&grid);        /* over the holes, without crashing */
+  g_assert_cmpint(grid.n_rows, ==, 0);
+  g_assert_null(grid.rows);
+  g_assert_null(grid.maps);
+  for (int i = 0; i < n; i++) g_free((gpointer)hit[i].text);
+}
+
+/* ---- the byte -> column map is exactly as long as its row ----
+ *
+ * pt_search_find reads both ends of a match out of the map without checking,
+ * because map->len == strlen(text) is guaranteed by the extraction that built
+ * them together. Handing it a map that is short is a broken invariant, and
+ * the point of this test is that it dies saying so rather than quietly
+ * reporting column 0 — a highlight at the left margin looks like a drawing
+ * bug and sends the next person to the wrong file. Runs in a subprocess
+ * because passing means aborting. */
+static void test_map_invariant(void) {
+  if (g_test_subprocess()) {
+    const char *text = "ab";
+    GArray *map = g_array_new(FALSE, FALSE, sizeof(guint16));
+    guint16 zero = 0;
+    g_array_append_val(map, zero);   /* one entry for two bytes of text */
+    GArray *m = pt_search_find((const char *const[]){ text },
+                               (const GArray *const[]){ map }, 1, "b");
+    /* Only reached if the assert did not fire. Say what went wrong out loud
+       so the trap failure is readable, then exit clean — g_test_trap_assert_
+       failed below is what turns that into a test failure. */
+    g_print("no assert: %d match(es)\n", count_matches(m));
+    g_array_unref(m);
+    g_array_unref(map);
+    return;
+  }
+  g_test_trap_subprocess(NULL, 0, 0);
+  g_test_trap_assert_failed();
+}
+
 /* ---- unicode needle: CJK ---- */
 static void test_unicode_needle(void) {
   /* Each character is one fixture cell here; the matcher only ever sees
@@ -466,10 +588,168 @@ static void test_extraction_wide_chars(void) {
   g_main_loop_unref(ctx.loop);
 }
 
+/* ---- a grapheme cluster longer than the stack buffers ----
+ *
+ * The extraction reads a cell's code points into a 16-entry stack array and
+ * retries on the heap when the library says that was too small. The bytes it
+ * encodes them into have to grow with that retry: sized for 16 code points
+ * instead, a cluster long enough to need the retry gets cut off partway
+ * through, and silently — the bytes that did fit are valid UTF-8 and still
+ * fold and still match, so the row simply comes back shorter than the cell it
+ * came from. Forty combining acutes on one base character is well past both
+ * the 16-code-point and the 64-byte marks. */
+static void test_extraction_long_grapheme(void) {
+#define PT_TEST_MARKS 40
+  GString *cluster = g_string_new("X");
+  for (int i = 0; i < PT_TEST_MARKS; i++)
+    g_string_append(cluster, "\\xcc\\x81");   /* U+0301, for printf */
+  char *cmd = g_strdup_printf("printf 'cluster %s end\\n'; sleep 30",
+                              cluster->str);
+  LiveCtx ctx = { .loop = g_main_loop_new(NULL, FALSE),
+                  .marker = "cluster ",
+                  .wait_for = "cluster " };
+  const char *argv[] = { "/bin/sh", "-c", cmd, NULL };
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16,
+                                      PT_CONFIG_SCROLLBACK_LIMIT_DEFAULT,
+                                      &err);
+  g_assert_no_error(err);
+  g_free(cmd);
+  PtTermCoreCallbacks cbs = { .draw = live_on_draw };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  live_wait(core, &ctx);
+
+  PtSearchRows rows;
+  g_assert_true(pt_term_core_search_rows(core, &rows));
+  int row = -1;
+  for (int i = 0; i < rows.n_rows; i++)
+    if (rows.rows[i] != NULL && strncmp(rows.rows[i], "cluster ", 8) == 0) {
+      row = i;
+      break;
+    }
+  g_assert_cmpint(row, >=, 0);
+
+  /* The cluster sits in column 8, right after "cluster ". However many marks
+   * the library actually kept, every byte of the folded cell has to be in the
+   * row: count the map entries naming column 8 and compare with the bytes the
+   * row holds for that column. A truncating encoder loses the tail of both at
+   * once, so the check that catches it is against the mark count. */
+  GArray *map = rows.maps[row];
+  g_assert_cmpuint(map->len, ==, strlen(rows.rows[row]));
+  guint bytes_at_8 = 0;
+  for (guint i = 0; i < map->len; i++)
+    if (g_array_index(map, guint16, i) == 8) bytes_at_8++;
+  /* "x" plus two bytes per surviving combining mark. libghostty is free to
+   * cap how many marks it attaches, so the floor here is what makes the test
+   * meaningful rather than the exact count: it has to be past the 64 bytes
+   * a 16-code-point buffer would have held. */
+  g_assert_cmpuint(bytes_at_8, >, 64);
+  g_assert_cmpuint(bytes_at_8, ==, 1 + 2 * PT_TEST_MARKS);
+
+  /* And the row is still searchable across the long cell. */
+  GArray *m = pt_search_find((const char *const *)rows.rows,
+                             (const GArray *const *)rows.maps,
+                             rows.n_rows, "cluster ");
+  g_assert_cmpint(count_matches(m), ==, 1);
+  g_array_unref(m);
+
+  pt_search_rows_clear(&rows);
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx.loop);
+  g_string_free(cluster, TRUE);
+#undef PT_TEST_MARKS
+}
+
+/* ---- the PT_SEARCH_MAX_ROWS cap, driven for real ----
+ *
+ * A pane can retain more history than a query is allowed to walk. Past the
+ * cap the extraction stops walking and leaves the older rows NULL on both
+ * sides, which has to mean two things at once: those rows match nothing, and
+ * they still occupy their slot in the payload so every row index above them
+ * is the absolute SCREEN row the viewport and the highlight rects are counted
+ * in. Dropping them from the payload instead would shift every match up by
+ * however many rows were skipped, and paint every highlight in the wrong
+ * place on a long-lived pane.
+ *
+ * The pane is asked for a bigger scrollback budget than the default because
+ * the default cannot reach the cap: 10MB of history is under ten thousand
+ * rows at this width, so a test that took it would never cross the boundary
+ * it means to test. */
+static void test_extraction_cap(void) {
+  const int lines = PT_SEARCH_MAX_ROWS + 5000;
+  LiveCtx ctx = { .loop = g_main_loop_new(NULL, FALSE),
+                  .marker = "newest-marker-zzz",
+                  .wait_for = "newest-marker-zzz" };
+  /* The anchor goes out first so the filler pushes it past the cap; the
+     marker goes out last so it lands well inside it. */
+  char *cmd = g_strdup_printf(
+      "echo oldest-anchor-qqq; i=0; while [ $i -lt %d ]; do echo \"f $i\"; "
+      "i=$((i+1)); done; echo %s; sleep 30", lines, ctx.marker);
+  const char *argv[] = { "/bin/sh", "-c", cmd, NULL };
+  GError *err = NULL;
+  PtTermCore *core = pt_term_core_new("/tmp", argv, NULL, 80, 24, 8, 16,
+                                      64u * 1000u * 1000u, &err);
+  g_assert_no_error(err);
+  g_free(cmd);
+  PtTermCoreCallbacks cbs = { .draw = live_on_draw };
+  pt_term_core_set_callbacks(core, &cbs, &ctx);
+  live_wait(core, &ctx);
+
+  PtSearchRows rows;
+  g_assert_true(pt_term_core_search_rows(core, &rows));
+  /* The premise: history longer than the cap, so there is something to skip. */
+  g_assert_cmpint(rows.n_rows, >, PT_SEARCH_MAX_ROWS);
+  int first = rows.n_rows - PT_SEARCH_MAX_ROWS;
+
+  /* Exactly the rows past the cap are NULL, and nothing above it is — no
+     allocation spent on a row that will only be skipped, and no gap in the
+     rows that were walked. */
+  for (int i = 0; i < rows.n_rows; i++) {
+    if (i < first) {
+      g_assert_null(rows.rows[i]);
+      g_assert_null(rows.maps[i]);
+    } else {
+      g_assert_nonnull(rows.rows[i]);
+      g_assert_nonnull(rows.maps[i]);
+    }
+  }
+
+  /* The anchor was retained by the pane but sits past the cap, so a search
+     cannot see it. */
+  GArray *old = pt_search_find((const char *const *)rows.rows,
+                               (const GArray *const *)rows.maps,
+                               rows.n_rows, "oldest-anchor-qqq");
+  g_assert_cmpint(count_matches(old), ==, 0);
+  g_array_unref(old);
+
+  /* The marker is inside the cap and comes back at its absolute index: the
+     row the payload itself holds it at, counted from the oldest retained row
+     rather than from the first row the walk bothered with. */
+  GArray *m = pt_search_find((const char *const *)rows.rows,
+                             (const GArray *const *)rows.maps,
+                             rows.n_rows, ctx.marker);
+  g_assert_cmpint(count_matches(m), ==, 1);
+  PtSearchMatch *mm = &g_array_index(m, PtSearchMatch, 0);
+  g_assert_cmpint(mm->row, >=, first);
+  g_assert_nonnull(strstr(rows.rows[mm->row], ctx.marker));
+  /* And that index is bigger than the whole cap, which it could only be if
+     the skipped rows are still counted — a payload that dropped them would
+     top out at PT_SEARCH_MAX_ROWS - 1. */
+  g_assert_cmpint(mm->row, >=, PT_SEARCH_MAX_ROWS);
+  g_array_unref(m);
+
+  pt_search_rows_clear(&rows);   /* over several thousand holes */
+  pt_term_core_free(core);
+  g_main_loop_unref(ctx.loop);
+}
+
 int main(int argc, char **argv) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/search/basic", test_basic);
   g_test_add_func("/search/case-folding", test_case_folding);
+  g_test_add_func("/search/duplicate-cell-match", test_duplicate_cell_match);
+  g_test_add_func("/search/capped-payload", test_capped_payload);
+  g_test_add_func("/search/map-invariant", test_map_invariant);
   g_test_add_func("/search/unicode-needle", test_unicode_needle);
   g_test_add_func("/search/empty-needle", test_empty_needle);
   g_test_add_func("/search/multiple-per-row", test_multiple_per_row);
@@ -478,5 +758,8 @@ int main(int argc, char **argv) {
   g_test_add_func("/search/extraction-basic", test_extraction_basic);
   g_test_add_func("/search/extraction-scrollback", test_extraction_scrollback);
   g_test_add_func("/search/extraction-wide-chars", test_extraction_wide_chars);
+  g_test_add_func("/search/extraction-long-grapheme",
+                  test_extraction_long_grapheme);
+  g_test_add_func("/search/extraction-cap", test_extraction_cap);
   return g_test_run();
 }
