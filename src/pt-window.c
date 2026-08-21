@@ -61,6 +61,9 @@ struct _PtWindow {
   PtConfig *config;
   GFileMonitor *config_monitor;
   GFileMonitor *theme_monitor;
+  GFileMonitor *agent_report_monitor;  /* watches the agent-sessions dir */
+  GHashTable *agent_notified;          /* token → last event name raised */
+  gboolean limit_notified;             /* a limit-hit episode is latched */
   /* Separate debounces: a themes-dir event must never swallow a pending
    * config reload (or the config edit that armed it would be lost). */
   guint config_reload_source;
@@ -559,8 +562,51 @@ static void redraw_agent_usage(PtWindow *w) {
                           g_get_real_time() / G_USEC_PER_SEC);
 }
 
+/* One "limit reached" per episode: the latch re-arms only when usage drops
+ * back under the threshold, so a reading pinned at the cap cannot re-notify
+ * on every poll. Fires only while the info panel is closed — whoever has it
+ * open is looking straight at the bars. */
+#define PT_LIMIT_REARM_PCT 90.0
+
+static void maybe_notify_limit(PtWindow *w) {
+  if (w->agents == NULL || w->ws == NULL) return;
+  PtAgentView view;
+  pt_agent_monitor_view(w->agents, &view);
+  double max_pct = 0.0;
+  if (view.usage != NULL)
+    for (int i = 0; i < view.usage->n_windows; i++)
+      if (view.usage->windows[i].percent > max_pct)
+        max_pct = view.usage->windows[i].percent;
+  gboolean hit = view.usage != NULL && view.usage->limit_hit &&
+                 max_pct >= PT_LIMIT_REARM_PCT;
+  /* Pressure off: the next episode may notify again. */
+  if (!hit) {
+    w->limit_notified = FALSE;
+    return;
+  }
+  if (w->limit_notified || gtk_widget_get_visible(w->infopanel)) return;
+  GtkApplication *app = gtk_window_get_application(GTK_WINDOW(w));
+  if (app == NULL) return;
+  w->limit_notified = TRUE;
+
+  const char *label = pt_agent_label(view.kind);
+  char *body = g_strdup_printf(
+      "%s hit a plan limit — the info panel has the details.",
+      label != NULL ? label : "the agent");
+  GNotification *n = g_notification_new("Usage limit reached");
+  g_notification_set_body(n, body);
+  GIcon *icon = g_themed_icon_new("dev.hdprajwal.pt");
+  g_notification_set_icon(n, icon);
+  g_object_unref(icon);
+  g_application_send_notification(G_APPLICATION(app), "agent-limit", n);
+  g_object_unref(n);
+  g_free(body);
+}
+
 static void on_agent_usage_changed(gpointer user) {
-  redraw_agent_usage(PT_WINDOW(user));
+  PtWindow *w = PT_WINDOW(user);
+  redraw_agent_usage(w);
+  maybe_notify_limit(w);
 }
 
 /* Hidden is the default state, and the 500ms tick calls this unconditionally —
@@ -1184,6 +1230,147 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
   g_application_send_notification(G_APPLICATION(app), id, n);
   g_free(id);
   g_object_unref(n);
+}
+
+/* ---------- agent lifecycle reports ----------
+ *
+ * The hooks drop their report files into one state directory; watching that
+ * directory is how pt learns a turn finished or an agent is waiting on input
+ * while the user is somewhere else. Same desktop pipeline as the OSC
+ * notifications above: the click lands on the pane that owns the report, and
+ * the per-pane key replaces instead of stacking. */
+
+static void notify_agent_event(PtWindow *w, const char *token) {
+  char *path = pt_agent_session_report_path(token);
+  PtAgentSessionReport *r = pt_agent_session_report_load(path);
+  g_free(path);
+  /* No report, or one without a lifecycle event (the common write is the
+   * SessionStart registration): nothing to say. */
+  if (r == NULL || r->event == PT_AGENT_EVENT_NONE) {
+    pt_agent_session_report_free(r);
+    return;
+  }
+  const char *evname = pt_agent_session_event_name(r->event);
+
+  /* Which pane owns this token. Reports outlive panes — the file is how a
+   * restored window finds its session back — so "no taker" is the normal
+   * answer for a pane that closed, not an error. */
+  PtTerminal *owner = NULL;
+  PtPaneGrid *owner_grid = NULL;
+  if (w->ws != NULL) {
+    for (guint pi = 0; pi < pt_workspace_project_count(w->ws); pi++) {
+      PtWsId proj = pt_workspace_project_at(w->ws, pi);
+      guint tabs = pt_workspace_tab_count(w->ws, proj);
+      for (guint ti = 0; ti < tabs && owner == NULL; ti++) {
+        PtTabUI *t = pt_workspace_get_data(
+            w->ws, pt_workspace_tab_at(w->ws, proj, ti));
+        PtPaneGrid *grid = PT_PANE_GRID(t->grid);
+        PtTerminal *term = pt_pane_grid_pane_by_token(grid, token);
+        if (term != NULL) { owner = term; owner_grid = grid; }
+      }
+      if (owner != NULL) break;
+    }
+  }
+  if (owner == NULL || owner_grid == NULL) {
+    pt_agent_session_report_free(r);
+    return;
+  }
+
+  /* Never for a pane the user is looking at — a focused pane in an active
+   * window is exactly where they would see the agent finish anyway — and
+   * never the same news about the same pane twice in a row. */
+  gboolean focused = gtk_window_is_active(GTK_WINDOW(w)) &&
+                     owner == pt_pane_grid_focused_terminal(owner_grid);
+  const char *last = g_hash_table_lookup(w->agent_notified, token);
+  if (focused || g_strcmp0(last, evname) == 0) {
+    pt_agent_session_report_free(r);
+    return;
+  }
+  g_hash_table_replace(w->agent_notified, g_strdup(token), g_strdup(evname));
+
+  GtkApplication *app = gtk_window_get_application(GTK_WINDOW(w));
+  if (app == NULL) {
+    pt_agent_session_report_free(r);
+    return;
+  }
+
+  const char *label = pt_agent_label(r->agent);
+  char *title = g_strdup_printf(
+      "%s %s", label != NULL ? label : "agent",
+      r->event == PT_AGENT_EVENT_NEEDS_INPUT ? "needs your input"
+                                             : "finished");
+  /* The body says where: the cwd basename names the project without
+   * spending a whole line of notification on a path. */
+  char *body;
+  if (r->cwd != NULL && r->cwd[0] != '\0') {
+    char *base = g_path_get_basename(r->cwd);
+    body = g_strdup_printf("in %s", base);
+    g_free(base);
+  } else {
+    body = g_strdup("in this pane");
+  }
+
+  GNotification *n = g_notification_new(title);
+  g_notification_set_body(n, body);
+  GIcon *icon = g_themed_icon_new("dev.hdprajwal.pt");
+  g_notification_set_icon(n, icon);
+  g_object_unref(icon);
+  g_notification_set_default_action_and_target(n, "app.activate-pane",
+                                               "(tt)", session_nonce(),
+                                               pt_terminal_id(owner));
+  char *id = g_strdup_printf("agent-%s", token);
+  g_application_send_notification(G_APPLICATION(app), id, n);
+  g_free(id);
+  g_object_unref(n);
+  g_free(title);
+  g_free(body);
+  pt_agent_session_report_free(r);
+}
+
+static void on_agent_report_changed(GFileMonitor *m, GFile *file,
+                                    GFile *other, GFileMonitorEvent ev,
+                                    gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  if (w->ws == NULL) return;
+  /* The reports are written temp+rename, so WATCH_MOVES is what makes the
+   * arrival visible as RENAMED with other_file naming what landed — without
+   * it the rename shows up as a CREATED of the temp file and the final name
+   * never surfaces. A plain (non-atomic) writer arrives as CHANGES_DONE_HINT
+   * instead. Both carry the final name; only names ending in .json are
+   * reports, which is also what filters the temp file's own events, and the
+   * sweep's DELETED events are noise by definition. */
+  GFile *final = NULL;
+  if (ev == G_FILE_MONITOR_EVENT_RENAMED ||
+      ev == G_FILE_MONITOR_EVENT_MOVED_IN)
+    final = other;
+  else if (ev == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT)
+    final = file;
+  if (final == NULL) return;
+  char *name = g_file_get_basename(final);
+  if (!g_str_has_suffix(name, ".json")) {
+    g_free(name);
+    return;
+  }
+  char *token = g_strndup(name, strlen(name) - strlen(".json"));
+  g_free(name);
+  notify_agent_event(w, token);
+  g_free(token);
+}
+
+static void watch_agent_reports(PtWindow *w) {
+  w->agent_notified = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                            g_free, g_free);
+  /* pt_agent_session_dir creates the directory, so the monitor has something
+   * to watch even on a first launch that has never run an agent. */
+  char *dir = pt_agent_session_dir();
+  GFile *f = g_file_new_for_path(dir);
+  g_free(dir);
+  w->agent_report_monitor = g_file_monitor_directory(
+      f, G_FILE_MONITOR_WATCH_MOVES, NULL, NULL);
+  g_object_unref(f);
+  if (w->agent_report_monitor != NULL)
+    g_signal_connect(w->agent_report_monitor, "changed",
+                     G_CALLBACK(on_agent_report_changed), w);
 }
 
 /* Close the focused pane of grid g (not of whatever happens to be active now).
@@ -2166,6 +2353,8 @@ static void pt_window_dispose(GObject *obj) {
   g_clear_pointer(&w->agents, pt_agent_monitor_free);
   g_clear_object(&w->config_monitor);
   g_clear_object(&w->theme_monitor);
+  g_clear_object(&w->agent_report_monitor);
+  g_clear_pointer(&w->agent_notified, g_hash_table_unref);
   theme_cache_drop();   /* module-level, but nothing renders past dispose */
   if (w->config_reload_source != 0) {
     g_source_remove(w->config_reload_source);
@@ -2308,6 +2497,9 @@ static void pt_window_init(PtWindow *w) {
   /* Crash leftovers: reports whose panes died with a previous process. Live
    * panes rewrite theirs; a week is comfortably past any real session. */
   pt_agent_session_sweep(7);
+  /* Lifecycle reports land as file drops into the same directory the sweep
+   * just made sure exists. */
+  watch_agent_reports(w);
   restore_state(w);
   refresh_sidebar(w);
   show_active_grid(w);

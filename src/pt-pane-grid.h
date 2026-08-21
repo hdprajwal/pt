@@ -47,6 +47,10 @@ void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir);
 PtTerminal *pt_pane_grid_pane_by_id(PtPaneGrid *g, guint64 id);
 /* Same lookup, but focus what it finds. */
 gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id);
+/* The pane whose core carries this PT_PANE_TOKEN, or NULL when no pane here
+ * does. This is how an agent report file (named by the token) finds the pane
+ * that owns it. */
+PtTerminal *pt_pane_grid_pane_by_token(PtPaneGrid *g, const char *token);
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
 /* TRUE when any pane in the grid has a foreground process other than the shell. */
 gboolean pt_pane_grid_any_running(PtPaneGrid *g);
