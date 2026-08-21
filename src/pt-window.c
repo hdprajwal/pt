@@ -696,10 +696,13 @@ static void show_active_grid(PtWindow *w) {
  * exits in the same main-loop frame as the window close emits into a window
  * whose dispose already dropped w->ws. NULL there means "gone" — bail before
  * touching the model (or re-arming a save through mark_dirty). */
+static void prune_agent_latch(PtWindow *w);
+
 static void on_grid_structure(PtPaneGrid *g, gpointer user) {
   (void)g;
   PtWindow *w = PT_WINDOW(user);
   if (w->ws == NULL) return;
+  prune_agent_latch(w);
   refresh_statusline(w);
   mark_dirty(w);
 }
@@ -723,6 +726,40 @@ static void on_grid_focus(PtPaneGrid *g, gpointer user) {
 
 static void tab_ui_free(gpointer data);   /* body below, with tab_ui_new */
 
+/* The notification latch keys on pane tokens, and a closed pane's token dies
+ * with it — its report file is swept separately — so its entry would
+ * otherwise sit in the table forever. Every structural change walks the panes
+ * that are still alive and drops entries for tokens nobody owns now. */
+static void collect_live_tokens(PtSplitNode *n, GPtrArray *acc) {
+  if (n == NULL) return;
+  if (n->kind != PT_SPLIT_LEAF) {
+    collect_live_tokens(n->a, acc);
+    collect_live_tokens(n->b, acc);
+    return;
+  }
+  if (n->user == NULL) return;
+  const char *tok =
+      pt_term_core_pane_token(pt_terminal_core(PT_TERMINAL(n->user)));
+  if (tok != NULL) g_ptr_array_add(acc, (gpointer)tok);
+}
+
+static void prune_agent_latch(PtWindow *w) {
+  if (w->agent_notified == NULL) return;
+  GPtrArray *live = g_ptr_array_new();
+  for (guint pi = 0; pi < pt_workspace_project_count(w->ws); pi++) {
+    PtWsId proj = pt_workspace_project_at(w->ws, pi);
+    guint tabs = pt_workspace_tab_count(w->ws, proj);
+    for (guint ti = 0; ti < tabs; ti++) {
+      PtTabUI *t = pt_workspace_get_data(
+          w->ws, pt_workspace_tab_at(w->ws, proj, ti));
+      collect_live_tokens(pt_pane_grid_tree(PT_PANE_GRID(t->grid)), live);
+    }
+  }
+  pt_agent_latch_prune(w->agent_notified,
+                       (const char *const *)live->pdata, live->len);
+  g_ptr_array_free(live, TRUE);
+}
+
 /* Drop a tab and everything under it — freeing the UI struct unparents the
  * grid, which kills its panes and their PTYs. Every "the tab is going away"
  * path ends here: a clean shell exit, the last pane closing, the tab's ×
@@ -732,6 +769,9 @@ static void remove_tab(PtWindow *w, PtTabUI *t) {
   gboolean was_visible = pt_workspace_tab_project(w->ws, t->id) ==
                          pt_workspace_active_project(w->ws);
   pt_workspace_remove_tab(w->ws, t->id);
+  /* The tab's panes are gone with it: drop their latch entries now, while
+   * the workspace no longer lists the tab (the prune walks what is left). */
+  prune_agent_latch(w);
   tab_ui_free(t);
   if (was_visible) show_active_grid(w);
   refresh_sidebar(w);   /* shell count dropped; do not wait for the poll */
