@@ -329,6 +329,53 @@ static void test_ctrl_letter_warns_but_applies(void) {
   pt_bindings_free(b);
 }
 
+/* pt-config's verb_rest() consumes a tab after `bind` and hands the rest of
+ * the line through verbatim, so a tab can reach this parser between the
+ * accelerator and the action (tests/test-config.c pins that it does, and
+ * collects "bind ctrl+shift+t\tnew-tab" for exactly that input). A bind line
+ * is words; which whitespace parts them is not this grammar's business, and
+ * the two layers have to agree or a tab-separated line is collected upstairs
+ * only to be refused here as a bad accelerator. */
+static void test_tab_separated_fields(void) {
+  const char *lines[] = { "bind ctrl+shift+t\tnew-tab",
+                          "bind\tctrl+b\ttoggle-sidebar",
+                          "unbind \t alt+1", NULL };
+  GPtrArray *b = pt_bindings_parse(lines, NULL, NULL);
+  g_assert_cmpuint(b->len, ==, 3);
+  int i = find_accel(b, "<Control><Shift>t");
+  g_assert_cmpint(i, >=, 0);
+  g_assert_cmpstr(((PtBindingLine *)g_ptr_array_index(b, i))->action, ==,
+                  "new-tab");
+  i = find_accel(b, "<Control>b");
+  g_assert_cmpint(i, >=, 0);
+  g_assert_cmpstr(((PtBindingLine *)g_ptr_array_index(b, i))->action, ==,
+                  "toggle-sidebar");
+  i = find_accel(b, "<Alt>1");
+  g_assert_cmpint(i, >=, 0);
+  g_assert_true(((PtBindingLine *)g_ptr_array_index(b, i))->is_unbind);
+  pt_bindings_free(b);
+}
+
+/* A bind line with no action used to read one past the end of its own word
+ * list: g_ascii_strdown(NULL) is a GLib critical — fatal under
+ * G_DEBUG=fatal-criticals — and the warning that followed blamed an action
+ * called "(null)" rather than saying one was missing. The line was always
+ * skipped; what was wrong was how loudly and how misleadingly. */
+static void test_missing_action_is_a_clean_warning(void) {
+  guint crit_id = g_log_set_handler(
+      NULL, G_LOG_LEVEL_CRITICAL, log_capture, NULL);
+  log_begin();
+  const char *one[] = { "bind ctrl+b", NULL };
+  GPtrArray *b = pt_bindings_parse(one, NULL, NULL);
+  log_end();
+  g_log_remove_handler(NULL, crit_id);
+  g_assert_cmpuint(b->len, ==, 0);
+  pt_bindings_free(b);
+  g_assert_nonnull(strstr(log_msg, "bind needs an action"));
+  g_assert_null(strstr(log_msg, "g_ascii_strdown"));
+  g_assert_null(strstr(log_msg, "(null)"));
+}
+
 int main(void) {
   test_valid_lines();
   test_action_lookup();
@@ -344,6 +391,8 @@ int main(void) {
   test_null_and_empty_input();
   test_no_modifier_refused();
   test_ctrl_letter_warns_but_applies();
+  test_tab_separated_fields();
+  test_missing_action_is_a_clean_warning();
   g_print("test-bindings: OK\n");
   return 0;
 }

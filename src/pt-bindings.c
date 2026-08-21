@@ -196,8 +196,14 @@ static void drop_accel(GPtrArray *out, const char *accel) {
 
 static void parse_line(const char *line, int line_no, GPtrArray *out) {
   char *strip = g_strstrip(g_strdup(line));
-  gchar **raw = g_strsplit(strip, " ", -1);
-  /* Collapse runs of spaces into real words. */
+  /* Whitespace, not the space character: pt-config's verb_rest() already
+   * takes a tab as the separator after the verb and hands the rest of the
+   * line through verbatim, so a tab reaches here between the accelerator and
+   * the action. Splitting on spaces alone made that line one long word and
+   * refused it as a bad accelerator — collected upstairs, dropped down here,
+   * with a message naming the accelerator rather than the tab. */
+  gchar **raw = g_strsplit_set(strip, " \t", -1);
+  /* Collapse runs of separators into real words. */
   gchar **words = g_new0(gchar *, g_strv_length(raw) + 1);
   guint n = 0;
   for (guint i = 0; raw[i] != NULL; i++)
@@ -223,6 +229,15 @@ static void parse_line(const char *line, int line_no, GPtrArray *out) {
   if (strcmp(verb, "unbind") == 0 && n == 3) {
     g_warning("pt: config line %d: unbind takes no action — skipped",
               line_no);
+    goto done;
+  }
+  /* The mirror of the line above, and the reason words[2] can be read
+   * unguarded below: a bind with no action used to reach g_ascii_strdown
+   * with the NULL past the end of the word list, which is a GLib critical
+   * (fatal under G_DEBUG=fatal-criticals) followed by a warning blaming an
+   * action named "(null)" for what is a missing one. */
+  if (strcmp(verb, "bind") == 0 && n < 3) {
+    g_warning("pt: config line %d: bind needs an action — skipped", line_no);
     goto done;
   }
 
