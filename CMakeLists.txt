@@ -90,6 +90,7 @@ add_library(ptcore STATIC
   src/pt-agent-history.c
   src/pt-agent-report.c
   src/pt-agent-session.c
+  src/pt-bindings.c
   src/pt-claude-usage.c
   src/pt-codex-usage.c
   src/pt-config.c
@@ -166,6 +167,10 @@ add_test(NAME term-core COMMAND test-term-core)
 add_executable(test-config tests/test-config.c)
 target_link_libraries(test-config PRIVATE ptcore)
 add_test(NAME config COMMAND test-config)
+
+add_executable(test-bindings tests/test-bindings.c)
+target_link_libraries(test-bindings PRIVATE ptcore)
+add_test(NAME bindings COMMAND test-bindings)
 
 add_executable(test-theme tests/test-theme.c)
 target_link_libraries(test-theme PRIVATE ptcore)

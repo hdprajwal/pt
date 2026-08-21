@@ -412,6 +412,75 @@ pane spawns, and a name with no terminfo entry behind it falls back to
 `~/.config/pt/themes/<name>`; both the config and the active theme are watched
 and applied live.
 
+### Keybindings
+
+App shortcuts can be rebound from the same file:
+
+```ini
+bind alt+j switch-project-1
+unbind ctrl+b
+```
+
+A bind line is `bind <accel> <action>` and an unbind line is `unbind <accel>`.
+There is no `=` sign on these lines, on purpose: `=` is itself a key you can
+bind. The accelerator is lowercase modifiers joined by `+`, then a key name.
+Modifiers are `ctrl`, `shift`, `alt` and `super`. Keys are letters, digits,
+`f1` through `f24`, and these named keys:
+
+```text
+enter tab escape space up down left right pgup pgdn home end delete backspace
+equal plus minus comma period slash backslash semicolon quote
+bracketleft bracketright
+```
+
+Punctuation travels by name only — write `equal`, never `=`. Everything on a
+bind line reads either case.
+
+The action names, with the keys they are on by default:
+
+| Action | Default |
+| --- | --- |
+| `switch-project-1` … `switch-project-9` | Ctrl+1 … Ctrl+9 |
+| `switch-tab-1` … `switch-tab-9` | Alt+1 … Alt+9 |
+| `new-tab` | Ctrl+T, Ctrl+Shift+T |
+| `add-project` | Ctrl+N |
+| `toggle-sidebar` | Ctrl+B |
+| `toggle-infopanel` | Ctrl+I |
+| `next-tab` / `prev-tab` | Ctrl+PgDn / Ctrl+PgUp |
+| `next-project` / `prev-project` | (none) |
+| `split-h` / `split-v` | Ctrl+Shift+D / Ctrl+Shift+S |
+| `close-pane` | Ctrl+Shift+W |
+| `focus-next` | Ctrl+Shift+O, Ctrl+Super+] |
+| `focus-prev` | Ctrl+Super+[ |
+| `focus-left` / `focus-right` / `focus-up` / `focus-down` | Ctrl+Alt+arrows |
+| `paste` / `copy` | Ctrl+Shift+V / Ctrl+Shift+C |
+| `font-zoom-in` | Ctrl+= (also +, keypad +) |
+| `font-zoom-out` | Ctrl+- (also _, keypad −) |
+| `font-zoom-reset` | Ctrl+0 |
+| `pane-zoom` | Ctrl+Shift+Z |
+
+Rules worth knowing:
+
+- One action carries one binding. Rebinding an action moves it off every key
+  it was on, including aliases like the keypad plus next to `=`; unbinding a
+  key removes whatever sat on it. The last line for an accelerator or an
+  action wins.
+- A line that does not parse prints a warning naming the file's line, and the
+  rest still apply. Nothing crashes and nothing half-applies.
+- The command palette shows what a shortcut actually is now: project rows
+  carry their rebound chord, and the pane-zoom row names the key that flips
+  it.
+- Bindings are read once at startup. Everything else in the config applies
+  live when the file changes; keys do not, until the next launch.
+
+Two things are not rebindable yet. Ctrl+K (command palette) and Ctrl+, 
+(settings) are wired by hand before the table is consulted, and the Tab
+chords — Ctrl+Tab cycles projects, Alt+Tab cycles tabs, Shift runs each
+backwards — cannot be spelled as accelerators at all, because Tab reaches pt
+as either of two keysyms depending on the compositor and the table can only
+ask for one.
+
+
 ## Built on
 
 pt stands on other people's open source work:
