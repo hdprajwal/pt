@@ -720,7 +720,7 @@ static void on_grid_focus(PtPaneGrid *g, gpointer user) {
    * Stop hook always reports the same name, and without a re-arm the latch
    * would swallow every turn after the first. */
   PtTerminal *foc = pt_pane_grid_focused_terminal(g);
-  if (foc != NULL) {
+  if (foc != NULL && pt_terminal_core(foc) != NULL) {
     const char *tok = pt_term_core_pane_token(pt_terminal_core(foc));
     if (tok != NULL) pt_agent_latch_rearm(w->agent_notified, tok);
   }
@@ -741,8 +741,11 @@ static void collect_live_tokens(PtSplitNode *n, GPtrArray *acc) {
     return;
   }
   if (n->user == NULL) return;
-  const char *tok =
-      pt_term_core_pane_token(pt_terminal_core(PT_TERMINAL(n->user)));
+  /* A leaf's core is created lazily (and spawn failure leaves it NULL for
+   * good), so a just-inserted pane can be here without one. */
+  PtTermCore *core = pt_terminal_core(PT_TERMINAL(n->user));
+  if (core == NULL) return;
+  const char *tok = pt_term_core_pane_token(core);
   if (tok != NULL) g_ptr_array_add(acc, (gpointer)tok);
 }
 

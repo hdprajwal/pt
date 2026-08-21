@@ -2751,7 +2751,9 @@ pid_t pt_term_core_shell_pid(PtTermCore *c) { return c->child; }
 
 const char *pt_term_core_shell_name(PtTermCore *c) { return c->shell_name; }
 
-const char *pt_term_core_pane_token(PtTermCore *c) { return c->pane_token; }
+const char *pt_term_core_pane_token(PtTermCore *c) {
+  return c != NULL ? c->pane_token : NULL;
+}
 
 /* A field read: the 700ms foreground poll keeps it current, spawn seeds it
  * TRUE and child exit clears it, so per-frame callers cost no syscall. */

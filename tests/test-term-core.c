@@ -3219,6 +3219,12 @@ static void test_pane_token_reaches_child(void) {
   pt_term_core_free(core);
 }
 
+/* A leaf's core is built lazily and spawn failure leaves it NULL for good, so
+   callers that walk panes during structural changes hit this with NULL. */
+static void test_pane_token_null_core(void) {
+  g_assert_cmpstr(pt_term_core_pane_token(NULL), ==, NULL);
+}
+
 /* A closed pane must not leave a report behind: the next save would read a
    session for a pane that no longer exists. */
 static void test_free_unlinks_report(void) {
@@ -3627,6 +3633,7 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/termcore/output-callback-only-for-output",
                   test_output_callback_is_output_only);
   g_test_add_func("/termcore/pane-token", test_pane_token_reaches_child);
+  g_test_add_func("/termcore/pane-token-null", test_pane_token_null_core);
   g_test_add_func("/termcore/pane-token-unlink", test_free_unlinks_report);
   g_test_add_func("/termcore/pane-token-no-report",
                   test_free_without_report_is_quiet);
