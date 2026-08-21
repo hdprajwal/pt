@@ -638,6 +638,21 @@ PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g) {
   return g->focused != NULL ? PT_TERMINAL(g->focused->user) : NULL;
 }
 
+void pt_pane_grid_queue_input(PtPaneGrid *g, const char *line) {
+  g_return_if_fail(PT_IS_PANE_GRID(g));
+  g_return_if_fail(line != NULL);
+  PtTerminal *t = pt_pane_grid_focused_terminal(g);
+  if (t == NULL || line[0] == '\0') return;
+  PtTermCore *core = pt_terminal_core(t);
+  if (core != NULL)
+    pt_term_core_write(core, line, -1);   /* live shell: straight to the pty */
+  else
+    /* Not spawned yet — a tab created this same tick, before its first
+     * allocation. The startup-input slot is still free: the restore path
+     * fills it in ensure_terminal, and nothing else has touched it here. */
+    pt_terminal_set_startup_input(t, line);
+}
+
 static gboolean any_running_walk(PtSplitNode *n) {
   if (n == NULL) return FALSE;
   if (n->kind == PT_SPLIT_LEAF)

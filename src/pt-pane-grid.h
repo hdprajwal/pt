@@ -63,6 +63,13 @@ gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id);
  * that owns it. */
 PtTerminal *pt_pane_grid_pane_by_token(PtPaneGrid *g, const char *token);
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
+/* One line for the focused pane's shell, newline included by the caller —
+ * how a resume started from elsewhere in the UI reaches a pane that already
+ * exists. A pane whose shell has not spawned yet queues it as startup input
+ * (consumed right after the first spawn); a live shell gets it written to
+ * the pty, exactly as if the user had typed it at whatever the prompt holds.
+ * No-op when the grid has no focused pane or the line is empty. */
+void pt_pane_grid_queue_input(PtPaneGrid *g, const char *line);
 /* TRUE when any pane in the grid has a foreground process other than the shell. */
 gboolean pt_pane_grid_any_running(PtPaneGrid *g);
 void pt_pane_grid_sync_cwds(PtPaneGrid *g); /* leaf->cwd ← live terminal cwd */

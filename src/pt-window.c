@@ -1888,6 +1888,22 @@ enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL,
  * ranks this flat list and hands back the workspace ids the user picked —
  * ids, not positions, because the palette sits open across an async gap
  * (see PtCommandPaletteItem). */
+/* The trigger row lives in the main list; the sessions themselves are loaded
+ * by the palette when it is picked (see enter_history_mode). */
+static void append_recent_sessions_row(GArray *arr) {
+  PtCommandPaletteItem sess = {
+    .name = g_strdup("Recent agent sessions"),
+    .detail = g_strdup("conversations reported in the last seven days"),
+    .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
+    .project_id = PT_WS_ID_NONE, .tab_id = PT_WS_ID_NONE,
+    .command = PT_COMMAND_PALETTE_RECENT_SESSIONS,
+    .is_history = FALSE, .history_dead = FALSE,
+    .history_agent = PT_AGENT_NONE, .history_session_id = NULL,
+    .history_cwd = NULL,
+  };
+  g_array_append_val(arr, sess);
+}
+
 static void action_open_palette(PtWindow *w) {
   GArray *arr = g_array_new(FALSE, TRUE, sizeof(PtCommandPaletteItem));
   for (guint i = 0; i < pt_workspace_project_count(w->ws); i++) {
@@ -1959,9 +1975,62 @@ static void action_open_palette(PtWindow *w) {
   };
   g_array_append_val(arr, zm);
 
+  append_recent_sessions_row(arr);
+
   int n = (int)arr->len;
   pt_command_palette_open(PT_COMMAND_PALETTE(w->palette),
                   (PtCommandPaletteItem *)g_array_free(arr, FALSE), n);
+}
+
+static void on_palette_history_activated(PtCommandPalette *pal, int agent,
+                                         const char *session_id,
+                                         const char *cwd, gpointer user) {
+  (void)pal;
+  PtWindow *w = PT_WINDOW(user);
+  /* Built by the one shared builder: the charset gate lives there, and this
+   * line is typed into a pty exactly like a restored pane's is. */
+  char *cmd = pt_agent_session_resume_command((PtAgentKind)agent, session_id);
+  if (cmd == NULL || cwd == NULL || !g_file_test(cwd, G_FILE_TEST_IS_DIR)) {
+    g_free(cmd);
+    return;
+  }
+
+  /* The session's project may already be open: then it takes the new tab.
+   * Otherwise the project is opened for it — by hand rather than through
+   * project_ui_new, whose first tab would be a plain shell instead of the
+   * resume this whole path exists to deliver. */
+  PtProjectUI *p = NULL;
+  for (guint i = 0; i < pt_workspace_project_count(w->ws); i++) {
+    PtWsId id = pt_workspace_project_at(w->ws, i);
+    if (g_strcmp0(pt_workspace_project_path(w->ws, id), cwd) == 0) {
+      PtProjectUI *cand = pt_workspace_get_data(w->ws, id);
+      /* A project flagged missing cannot be here — the dir check above
+       * already ran — but if the flag and reality ever disagree, doing
+       * nothing beats stacking a second project on the same path. */
+      if (!cand->missing) p = cand;
+      break;
+    }
+  }
+  gboolean new_project = p == NULL;
+  if (new_project) {
+    char *name = g_path_get_basename(cwd);
+    p = project_ui_alloc(w, name, cwd, -1);
+    g_free(name);
+    p->monitor = pt_git_monitor_new(cwd, on_git_update, p);
+  }
+
+  PtTabUI *t = add_tab_ui(w, p, "shell", pt_split_leaf_new(cwd));
+  pt_workspace_set_active_project(w->ws, p->id);
+  pt_workspace_set_active_tab(w->ws, t->id);
+  sync_git_monitors(w);
+  show_active_grid(w);
+  refresh_sidebar(w);   /* the project bar and shell count just moved */
+  mark_dirty(w);
+  /* The pane was built by show_active_grid but has not spawned — cores come
+   * up at first allocation — so the resume lands in the startup-input slot
+   * and is written right after the first prompt. */
+  pt_pane_grid_queue_input(PT_PANE_GRID(t->grid), cmd);
+  g_free(cmd);
 }
 
 /* Ids resolve at activation time: a project or tab that died while the
@@ -2558,6 +2627,8 @@ static void pt_window_init(PtWindow *w) {
 
   g_signal_connect(w->palette, "activated",
                    G_CALLBACK(on_palette_activated), w);
+  g_signal_connect(w->palette, "history-activated",
+                   G_CALLBACK(on_palette_history_activated), w);
   g_signal_connect(w->palette, "closed", G_CALLBACK(on_palette_closed), w);
   g_signal_connect(w->settings, "changed",
                    G_CALLBACK(on_settings_changed), w);
