@@ -193,6 +193,27 @@ Dragging is off while the search box has text in it: the filtered list is not
 the list you would be reordering, so a drop there would move a project
 somewhere you never pointed at.
 
+## Panes
+
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd> splits side by side and
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> one above the other; the new pane
+starts in the focused pane's directory.
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd> cycles between panes, and
+<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+an arrow key moves in that direction.
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd> closes the focused pane.
+
+<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> zooms the focused pane: it takes
+over the whole tab area while every other pane keeps running, hidden. The
+status bar shows a small `⤢ zoomed` chip while it lasts, and pressing the
+binding again puts every pane back — each split lands exactly where it was,
+because pt sets the dividers back from what it remembers rather than trusting
+the resized layout.
+
+Zoom is a view on the grid, not a change to it, so it does not survive much:
+splitting or closing a pane, moving focus to another pane, switching tabs or
+projects — any of these un-zooms first and shows the full grid again. A
+single-pane tab has nothing to fill, so the binding does nothing there.
+
 ## Scrolling back
 
 The wheel moves the view through a pane's history. While it moves, a thin bar
