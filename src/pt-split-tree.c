@@ -134,6 +134,13 @@ int pt_split_count_leaves(PtSplitNode *root) {
   return pt_split_count_leaves(root->a) + pt_split_count_leaves(root->b);
 }
 
+gboolean pt_split_contains(PtSplitNode *n, PtSplitNode *leaf) {
+  if (n == NULL || leaf == NULL) return FALSE;
+  if (n == leaf) return TRUE;
+  if (n->kind == PT_SPLIT_LEAF) return FALSE;
+  return pt_split_contains(n->a, leaf) || pt_split_contains(n->b, leaf);
+}
+
 void pt_split_free(PtSplitNode *root) {
   if (root == NULL) return;
   if (root->kind != PT_SPLIT_LEAF) {
