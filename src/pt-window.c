@@ -638,10 +638,31 @@ static void on_search_changed(PtSearchBar *sb, const char *text,
   w->search_source = g_timeout_add(100, search_debounced, w);
 }
 
+/* A step arriving with a debounce still pending means the user typed and hit
+   Enter inside the same 100ms — the ordinary way anyone searches, not a race
+   worth losing input over. Cancelling the timer alone dropped the query on
+   the floor: nothing had been searched yet, so the step found no needle,
+   stepped nowhere, and no further "changed" ever re-armed the timer. The
+   text sat in the bar matching nothing until another keystroke.
+
+   So a pending debounce is run here instead of discarded, and TRUE says the
+   caller should stop: applying a fresh query already lands on the first
+   match near the viewport, and stepping on top of that would skip it. With
+   nothing pending the query is already standing and the step is a real step.
+
+   Untestable headlessly, like the rest of this block: it is timer and focus
+   traffic between a GtkSearchEntry and a live pane. */
+static gboolean search_flush(PtWindow *w) {
+  if (w->search_source == 0) return FALSE;
+  g_clear_handle_id(&w->search_source, g_source_remove);
+  search_apply(w);
+  return TRUE;
+}
+
 static void on_search_next(PtSearchBar *sb, gpointer user) {
   (void)sb;
   PtWindow *w = PT_WINDOW(user);
-  g_clear_handle_id(&w->search_source, g_source_remove);
+  if (search_flush(w)) return;
   PtTerminal *term = focused_terminal(w);
   if (term == NULL) return;
   pt_terminal_search_step(term, +1);
@@ -651,7 +672,10 @@ static void on_search_next(PtSearchBar *sb, gpointer user) {
 static void on_search_prev(PtSearchBar *sb, gpointer user) {
   (void)sb;
   PtWindow *w = PT_WINDOW(user);
-  g_clear_handle_id(&w->search_source, g_source_remove);
+  /* Unlike next, a flush does not stand in for this step: a fresh query
+     enters downward, at the first match at or below the viewport, and
+     Shift+Enter asked to go the other way. Apply, then step off it. */
+  search_flush(w);
   PtTerminal *term = focused_terminal(w);
   if (term == NULL) return;
   pt_terminal_search_step(term, -1);

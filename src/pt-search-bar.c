@@ -5,10 +5,25 @@
  * bar owns no search state of its own — it collects input and emits; the
  * window decides which pane is being searched and what happens on close.
  *
- * GtkSearchEntry already gives this widget its keyboard story for free:
- * Return fires "next-match", Shift+Return "previous-match", and Escape
- * "stop-search" — which is exactly the Enter/Shift+Enter/Esc contract the
- * bar promises, so no key controller of its own is needed. */
+ * GtkSearchEntry gives away two thirds of this widget's keyboard story:
+ * Escape fires "stop-search", and the entry's own delayed "search-changed"
+ * exists for exactly the debounce a search wants. It does NOT give away
+ * Enter. Its default binding for "next-match" is Ctrl+G and for
+ * "previous-match" Ctrl+Shift+G; Enter emits "activate" instead, and
+ * Shift+Enter matches no binding at all (GTK's Enter triggers carry an
+ * empty modifier mask). Connecting the two match signals and calling it
+ * done left the Enter and Shift+Enter the README promises doing nothing
+ * whatsoever, which is the whole point of a find bar.
+ *
+ * So the Enter half is spelled out below with a key controller, in the
+ * CAPTURE phase and answering GDK_EVENT_STOP: capture reaches this widget
+ * before the inner GtkText and before this class's own bubble-phase
+ * bindings, so exactly one step happens per press whatever GTK decides
+ * Enter means. The Ctrl+G pair still works — those signals are still
+ * connected, and they are somebody's muscle memory.
+ *
+ * None of this is under test: a key controller needs real GDK key events
+ * and a display, which the suite has none of. */
 
 enum {
   SIG_CHANGED,
@@ -76,6 +91,23 @@ static void on_stop(GtkSearchEntry *e, gpointer user) {
   g_signal_emit(user, signals[SIG_STOP], 0);
 }
 
+/* Enter steps to the next match, Shift+Enter to the previous one. Exactly
+   those two chords: an Enter carrying Ctrl, Alt or Super belongs to whoever
+   bound it and travels on. */
+static gboolean on_entry_key(GtkEventControllerKey *ctl, guint keyval,
+                             guint keycode, GdkModifierType state,
+                             gpointer user) {
+  (void)ctl; (void)keycode;
+  if (keyval != GDK_KEY_Return && keyval != GDK_KEY_KP_Enter &&
+      keyval != GDK_KEY_ISO_Enter)
+    return GDK_EVENT_PROPAGATE;
+  GdkModifierType mods = state & gtk_accelerator_get_default_mod_mask();
+  if ((mods & ~GDK_SHIFT_MASK) != 0) return GDK_EVENT_PROPAGATE;
+  g_signal_emit(user, signals[(mods & GDK_SHIFT_MASK) ? SIG_PREV : SIG_NEXT],
+                0);
+  return GDK_EVENT_STOP;
+}
+
 GtkWidget *pt_search_bar_new(void) {
   return g_object_new(PT_TYPE_SEARCH_BAR, NULL);
 }
@@ -93,7 +125,19 @@ static void pt_search_bar_init(PtSearchBar *sb) {
 
   sb->entry = gtk_search_entry_new();
   gtk_widget_set_hexpand(sb->entry, TRUE);
+  /* The entry's own 150ms delay on top of the window's 100ms debounce is a
+     quarter second before the first highlight, for one throttle's worth of
+     benefit. The window's is the one that matters — it is the one that knows
+     a query walks every grid ref — so this hands "changed" over per
+     keystroke and lets that one do the waiting. It also makes a pending
+     debounce there mean exactly "the typed text has not been searched yet",
+     which is what Enter checks before it steps. */
+  gtk_search_entry_set_search_delay(GTK_SEARCH_ENTRY(sb->entry), 0);
   gtk_box_append(GTK_BOX(box), sb->entry);
+  GtkEventController *keys = gtk_event_controller_key_new();
+  gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
+  g_signal_connect(keys, "key-pressed", G_CALLBACK(on_entry_key), sb);
+  gtk_widget_add_controller(sb->entry, keys);
   g_signal_connect(sb->entry, "search-changed",
                    G_CALLBACK(on_entry_changed), sb);
   g_signal_connect(sb->entry, "next-match", G_CALLBACK(on_next), sb);
