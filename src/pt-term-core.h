@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include "pt-config.h"   /* PtOsc52Mode: what OSC 52 may do to the clipboard */
 #include "pt-theme.h"    /* PtColor: the cell and palette color type */
+#include "pt-search.h"   /* PtSearchRows: scrollback search extraction payload */
 
 typedef struct PtTermCore PtTermCore;
 
@@ -433,6 +434,30 @@ typedef struct {
  * is the general answer, and the arithmetic is not. */
 gboolean pt_term_core_line_at(PtTermCore *c, int row, PtLine *out);
 void pt_term_core_line_clear(PtLine *l);
+
+/* ---- scrollback search extraction ----
+ *
+ * The rows find-in-scrollback matches against: every row of the scrollable
+ * area — scrollback and active screen alike, the whole GHOSTTY_POINT_TAG_
+ * SCREEN space — as case-folded text plus a byte -> cell-column map per
+ * row. See PtSearchRows (pt-search.h) for the exact shape of the payload
+ * and why folding happens per cell.
+ *
+ * This is the one grid read that reaches past the viewport. It walks the
+ * full screen coordinate space through ghostty_terminal_grid_ref, whose own
+ * docs warn that a `screen` lookup may traverse the whole page list per
+ * call — so this costs O(total_rows x cols) ref resolutions and is meant
+ * for a debounced search, never a render loop. Rows are capped by nothing
+ * here because libghostty already caps them: TOTAL_ROWS only ever counts
+ * what the `scrollback-limit` config key let the pane retain at spawn time,
+ * so everything older than that was pruned before this could ask.
+ *
+ * Answers the terminal's live state (the parser's own view), not the cached
+ * render state a frame draws from. FALSE, leaving *out untouched, when the
+ * total cannot be read or there are no rows; an all-blank grid still
+ * answers TRUE with n_rows blank texts. Caller clears it with
+ * pt_search_rows_clear. */
+gboolean pt_term_core_search_rows(PtTermCore *c, PtSearchRows *out);
 
 typedef struct {
   PtColor bg, fg, cursor;
