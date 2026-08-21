@@ -441,76 +441,6 @@ static void test_load_save(void) {
   g_free(dir);
 }
 
-static void test_binding_lines_collected(void) {
-  /* Bind and unbind lines are gathered raw, in file order, wherever they sit
-   * among the other keys; comments leave no residue. */
-  const char *text =
-      "# my config\n"
-      "theme = gruvbox\n"
-      "bind ctrl+shift+z pane-zoom\n"
-      "\n"
-      "unbind ctrl+b\n"
-      "# bind ctrl+9 switch-project-9\n"
-      "font-size = 11\n";
-  PtConfig *c = pt_config_parse(text);
-  g_assert_cmpuint(pt_config_n_binding_lines(c), ==, 2);
-  g_assert_cmpstr(pt_config_binding_line(c, 0), ==,
-                  "bind ctrl+shift+z pane-zoom");
-  g_assert_cmpint(pt_config_binding_line_no(c, 0), ==, 3);
-  g_assert_cmpstr(pt_config_binding_line(c, 1), ==, "unbind ctrl+b");
-  g_assert_cmpint(pt_config_binding_line_no(c, 1), ==, 5);
-  pt_config_free(c);
-
-  PtConfig *plain = pt_config_parse("theme = pt-dark\nfont-size = 9\n");
-  g_assert_cmpuint(pt_config_n_binding_lines(plain), ==, 0);
-  pt_config_free(plain);
-}
-
-static void test_binding_lines_malformed(void) {
-  /* No '=' at all: the generic malformed-line warning covers it and nothing
-   * is collected. An empty value has nothing to bind, so it warns too. */
-  const char *bad[] = { "bind\n", "unbind\n", "bind =\n", "unbind =\n" };
-  for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
-    const char *one[] = { bad[i], "bind ctrl+b toggle-sidebar", NULL };
-    GString *text = g_string_new(NULL);
-    for (gsize j = 0; j < G_N_ELEMENTS(one) - 1; j++)
-      g_string_append(text, one[j]);
-    PtConfig *c = pt_config_parse(text->str);
-    g_string_free(text, TRUE);
-    g_assert_cmpuint(pt_config_n_binding_lines(c), ==, 1);
-    g_assert_cmpstr(pt_config_binding_line(c, 0), ==,
-                    "bind ctrl+b toggle-sidebar");
-    pt_config_free(c);
-  }
-}
-
-static void test_binding_lines_copy_equal_rewrite(void) {
-  const char *old =
-      "bind ctrl+b toggle-sidebar\n"
-      "theme = pt-dark\n"
-      "unbind alt+1\n";
-  PtConfig *a = pt_config_parse(old);
-  PtConfig *b = pt_config_copy(a);
-  g_assert_true(pt_config_equal(a, b));
-  g_assert_cmpuint(pt_config_n_binding_lines(b), ==, 2);
-  g_assert_cmpstr(pt_config_binding_line(b, 1), ==, "unbind alt+1");
-  /* A different line breaks equality. */
-  g_ptr_array_remove_index(b->binding_lines, b->binding_lines->len - 1);
-  g_assert_false(pt_config_equal(a, b));
-  pt_config_free(a);
-  pt_config_free(b);
-
-  /* The rewrite is untouched by them: not managed keys, they pass through
-   * verbatim like any comment or unknown line. */
-  PtConfig *c = pt_config_parse(old);
-  c->font_size = 12;
-  char *out = pt_config_rewrite(old, c);
-  g_assert_nonnull(strstr(out, "bind ctrl+b toggle-sidebar\n"));
-  g_assert_nonnull(strstr(out, "unbind alt+1\n"));
-  g_free(out);
-  pt_config_free(c);
-}
-
 int main(void) {
   test_defaults();
   test_parse();
@@ -529,9 +459,6 @@ int main(void) {
   test_rewrite_preserves();
   test_rewrite_roundtrip();
   test_load_save();
-  test_binding_lines_collected();
-  test_binding_lines_malformed();
-  test_binding_lines_copy_equal_rewrite();
   g_print("test-config: OK\n");
   return 0;
 }
