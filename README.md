@@ -134,7 +134,7 @@ The agent has to tell pt which session it is in, so each one needs a small
 integration installed once:
 
 ```sh
-pt integration install claude   # adds a SessionStart hook to ~/.claude/settings.json
+pt integration install claude   # adds its hooks to ~/.claude/settings.json
 pt integration install codex    # prints a notify line for ~/.codex/config.toml
 pt integration status           # says which of the two are in place
 ```
@@ -159,6 +159,23 @@ What is saved lives in `~/.local/state/pt/agent-sessions/`: one small JSON file
 per pane holding the agent's session id and working directory, swept after a
 week. That is a list of what you were working on and where — treat the
 directory like shell history.
+
+### Lifecycle notifications
+
+The same report files carry the news, too. When an agent finishes a turn or
+stops to ask you something while its pane is in the background, pt raises a
+desktop notification; clicking it brings the pane forward. Claude Code needs
+two more hooks for this, which `pt integration install claude` adds on top of
+the SessionStart one — Stop (turn finished) and Notification (waiting on you).
+`pt integration status` lists each hook separately. codex needs nothing extra:
+its `notify` already fires on turn completion and approvals, and pt reads the
+difference out of the payload.
+
+A pane you are looking at never notifies, the same event does not repeat for
+the same pane, and a plan-limit warning comes once per episode rather than
+once per poll — it re-arms only after usage drops back down. The limit notice
+also waits until the info panel is closed: if the panel is open, the bars are
+already on screen.
 
 ## Projects
 

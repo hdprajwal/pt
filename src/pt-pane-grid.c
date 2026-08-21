@@ -420,6 +420,30 @@ PtTerminal *pt_pane_grid_pane_by_id(PtPaneGrid *g, guint64 id) {
   return leaf != NULL ? PT_TERMINAL(leaf->user) : NULL;
 }
 
+/* The pane whose core was handed this PT_PANE_TOKEN — the same walk
+ * sync_agent_walk does, answering "which pane owns this agent report" for the
+ * window's report watcher. A leaf without a live core has no token to match,
+ * which is the right answer for a pane that never spawned. */
+static PtSplitNode *leaf_by_token(PtPaneGrid *g, const char *token) {
+  if (g->tree == NULL || token == NULL) return NULL;
+  PtSplitNode *first = pt_split_first_leaf(g->tree);
+  PtSplitNode *leaf = first;
+  do {
+    if (leaf != NULL && leaf->user != NULL) {
+      PtTermCore *core = pt_terminal_core(PT_TERMINAL(leaf->user));
+      const char *tok = core != NULL ? pt_term_core_pane_token(core) : NULL;
+      if (tok != NULL && g_strcmp0(tok, token) == 0) return leaf;
+    }
+    leaf = pt_split_next_leaf(g->tree, leaf);
+  } while (leaf != NULL && leaf != first);
+  return NULL;
+}
+
+PtTerminal *pt_pane_grid_pane_by_token(PtPaneGrid *g, const char *token) {
+  PtSplitNode *leaf = leaf_by_token(g, token);
+  return leaf != NULL ? PT_TERMINAL(leaf->user) : NULL;
+}
+
 gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id) {
   PtSplitNode *leaf = leaf_by_id(g, id);
   if (leaf == NULL) return FALSE;

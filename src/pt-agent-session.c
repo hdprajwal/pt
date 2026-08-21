@@ -29,6 +29,23 @@ PtAgentKind pt_agent_session_kind_from_name(const char *name) {
   return PT_AGENT_NONE;
 }
 
+/* Indexed by PtAgentEvent, NONE first — same contract as kind_names. */
+static const char *const event_names[] = {
+  NULL, "turn-complete", "needs-input",
+};
+
+const char *pt_agent_session_event_name(PtAgentEvent ev) {
+  if (ev <= PT_AGENT_EVENT_NONE || (gsize)ev >= G_N_ELEMENTS(event_names))
+    return NULL;
+  return event_names[ev];
+}
+
+PtAgentEvent pt_agent_session_event_from_name(const char *name) {
+  for (gsize i = 1; i < G_N_ELEMENTS(event_names); i++)
+    if (g_strcmp0(name, event_names[i]) == 0) return (PtAgentEvent)i;
+  return PT_AGENT_EVENT_NONE;
+}
+
 char *pt_agent_session_dir(void) {
   char *dir = g_build_filename(g_get_user_state_dir(), "pt",
                                "agent-sessions", NULL);
@@ -59,7 +76,8 @@ char *pt_agent_session_token_new(void) {
 
 gboolean pt_agent_session_report_write(const char *path, PtAgentKind agent,
                                        const char *session_id, const char *cwd,
-                                       int pid, GError **err) {
+                                       int pid, PtAgentEvent event,
+                                       GError **err) {
   const char *name = pt_agent_session_kind_name(agent);
   /* Refuse up front rather than write a file that report_load would then
    * reject: a report nobody can read back is a silent failure, and the caller
@@ -87,6 +105,15 @@ gboolean pt_agent_session_report_write(const char *path, PtAgentKind agent,
   json_builder_add_string_value(b, cwd);
   json_builder_set_member_name(b, "pid");
   json_builder_add_int_value(b, pid);
+  /* Only when there is one: a resume-registration report has no event, and
+   * readers from before lifecycle events existed must see no member at all.
+   * A lifecycle report still writes every field above — it overwrites the
+   * same file the SessionStart hook wrote, and dropping any of them would
+   * break the resume that file exists for. */
+  if (event != PT_AGENT_EVENT_NONE) {
+    json_builder_set_member_name(b, "event");
+    json_builder_add_string_value(b, pt_agent_session_event_name(event));
+  }
   /* Written for a human reading the directory, and for anything later that
    * wants to sort reports by age without trusting mtime. pt itself reads the
    * file's mtime instead, which is what the sweep below acts on. */
@@ -171,6 +198,10 @@ PtAgentSessionReport *pt_agent_session_report_load(const char *path) {
    * and a caller that has the pane's own cwd can do without it. */
   r->cwd = g_strdup(pt_json_string(o, "cwd"));
   r->pid = pid;
+  /* Optional like cwd: reports from before lifecycle events existed have no
+   * member, and an unknown name reads as NONE rather than poisoning the
+   * whole report — the resume half of it is still perfectly good. */
+  r->event = pt_agent_session_event_from_name(pt_json_string(o, "event"));
   g_object_unref(parser);
   return r;
 }

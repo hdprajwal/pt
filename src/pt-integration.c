@@ -16,21 +16,33 @@
 
 #define PT_INTEGRATION_ERROR (g_quark_from_static_string("pt-integration"))
 
-/* The one hook event pt needs: Claude Code fires SessionStart with the
- * session id in the payload, which is exactly the resume reference. */
-#define CLAUDE_EVENT "SessionStart"
+/* The hook events pt installs, and the agent-report arguments each one runs.
+ * SessionStart registers the resume; Stop and Notification carry the
+ * lifecycle events pt raises desktop notifications from. One row per event,
+ * so the merge, the installed check and the status output all walk the same
+ * table and cannot drift apart. */
+static const struct { const char *event; const char *args; } claude_hooks[] = {
+  { "SessionStart",  "agent-report claude" },
+  { "Stop",          "agent-report claude-event Stop" },
+  { "Notification",  "agent-report claude-event Notification" },
+};
 
-/* Whether any entry under hooks.SessionStart already runs `command`. Also the
- * whole of the "is it installed?" question — installed means precisely that
- * this command is one of the commands that will run. */
-static gboolean root_has_command(JsonObject *root, const char *command) {
+/* The full command line a hook runs: the installing binary by absolute path,
+ * so an agent started under a different PATH still finds the same pt. */
+static char *claude_command(const char *pt_bin, const char *args) {
+  return g_strconcat(pt_bin, " ", args, NULL);
+}
+
+/* Whether any entry under hooks.<event> already runs `command`. */
+static gboolean event_has_command(JsonObject *root, const char *event,
+                                  const char *command) {
   JsonObject *hooks = pt_json_obj(root, "hooks");
   if (hooks == NULL) return FALSE;
-  JsonArray *event = pt_json_array(hooks, CLAUDE_EVENT);
-  if (event == NULL) return FALSE;
-  guint n = json_array_get_length(event);
+  JsonArray *entries = pt_json_array(hooks, event);
+  if (entries == NULL) return FALSE;
+  guint n = json_array_get_length(entries);
   for (guint i = 0; i < n; i++) {
-    JsonNode *node = json_array_get_element(event, i);
+    JsonNode *node = json_array_get_element(entries, i);
     if (!JSON_NODE_HOLDS_OBJECT(node)) continue;
     JsonArray *inner = pt_json_array(json_node_get_object(node), "hooks");
     if (inner == NULL) continue;
@@ -71,12 +83,35 @@ static JsonParser *parse_settings(const char *settings_text, GError **err) {
 }
 
 gboolean pt_integration_claude_installed(const char *settings_text,
-                                         const char *command) {
-  if (settings_text == NULL || command == NULL) return FALSE;
+                                         const char *pt_bin) {
+  if (settings_text == NULL || pt_bin == NULL) return FALSE;
   JsonParser *p = parse_settings(settings_text, NULL);
   if (p == NULL) return FALSE;
-  gboolean found = root_has_command(json_node_get_object(json_parser_get_root(p)),
-                                    command);
+  JsonObject *root = json_node_get_object(json_parser_get_root(p));
+  gboolean all = TRUE;
+  for (gsize i = 0; i < G_N_ELEMENTS(claude_hooks) && all; i++) {
+    char *cmd = claude_command(pt_bin, claude_hooks[i].args);
+    all = event_has_command(root, claude_hooks[i].event, cmd);
+    g_free(cmd);
+  }
+  g_object_unref(p);
+  return all;
+}
+
+gboolean pt_integration_claude_event_installed(const char *settings_text,
+                                               const char *pt_bin,
+                                               const char *event) {
+  if (settings_text == NULL || pt_bin == NULL || event == NULL) return FALSE;
+  const char *args = NULL;
+  for (gsize i = 0; i < G_N_ELEMENTS(claude_hooks); i++)
+    if (g_strcmp0(event, claude_hooks[i].event) == 0) args = claude_hooks[i].args;
+  if (args == NULL) return FALSE;
+  JsonParser *p = parse_settings(settings_text, NULL);
+  if (p == NULL) return FALSE;
+  char *cmd = claude_command(pt_bin, args);
+  gboolean found = event_has_command(
+      json_node_get_object(json_parser_get_root(p)), event, cmd);
+  g_free(cmd);
   g_object_unref(p);
   return found;
 }
@@ -100,40 +135,70 @@ static JsonArray *array_member(JsonObject *parent, const char *name) {
 }
 
 char *pt_integration_claude_merged_settings(const char *settings_text,
-                                            const char *command,
+                                            const char *pt_bin,
                                             GError **err) {
-  g_return_val_if_fail(command != NULL && *command != '\0', NULL);
+  g_return_val_if_fail(pt_bin != NULL && *pt_bin != '\0', NULL);
 
   JsonParser *p = parse_settings(settings_text, err);
   if (p == NULL) return NULL;
   JsonObject *root = json_node_get_object(json_parser_get_root(p));
 
+  /* Which events already carry their command. */
+  char *cmds[G_N_ELEMENTS(claude_hooks)];
+  gboolean present[G_N_ELEMENTS(claude_hooks)];
+  gboolean all = TRUE;
+  for (gsize i = 0; i < G_N_ELEMENTS(claude_hooks); i++) {
+    cmds[i] = claude_command(pt_bin, claude_hooks[i].args);
+    present[i] = event_has_command(root, claude_hooks[i].event, cmds[i]);
+    all = all && present[i];
+  }
+
   /* Already there: hand back the user's own bytes rather than a reformatted
    * copy, so a second install truly changes nothing on disk. */
-  if (root_has_command(root, command)) {
+  if (all) {
+    for (gsize i = 0; i < G_N_ELEMENTS(claude_hooks); i++) g_free(cmds[i]);
     g_object_unref(p);
     return g_strdup(settings_text != NULL ? settings_text : "{}\n");
   }
 
-  JsonObject *hooks = object_member(root, "hooks");
-  JsonArray *event = hooks != NULL ? array_member(hooks, CLAUDE_EVENT) : NULL;
-  if (event == NULL) {
+  /* Validate every shape before touching anything: a merge that appended two
+   * events and then refused on the third would have to be unwound, and the
+   * refusal is meant to leave the file exactly as it was. "hooks" itself must
+   * be an object, and each event key we append to must be absent or an
+   * array — anything else is a shape pt did not parse, and overwriting it
+   * would lose whatever the user meant by it. */
+  if (pt_json_is_set(root, "hooks") && pt_json_obj(root, "hooks") == NULL) {
     g_set_error_literal(err, PT_INTEGRATION_ERROR, 0,
-                        "settings.json already uses hooks." CLAUDE_EVENT
-                        " in a shape pt does not understand");
-    g_object_unref(p);
-    return NULL;
+                        "settings.json already uses \"hooks\" in a shape"
+                        " pt does not understand");
+    goto refuse;
+  }
+  JsonObject *existing = pt_json_obj(root, "hooks");
+  for (gsize i = 0; existing != NULL && i < G_N_ELEMENTS(claude_hooks); i++) {
+    if (pt_json_is_set(existing, claude_hooks[i].event) &&
+        pt_json_array(existing, claude_hooks[i].event) == NULL) {
+      g_set_error(err, PT_INTEGRATION_ERROR, 0,
+                  "settings.json already uses hooks.%s in a shape pt does"
+                  " not understand", claude_hooks[i].event);
+      goto refuse;
+    }
   }
 
-  /* One entry, no matcher: SessionStart has no tool to match on. */
-  JsonObject *hook = json_object_new();
-  json_object_set_string_member(hook, "type", "command");
-  json_object_set_string_member(hook, "command", command);
-  JsonArray *inner = json_array_new();
-  json_array_add_object_element(inner, hook);
-  JsonObject *entry = json_object_new();
-  json_object_set_array_member(entry, "hooks", inner);
-  json_array_add_object_element(event, entry);
+  JsonObject *hooks = object_member(root, "hooks");
+  for (gsize i = 0; hooks != NULL && i < G_N_ELEMENTS(claude_hooks); i++) {
+    if (present[i]) continue;
+    JsonArray *entries = array_member(hooks, claude_hooks[i].event);
+    /* One entry, no matcher: none of these events match on a tool. */
+    JsonObject *hook = json_object_new();
+    json_object_set_string_member(hook, "type", "command");
+    json_object_set_string_member(hook, "command", cmds[i]);
+    JsonArray *inner = json_array_new();
+    json_array_add_object_element(inner, hook);
+    JsonObject *entry = json_object_new();
+    json_object_set_array_member(entry, "hooks", inner);
+    json_array_add_object_element(entries, entry);
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS(claude_hooks); i++) g_free(cmds[i]);
 
   JsonGenerator *gen = json_generator_new();
   json_generator_set_pretty(gen, TRUE);
@@ -147,6 +212,11 @@ char *pt_integration_claude_merged_settings(const char *settings_text,
   char *out = g_strconcat(body, "\n", NULL);
   g_free(body);
   return out;
+
+refuse:
+  for (gsize i = 0; i < G_N_ELEMENTS(claude_hooks); i++) g_free(cmds[i]);
+  g_object_unref(p);
+  return NULL;
 }
 
 /* ---- the CLI ---- */
@@ -211,7 +281,6 @@ static gboolean codex_installed(const char *config_text) {
 }
 
 static int install_claude(const char *pt_bin) {
-  char *command = g_strconcat(pt_bin, " agent-report claude", NULL);
   char *path = claude_settings_path();
   char *text = NULL;
   GError *err = NULL;
@@ -220,18 +289,19 @@ static int install_claude(const char *pt_bin) {
   if (!read_user_file(path, &text, &err)) {
     report_unreadable(path, err);
     rc = 1;
-  } else if (pt_integration_claude_installed(text, command)) {
+  } else if (pt_integration_claude_installed(text, pt_bin)) {
     printf("claude: already installed in %s\n", path);
   } else {
-    char *merged = pt_integration_claude_merged_settings(text, command, &err);
+    char *merged = pt_integration_claude_merged_settings(text, pt_bin, &err);
     if (merged == NULL) {
       /* The one case pt refuses: a settings.json it did not understand. Say
        * what to add instead of guessing at the file. */
       fprintf(stderr, "pt integration: %s\n", err->message);
       fprintf(stderr, "  refusing to rewrite %s — fix it, or add by hand:\n"
-                      "    hooks." CLAUDE_EVENT
+                      "    hooks.<SessionStart|Stop|Notification>"
                       " -> [ { \"hooks\": [ { \"type\": \"command\","
-                      " \"command\": \"%s\" } ] } ]\n", path, command);
+                      " \"command\": \"%s agent-report …\" } ] } ]\n",
+              path, pt_bin);
       rc = 1;
     } else {
       char *dir = g_path_get_dirname(path);
@@ -244,8 +314,10 @@ static int install_claude(const char *pt_bin) {
                 err->message);
         rc = 1;
       } else {
-        printf("claude: installed the " CLAUDE_EVENT " hook in %s\n", path);
-        printf("  command: %s\n", command);
+        printf("claude: installed hooks in %s\n", path);
+        for (gsize i = 0; i < G_N_ELEMENTS(claude_hooks); i++)
+          printf("  %s: %s %s\n", claude_hooks[i].event, pt_bin,
+                 claude_hooks[i].args);
       }
       g_free(dir);
       g_free(merged);
@@ -255,7 +327,6 @@ static int install_claude(const char *pt_bin) {
   g_clear_error(&err);
   g_free(text);
   g_free(path);
-  g_free(command);
   return rc;
 }
 
@@ -308,8 +379,26 @@ static int status_line(const char *label, const char *path, gboolean (*probe)(
   return 0;
 }
 
-static gboolean probe_claude(const char *text, const char *command) {
-  return pt_integration_claude_installed(text, command);
+/* One line per event pt installs, so a half-installed state — an older
+ * SessionStart-only merge, or a user who deleted one — is visible as exactly
+ * which hook is missing. Same readability rule as status_line: unreadable is
+ * reported, never answered as "not installed". */
+static int claude_status(const char *path, const char *pt_bin) {
+  char *text = NULL;
+  GError *err = NULL;
+  if (!read_user_file(path, &text, &err)) {
+    printf("claude unreadable (%s): %s\n", path, err->message);
+    g_clear_error(&err);
+    return 1;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS(claude_hooks); i++)
+    printf("claude: %-13s %s (%s)\n", claude_hooks[i].event,
+           pt_integration_claude_event_installed(text, pt_bin,
+                                                 claude_hooks[i].event)
+               ? "installed" : "not installed",
+           path);
+  g_free(text);
+  return 0;
 }
 
 static gboolean probe_codex(const char *text, const char *unused) {
@@ -318,14 +407,12 @@ static gboolean probe_codex(const char *text, const char *unused) {
 }
 
 static int print_status(const char *pt_bin) {
-  char *command = g_strconcat(pt_bin, " agent-report claude", NULL);
   char *cpath = claude_settings_path();
   char *xpath = codex_config_path();
-  int rc = status_line("claude:", cpath, probe_claude, command);
+  int rc = claude_status(cpath, pt_bin);
   rc |= status_line("codex: ", xpath, probe_codex, NULL);
   g_free(xpath);
   g_free(cpath);
-  g_free(command);
   return rc;
 }
 
