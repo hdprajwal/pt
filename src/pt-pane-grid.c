@@ -2,6 +2,7 @@
 
 #include "pt-agent.h"
 #include "pt-agent-session.h"
+#include "pt-zoom-state.h"
 
 enum { SIG_STRUCTURE, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
        SIG_EMPTIED, SIG_NOTIFICATION, N_SIGNALS };
@@ -18,6 +19,10 @@ struct _PtPaneGrid {
    * that already exist — one of them may have been toggled by hand. */
   gboolean pane_mouse_reporting;
   PtOsc52Mode pane_osc52;
+  /* Pane zoom (view-level, never saved): the focused pane fills the grid while
+   * the other panes stay alive but hidden. See pt-zoom-state.h for the two
+   * fields and their rules. */
+  PtZoomState zoom;
 };
 
 G_DEFINE_FINAL_TYPE(PtPaneGrid, pt_pane_grid, GTK_TYPE_WIDGET)
@@ -199,8 +204,15 @@ static gboolean apply_ratio_tick(GtkWidget *w, GdkFrameClock *clock,
 }
 
 static void on_paned_position(GObject *obj, GParamSpec *spec, gpointer user) {
-  (void)spec; (void)user;
+  (void)spec;
+  PtPaneGrid *g = PT_PANE_GRID(user);
   GtkPaned *paned = GTK_PANED(obj);
+  /* Suspended while zoomed (and until the un-zoom restore finishes): hiding
+   * and showing paned children reallocates the visible chain into shapes
+   * nothing like the saved ratios, and the position writes those allocations
+   * fire would clobber them. Un-zoom puts every ratio back before this
+   * resumes — that is what makes a zoom round-trip lossless. */
+  if (pt_zoom_state_sync_suspended(&g->zoom)) return;
   if (gtk_widget_get_parent(GTK_WIDGET(paned)) == NULL) return;
   PtSplitNode *node = g_object_get_data(obj, "pt-node");
   if (node == NULL) return;
@@ -239,6 +251,12 @@ static void clear_paned_nodes(GtkWidget *w) {
 }
 
 static void rebuild(PtPaneGrid *g) {
+  /* Any zoom state rode the old widget tree out with it — the fresh paneds
+   * below re-apply every ratio through their own apply_ratio_tick passes and
+   * arm their flags, so a split or close under a zoom lands on the real
+   * layout by construction. Reset here, not in the callers: rebuild is the
+   * one place every structural change goes through. */
+  g->zoom = (PtZoomState){0};
   clear_paned_nodes(g->root_widget);
   detach_terminals(g->tree);
   if (g->root_widget != NULL) {
@@ -326,8 +344,164 @@ gboolean pt_pane_grid_close_focused(PtPaneGrid *g) {
   return TRUE;
 }
 
+/* ---------- pane zoom ---------- */
+/* The grid is nested GtkPaneds (build_widgets above), so zoom is not a
+ * split-tree edit but a visibility trick walked out at the widgets: every
+ * paned on the path from the root down to the focused leaf hides its OPPOSITE
+ * child. Hiding sibling leaves would collapse only the innermost paned and
+ * leave every ancestor allocating by its stale pixel position — the focused
+ * pane would grow, but not fill. The tree's ratios are never touched: position
+ * syncing is suspended for the whole round-trip (see on_paned_position), and
+ * un-zooming puts each saved ratio back through a tick before sync resumes,
+ * so an un-zoom lands on exactly the layout there was before. Hidden panes
+ * keep their PTYs at their last allocated size — GTK4 does not allocate hidden
+ * widgets, so nothing resizes behind the user's back. */
+
+/* Walk toward `leaf`, hiding each paned's opposite child on the way in.
+ * TRUE when w's subtree holds the focused terminal. */
+static gboolean hide_toward_leaf(GtkWidget *w, PtSplitNode *leaf) {
+  if (w == NULL || leaf->user == NULL) return FALSE;
+  if (!GTK_IS_PANED(w)) return w == GTK_WIDGET(leaf->user);
+  PtSplitNode *node = g_object_get_data(G_OBJECT(w), "pt-node");
+  if (node == NULL) return FALSE;
+  GtkWidget *start = gtk_paned_get_start_child(GTK_PANED(w));
+  GtkWidget *end = gtk_paned_get_end_child(GTK_PANED(w));
+  if (pt_split_contains(node->a, leaf) && hide_toward_leaf(start, leaf)) {
+    gtk_widget_set_visible(end, FALSE);
+    return TRUE;
+  }
+  if (pt_split_contains(node->b, leaf) && hide_toward_leaf(end, leaf)) {
+    gtk_widget_set_visible(start, FALSE);
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/* Both children of every paned back on. A full sweep rather than just the zoom
+ * path because it costs nothing and forgives everything the path might have
+ * missed; terminals are never individually hidden anywhere else. */
+static void show_everything(GtkWidget *w) {
+  if (w == NULL || !GTK_IS_PANED(w)) return;
+  GtkPaned *p = GTK_PANED(w);
+  GtkWidget *start = gtk_paned_get_start_child(p);
+  GtkWidget *end = gtk_paned_get_end_child(p);
+  gtk_widget_set_visible(start, TRUE);
+  gtk_widget_set_visible(end, TRUE);
+  show_everything(start);
+  show_everything(end);
+}
+
+/* One frame after un-zoom: put this paned's saved ratio back. Same shape as
+ * apply_ratio_tick above — a tick, not an idle, because a just-shown child has
+ * no size until a frame allocates one — and "pt-ratio-applied" only arms after
+ * the write, so GTK's own reallocation passes cannot sneak a degenerate split
+ * into the tree on the way back. Zoom itself is already off by the time any of
+ * these run; each one just drains the pending counter, and syncing resumes
+ * when the last lands. */
+static gboolean restore_ratio_tick(GtkWidget *w, GdkFrameClock *clock,
+                                   gpointer data) {
+  (void)clock;
+  PtPaneGrid *g = PT_PANE_GRID(data);
+  PtSplitNode *node = g_object_get_data(G_OBJECT(w), "pt-node");
+  if (node != NULL && node->kind != PT_SPLIT_LEAF) {
+    int total = (node->kind == PT_SPLIT_H) ? gtk_widget_get_width(w)
+                                           : gtk_widget_get_height(w);
+    if (total <= 0) {
+      /* Not allocated yet. Patience is bounded: a window minimized for the
+       * whole restore never sizes its paneds, and waiting forever would keep
+       * the pending counter up and divider syncing suspended for good. After
+       * a fixed run of starved frames this paned gives up: no position write
+       * (there is no size to compute one from) and no arming, so the saved
+       * ratio stays untouched in the tree for the next rebuild rather than
+       * being clobbered by whatever degenerate allocation GTK guessed. */
+      guint starved = GPOINTER_TO_UINT(
+          g_object_get_data(G_OBJECT(w), "pt-restore-starved"));
+      if (!pt_zoom_state_tick_starved(++starved)) {
+        g_object_set_data(G_OBJECT(w), "pt-restore-starved",
+                          GUINT_TO_POINTER(starved));
+        return G_SOURCE_CONTINUE;
+      }
+    } else {
+      gtk_paned_set_position(GTK_PANED(w), (int)(total * node->ratio));
+      g_object_set_data(G_OBJECT(w), "pt-ratio-applied", GINT_TO_POINTER(1));
+    }
+    g_object_set_data(G_OBJECT(w), "pt-restore-starved", NULL);
+  }
+  /* node NULL means torn down mid-restore: count it anyway so the pending
+   * counter can never wedge on. */
+  pt_zoom_state_restore_done(&g->zoom);
+  return G_SOURCE_REMOVE;
+}
+
+static void arm_ratio_restore(GtkWidget *w, PtPaneGrid *g) {
+  if (w == NULL || !GTK_IS_PANED(w)) return;
+  g_object_set_data(G_OBJECT(w), "pt-ratio-applied", NULL);
+  g->zoom.ratio_restores++;
+  gtk_widget_add_tick_callback(w, restore_ratio_tick, g, NULL);
+  arm_ratio_restore(gtk_paned_get_start_child(GTK_PANED(w)), g);
+  arm_ratio_restore(gtk_paned_get_end_child(GTK_PANED(w)), g);
+}
+
+/* Restore the real layout after a leave: every hidden child back on, then a
+ * tick per paned to re-apply the saved ratios. Zoom itself ended when the
+ * state said so — the chip and the toggle see it at once — while divider
+ * syncing stays suspended until the last pending tick lands. Idempotent by
+ * construction: once zoom is off this returns without touching anything, so
+ * key repeat or an unzoom from a focus move racing the next frame cannot arm
+ * a second sweep against the pending counter. */
+static void unzoom_pending(PtPaneGrid *g) {
+  if (!pt_zoom_state_leave(&g->zoom)) return;
+  show_everything(g->root_widget);
+  /* Arms one tick per paned; nothing at all when root is missing or a lone
+   * terminal (no paneds to restore) — then the counter simply stays at 0 and
+   * nothing pends. */
+  arm_ratio_restore(g->root_widget, g);
+}
+
+gboolean pt_pane_grid_toggle_zoom(PtPaneGrid *g) {
+  g_return_val_if_fail(PT_IS_PANE_GRID(g), FALSE);
+  /* A single-pane tab fills the grid already; an empty one has no focus. */
+  gboolean can_zoom =
+      g->focused != NULL && pt_split_count_leaves(g->tree) >= 2;
+  switch (pt_zoom_state_toggle(&g->zoom, can_zoom)) {
+    case PT_ZOOM_TOGGLE_ENTER:
+      /* Only really zoomed once the widgets hid: no focused terminal to
+       * walk to means the state flips straight back. */
+      if (!hide_toward_leaf(g->root_widget, g->focused)) {
+        pt_zoom_state_leave(&g->zoom);
+        return FALSE;
+      }
+      return TRUE;
+    case PT_ZOOM_TOGGLE_LEAVE:
+      show_everything(g->root_widget);
+      arm_ratio_restore(g->root_widget, g);
+      return FALSE;
+    case PT_ZOOM_TOGGLE_IGNORED:
+      /* Single-pane or empty grid, or mid-un-zoom (restore ticks pending):
+       * already on the way out, and arming a second sweep would double-count
+       * the pending counter. */
+      return FALSE;
+  }
+  g_assert_not_reached();
+}
+
+void pt_pane_grid_unzoom(PtPaneGrid *g) {
+  g_return_if_fail(PT_IS_PANE_GRID(g));
+  unzoom_pending(g);
+}
+
+gboolean pt_pane_grid_get_zoomed(PtPaneGrid *g) {
+  g_return_val_if_fail(PT_IS_PANE_GRID(g), FALSE);
+  return pt_zoom_state_active(&g->zoom);
+}
+
 void pt_pane_grid_focus_next(PtPaneGrid *g) {
   if (g->focused == NULL) return;
+  /* Policy: an explicit focus move always leaves zoom first. Skipping hidden
+   * leaves would cycle focus through panes the user cannot see; landing on
+   * one silently would move focus nowhere visible. Un-zooming shows the pane
+   * the move lands on — the grid comes back with it. */
+  pt_pane_grid_unzoom(g);
   g->focused = pt_split_next_leaf(g->tree, g->focused);
   pt_pane_grid_focus_terminal(g);
   g_signal_emit(g, signals[SIG_FOCUS], 0);
@@ -336,6 +510,7 @@ void pt_pane_grid_focus_next(PtPaneGrid *g) {
 
 void pt_pane_grid_focus_prev(PtPaneGrid *g) {
   if (g->focused == NULL) return;
+  pt_pane_grid_unzoom(g);   /* same policy as focus_next */
   PtSplitNode *leaf = pt_split_prev_leaf(g->tree, g->focused);
   if (leaf == g->focused) return;
   g->focused = leaf;
@@ -358,6 +533,10 @@ static gboolean leaf_center(PtPaneGrid *g, PtSplitNode *leaf,
 
 void pt_pane_grid_focus_direction(PtPaneGrid *g, PtPaneDirection dir) {
   if (g->focused == NULL || g->tree == NULL) return;
+  /* Same policy as focus_next: a directional move leaves zoom first, so the
+   * geometry below sees the real layout — and every pane is visible to land
+   * on. */
+  pt_pane_grid_unzoom(g);
   double cx, cy;
   if (!leaf_center(g, g->focused, &cx, &cy)) return;
 
@@ -447,6 +626,7 @@ PtTerminal *pt_pane_grid_pane_by_token(PtPaneGrid *g, const char *token) {
 gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id) {
   PtSplitNode *leaf = leaf_by_id(g, id);
   if (leaf == NULL) return FALSE;
+  pt_pane_grid_unzoom(g);   /* a clicked notification asks for its pane shown */
   g->focused = leaf;
   pt_pane_grid_focus_terminal(g);
   g_signal_emit(g, signals[SIG_FOCUS], 0);

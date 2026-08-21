@@ -207,6 +207,30 @@ static void test_agent_fields_absent_in_old_json(void) {
   pt_split_free(n); g_object_unref(p);
 }
 
+/* The zoom walk in pt-pane-grid asks contains() which side of each ancestor
+ * paned the focused pane lives under, so the sides have to be exact. */
+static void test_contains(void) {
+  PtSplitNode *order[5];
+  PtSplitNode *root = build_five_leaf(order);
+  /* H( V(L1, L4), V(L2, H(L3, L5)) ) */
+  for (int i = 0; i < 5; i++)
+    g_assert_true(pt_split_contains(root, order[i]));
+  g_assert_true(pt_split_contains(root->a, order[0]));
+  g_assert_true(pt_split_contains(root->a, order[1]));
+  g_assert_false(pt_split_contains(root->a, order[2]));
+  g_assert_false(pt_split_contains(root->b, order[1]));
+  g_assert_true(pt_split_contains(root->b->b, order[3]));
+  g_assert_true(pt_split_contains(root->b->b, order[4]));
+  g_assert_false(pt_split_contains(root->b->b, order[2]));
+  /* a leaf contains only itself; NULL answers no on both ends */
+  for (int i = 0; i < 5; i++)
+    if (i != 2) g_assert_false(pt_split_contains(order[2], order[i]));
+  g_assert_true(pt_split_contains(order[2], order[2]));
+  g_assert_false(pt_split_contains(root, NULL));
+  g_assert_false(pt_split_contains(NULL, order[0]));
+  pt_split_free(root);
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/split/single", test_single_leaf);
@@ -221,5 +245,6 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/split/agent-json", test_agent_fields_json);
   g_test_add_func("/split/agent-copy-strip", test_agent_fields_copy_and_strip);
   g_test_add_func("/split/agent-absent", test_agent_fields_absent_in_old_json);
+  g_test_add_func("/split/contains", test_contains);
   return g_test_run();
 }

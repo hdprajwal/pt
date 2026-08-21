@@ -41,6 +41,11 @@ PtSplitNode *pt_split_prev_leaf(PtSplitNode *root, PtSplitNode *leaf); /* cyclic
  * copy). Parent pointers are rebuilt; the copy's root parent is NULL. */
 PtSplitNode *pt_split_copy(const PtSplitNode *n);
 int pt_split_count_leaves(PtSplitNode *root);
+/* TRUE when `leaf` is `n` itself or sits anywhere under it (pointer identity,
+ * like every walk that crosses between this tree and live widgets). The pane
+ * grid's zoom asks it which side of each ancestor paned the focused pane lives
+ * under — see hide_toward_leaf in pt-pane-grid.c. */
+gboolean pt_split_contains(PtSplitNode *n, PtSplitNode *leaf);
 void pt_split_free(PtSplitNode *root);
 JsonNode *pt_split_to_json(const PtSplitNode *root);       /* transfer full */
 PtSplitNode *pt_split_from_json(JsonNode *node);           /* NULL on malformed */

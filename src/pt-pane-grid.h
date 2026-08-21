@@ -28,6 +28,17 @@ void pt_pane_grid_set_pane_defaults(PtPaneGrid *g, gboolean mouse_reporting,
                                     PtOsc52Mode osc52);
 PtSplitNode *pt_pane_grid_tree(PtPaneGrid *g);
 void pt_pane_grid_split(PtPaneGrid *g, PtSplitKind kind);
+/* Toggle pane zoom: the focused pane fills the whole grid area while every
+ * other pane stays alive but hidden. View-level state on this widget only —
+ * it is never written to the session. Returns the new state; FALSE means
+ * nothing changed (a single-pane tab fills the grid already, and an empty one
+ * has nothing to fill). */
+gboolean pt_pane_grid_toggle_zoom(PtPaneGrid *g);
+gboolean pt_pane_grid_get_zoomed(PtPaneGrid *g);
+/* Leave zoom unconditionally, restoring the saved layout. No-op when not
+ * zoomed; this is how every structural change (split, close, focus move,
+ * tab switch) gets a grid back to its real shape before touching anything. */
+void pt_pane_grid_unzoom(PtPaneGrid *g);
 /* Close focused pane. Returns FALSE when the grid is now empty (close the tab). */
 gboolean pt_pane_grid_close_focused(PtPaneGrid *g);
 void pt_pane_grid_focus_next(PtPaneGrid *g);
