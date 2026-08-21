@@ -1,5 +1,5 @@
 /* pt-agent-history.h — recent agent sessions, read back from the report
- * directory. Reports are overwritten every time an agent starts in a pane and
+ * directory. Panes keep their reports current while an agent runs there and
  * swept after a week, so what this module answers is "which conversations ran
  * here lately", never a full history. Pure C: no widgets, headless-testable. */
 #pragma once

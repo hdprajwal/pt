@@ -128,9 +128,13 @@ static void enter_history_mode(PtCommandPalette *p) {
       pt_path_home_abbrev(e->cwd, g_get_home_dir(), shown, sizeof shown);
     char *rel = pt_agent_history_relative_time(e->ts, now);
     const char *agent = pt_agent_session_kind_name(e->agent);
+    /* The stamp is the report's last write, not the session's start: an
+     * agent that keeps reporting stays "just now" while it runs, and the
+     * wording says so. */
     PtCommandPaletteItem it = {
       .name = dead ? g_strdup("[missing]") : g_path_get_basename(e->cwd),
-      .detail = g_strdup_printf("%s · %s · %s", agent != NULL ? agent : "?",
+      .detail = g_strdup_printf("%s · %s · active %s",
+                                agent != NULL ? agent : "?",
                                 dead ? "?" : shown, rel),
       .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = FALSE,
       .is_history = TRUE, .history_dead = dead, .history_agent = e->agent,

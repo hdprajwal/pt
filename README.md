@@ -181,14 +181,15 @@ already on screen.
 
 <kbd>Ctrl</kbd>+<kbd>K</kbd> opens the command palette; "Recent agent sessions"
 lists the conversations those report files still describe, newest first. Each
-row shows the directory, the agent and how long ago it started. Enter resumes
+row shows the directory, the agent and how long since it was last active.
+Enter resumes
 the session in a new tab: if its directory is already an open project the tab
 goes there, otherwise pt adds the folder as a project first. The ⧉ at the end
 of a row copies the session id, in case you would rather paste
 `claude --resume <id>` yourself.
 
-This is a recent list, not history: each pane overwrites its file every time
-an agent starts there, and files older than a week are deleted. A row whose
+This is a recent list, not history: each pane keeps its report file current
+while an agent runs there, and files older than a week are deleted. A row whose
 directory no longer exists shows as `[missing]` and cannot be activated.
 
 
