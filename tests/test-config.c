@@ -484,6 +484,62 @@ static void test_binding_lines_malformed(void) {
   }
 }
 
+/* Counts warnings whose text contains `needle`, for the rules whose whole
+ * product is a warning: the line is dropped either way, so only the message
+ * separates "refused out loud" from "vanished". */
+typedef struct { const char *needle; int hits; } WarnCatch;
+
+static void warn_catch(const char *domain, GLogLevelFlags level,
+                       const char *message, gpointer user) {
+  (void)domain; (void)level;
+  WarnCatch *w = user;
+  if (strstr(message, w->needle) != NULL) w->hits++;
+}
+
+static void test_binding_lines_equals_in_accel(void) {
+  /* An accelerator written with a literal '=' splits on it up in pt_kv_parse,
+   * so the line can never be collected whole. Dropping it is not the point —
+   * that already happened — being told why is: the grammar spells punctuation
+   * by name, and `equal` is the name. Everything else in the file applies. */
+  WarnCatch w = { .needle = "'=' in a bind line", .hits = 0 };
+  guint id = g_log_set_handler(NULL, G_LOG_LEVEL_WARNING, warn_catch, &w);
+  PtConfig *c = pt_config_parse("bind ctrl+= font-zoom-in\n"
+                                "theme = gruvbox\n"
+                                "bind ctrl+equal font-zoom-in\n");
+  g_log_remove_handler(NULL, id);
+  g_assert_cmpint(w.hits, ==, 1);
+  g_assert_cmpuint(pt_config_n_binding_lines(c), ==, 1);
+  g_assert_cmpstr(pt_config_binding_line(c, 0), ==,
+                  "bind ctrl+equal font-zoom-in");
+  g_assert_cmpstr(c->theme, ==, "gruvbox");
+  pt_config_free(c);
+
+  /* An ordinary unknown key with an '=' is not a bind line and must stay
+   * silent on this rule, or every `app-*` override would trip it. */
+  w.hits = 0;
+  id = g_log_set_handler(NULL, G_LOG_LEVEL_WARNING, warn_catch, &w);
+  PtConfig *q = pt_config_parse("app-background = #101010\nsome-key = 1\n");
+  g_log_remove_handler(NULL, id);
+  g_assert_cmpint(w.hits, ==, 0);
+  pt_config_free(q);
+}
+
+static void test_binding_lines_tab_separated(void) {
+  /* A bind line is words; whether a tab or a space parts them is not worth
+   * refusing over. The verb's own separator is consumed either way, and what
+   * follows travels verbatim for pt-bindings to split. */
+  PtConfig *c = pt_config_parse("bind\tctrl+shift+t\tnew-tab\n"
+                                "unbind \t alt+1\n"
+                                "bind   ctrl+b   toggle-sidebar\n");
+  g_assert_cmpuint(pt_config_n_binding_lines(c), ==, 3);
+  g_assert_cmpstr(pt_config_binding_line(c, 0), ==,
+                  "bind ctrl+shift+t\tnew-tab");
+  g_assert_cmpstr(pt_config_binding_line(c, 1), ==, "unbind alt+1");
+  g_assert_cmpstr(pt_config_binding_line(c, 2), ==,
+                  "bind ctrl+b   toggle-sidebar");
+  pt_config_free(c);
+}
+
 static void test_binding_lines_copy_equal_rewrite(void) {
   const char *old =
       "bind ctrl+b toggle-sidebar\n"
@@ -531,6 +587,8 @@ int main(void) {
   test_load_save();
   test_binding_lines_collected();
   test_binding_lines_malformed();
+  test_binding_lines_equals_in_accel();
+  test_binding_lines_tab_separated();
   test_binding_lines_copy_equal_rewrite();
   g_print("test-config: OK\n");
   return 0;

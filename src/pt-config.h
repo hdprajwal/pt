@@ -98,9 +98,9 @@ typedef struct {
   gboolean claude_usage;     /* fetch Claude Code plan usage from Anthropic */
   gboolean resume_agents;    /* resume a restored pane's agent session */
   PtOsc52Mode osc52;         /* clipboard writes from programs (OSC 52) */
-   GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
-   GPtrArray *binding_lines;  /* raw `bind`/`unbind` lines, in file order; see pt-bindings.h */
- } PtConfig;
+  GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
+  GPtrArray *binding_lines;  /* raw `bind`/`unbind` lines, in file order; see pt-bindings.h */
+} PtConfig;
 
 /* Generic `key = value` walker shared with pt-theme. Skips blank lines and
  * lines starting with '#'. Malformed lines (no '=') are reported with
