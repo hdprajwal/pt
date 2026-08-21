@@ -49,6 +49,13 @@ static PtColor th_fg  = {0xd6, 0xda, 0xe0, 1.0};
 static PtColor th_cursor = {0xd6, 0xda, 0xe0, 1.0};
 static PtColor th_sel = {0x26, 0x4f, 0x38, 1.0};
 static PtColor th_ring = {0x2f, 0x4f, 0x3a, 1.0};
+/* Find-in-scrollback highlights: one hue at two strengths — dim for the
+ * matches waiting their turn, strong for the current one. A mid yellow
+ * reads on both the dark theme pt ships and light themes alike, over any
+ * cell background; like th_sel these are chrome colors, not cell colors,
+ * so they sit outside the terminal palette. */
+static PtColor th_match     = {0xd7, 0xba, 0x4a, 0.30};
+static PtColor th_match_cur = {0xd7, 0xba, 0x4a, 0.60};
 /* The overlay scrollbar's thumb: the chrome's slider token, so the bar over a
  * pane is the same colour as the one beside the project list. */
 static PtColor th_slider = {0xff, 0xff, 0xff, 0.12};
@@ -201,6 +208,22 @@ struct _PtTerminal {
    * both readers fall back to the safe answer: every press reports as a press,
    * as pt did before this, and every release is sent. */
   guint32 keys_held[PT_KEYS_HELD_WORDS];
+
+  /* find in scrollback. `search_needle` non-NULL means the pane is holding
+   * highlights for the bar's current query; everything else hangs off that.
+   * Matches live in SCREEN coordinates (whole scrollable area, oldest row
+   * first), which is the axis both the extraction and the viewport offset
+   * answer, so drawing and scrolling never convert between coordinate
+   * spaces. `search_matches` freed means stale-or-none: new output drops
+   * it (the positions are lies the moment a cell moves) and the next
+   * search action re-runs the whole extract-and-match pass against the
+   * cached-row guard below. */
+  char *search_needle;
+  GArray *search_matches;    /* of PtSearchMatch; NULL = no highlights */
+  int search_current;        /* index into search_matches, -1 none yet */
+  PtSearchRows search_rows;  /* cached extraction behind those matches */
+  gboolean search_rows_valid;
+  guint search_serial;       /* content serial the cache was extracted at */
 };
 
 G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
@@ -211,6 +234,9 @@ G_DEFINE_FINAL_TYPE(PtTerminal, pt_terminal, GTK_TYPE_WIDGET)
 static void update_link_cursor(PtTerminal *t);
 static void link_cache_reset(PtTerminal *t);
 static void url_clear(PtTerminal *t);
+/* Same story for the search block: core_output and on_focus_leave both fire
+ * long before the search code they need. */
+static void search_drop_highlights(PtTerminal *t);
 
 /* ---- cursor blink ----
  *
@@ -228,6 +254,115 @@ static void url_clear(PtTerminal *t);
  * the case a keypress hook would blink straight through. */
 #define PT_CURSOR_BLINK_MS 600
 #define PT_CURSOR_BLINK_RESET_MS 500
+
+/* ---- find in scrollback ----
+ *
+ * Draw-time only: nothing here touches terminal state, so a search can
+ * never disturb the selection, the viewport's own history or what copy
+ * takes. The one mutation is the viewport move that reveals a match, and
+ * that is the same pt_term_core_scroll_delta a wheel uses.
+ *
+ * The extract-and-match pass is debounced by the caller (the window's
+ * search bar); inside the pane it is also guarded by the core's content
+ * serial, so repeated queries over unchanged content reuse the cached
+ * extraction instead of walking every grid ref again. */
+static void search_drop_highlights(PtTerminal *t) {
+  g_clear_pointer(&t->search_matches, g_array_unref);
+  t->search_current = -1;
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
+/* Re-run extract + match for the current needle. Leaves whatever was there
+ * on failure — an unreadable grid keeps its old highlights rather than
+ * losing them. */
+static void search_refresh(PtTerminal *t) {
+  if (t->core == NULL || t->search_needle == NULL) return;
+  guint serial = pt_term_core_content_serial(t->core);
+  if (!t->search_rows_valid || t->search_serial != serial) {
+    pt_search_rows_clear(&t->search_rows);
+    t->search_rows_valid = FALSE;
+    memset(&t->search_rows, 0, sizeof t->search_rows);
+    if (!pt_term_core_search_rows(t->core, &t->search_rows)) return;
+    t->search_serial = serial;
+    t->search_rows_valid = TRUE;
+  }
+  guint64 total = 0, off = 0, len = 0;
+  int vp_top = 0;
+  if (pt_term_core_scrollbar(t->core, &total, &off, &len))
+    vp_top = (int)off;
+  g_clear_pointer(&t->search_matches, g_array_unref);
+  t->search_matches = pt_search_find(
+      (const char *const *)t->search_rows.rows,
+      (const GArray *const *)t->search_rows.maps,
+      t->search_rows.n_rows, t->search_needle);
+  /* First paint lands near where the user is looking, not at an end of
+     history. */
+  t->search_current = pt_search_step(t->search_matches, -1, +1,
+                                     t->search_rows.n_rows, vp_top);
+}
+
+/* Scroll the current match into view, roughly centered — a match revealed
+ * at the very edge of the pane is easy to lose against the highlight of
+ * whatever row sits above it. */
+static void search_reveal(PtTerminal *t) {
+  if (t->core == NULL || t->search_current < 0 ||
+      t->search_current >= (int)(t->search_matches != NULL
+                                     ? t->search_matches->len : 0))
+    return;
+  PtSearchMatch *m = &g_array_index(t->search_matches, PtSearchMatch,
+                                    t->search_current);
+  guint64 total = 0, off = 0, len = 0;
+  if (!pt_term_core_scrollbar(t->core, &total, &off, &len)) return;
+  gint64 want = CLAMP((gint64)m->row - (gint64)(len / 2), 0,
+                      (gint64)(total > len ? total - len : 0));
+  int delta = (int)(want - (gint64)off);
+  if (delta != 0) pt_term_core_scroll_delta(t->core, delta);
+}
+
+void pt_terminal_search_set_text(PtTerminal *t, const char *text) {
+  if (text == NULL || *text == '\0') {
+    pt_terminal_search_clear(t);
+    return;
+  }
+  if (t->search_matches != NULL &&
+      g_strcmp0(t->search_needle, text) == 0)
+    return;                    /* same query, highlights still standing */
+  g_free(t->search_needle);
+  t->search_needle = g_strdup(text);
+  search_refresh(t);
+  search_reveal(t);
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
+void pt_terminal_search_step(PtTerminal *t, int direction) {
+  if (t->search_needle == NULL || t->core == NULL) return;
+  if (t->search_matches == NULL)
+    search_refresh(t);         /* output since last time dropped them */
+  if (t->search_matches == NULL || t->search_matches->len == 0) return;
+  guint64 total = 0, off = 0, len = 0;
+  int vp_top = 0;
+  if (pt_term_core_scrollbar(t->core, &total, &off, &len))
+    vp_top = (int)off;
+  t->search_current = pt_search_step(t->search_matches, t->search_current,
+                                     direction, t->search_rows.n_rows,
+                                     vp_top);
+  search_reveal(t);
+  gtk_widget_queue_draw(GTK_WIDGET(t));
+}
+
+void pt_terminal_search_status(PtTerminal *t, int *current, int *count) {
+  if (count != NULL)
+    *count = t->search_matches != NULL ? (int)t->search_matches->len : 0;
+  if (current != NULL)
+    *current = t->search_current;
+}
+
+void pt_terminal_search_clear(PtTerminal *t) {
+  g_clear_pointer(&t->search_needle, g_free);
+  search_drop_highlights(t);
+  pt_search_rows_clear(&t->search_rows);
+  t->search_rows_valid = FALSE;
+}
 
 static gboolean blink_tick(gpointer user) {
   PtTerminal *t = PT_TERMINAL(user);
@@ -282,7 +417,12 @@ static void blink_phase_reset(PtTerminal *t) {
  * pass for typing. */
 static void core_output(PtTermCore *core, gpointer user) {
   (void)core;
-  blink_phase_reset(PT_TERMINAL(user));
+  PtTerminal *t = PT_TERMINAL(user);
+  blink_phase_reset(t);
+  /* New bytes move cells, so last frame's highlight positions are lies.
+   * The needle survives — the bar still shows the query — but the next
+   * search action re-extracts before it walks anywhere. */
+  if (t->search_needle != NULL) search_drop_highlights(t);
 }
 
 static void core_draw(PtTermCore *core, gpointer user) {
@@ -1336,6 +1476,17 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
    * comment on the struct for why this lives here instead of a core
    * accessor. */
   gboolean text_blink = FALSE;
+  /* Search highlights ride the same row walk. Matches are sorted by SCREEN
+     row, and the walk visits viewport rows in order, so one advancing
+     cursor serves every row: advance past rows already above, then draw
+     everything that lands on this one. Without a scrollbar answer the
+     viewport's offset in screen rows is unknown and no highlight can be
+     placed honestly — draw none rather than guess. */
+  guint n_match = t->search_matches != NULL ? t->search_matches->len : 0;
+  guint match_i = 0;
+  guint64 sb_off = 0;
+  gboolean can_highlight = n_match > 0 &&
+      pt_term_core_scrollbar(t->core, NULL, &sb_off, NULL);
   while (rows != NULL &&
          (ncells = pt_term_core_rows_next(rows, &cells)) >= 0) {
     row_i++;
@@ -1404,6 +1555,30 @@ static void pt_terminal_snapshot(GtkWidget *widget, GtkSnapshot *snapshot) {
     if (bg_w > 0)
       gtk_snapshot_append_color(snapshot, &bg_color,
           &GRAPHENE_RECT_INIT(bg_x, y, bg_w, t->cell_h));
+
+    /* Search highlights next: over the row's own background, under its
+       glyphs — the same layering as selection, so text stays readable.
+       The current match paints at full strength, the rest dim. */
+    if (can_highlight) {
+      long screen_row = (long)(sb_off + row_i);
+      while (match_i < n_match &&
+             g_array_index(t->search_matches, PtSearchMatch, match_i).row <
+                 screen_row)
+        match_i++;
+      for (guint k = match_i; k < n_match; k++) {
+        PtSearchMatch *m =
+            &g_array_index(t->search_matches, PtSearchMatch, k);
+        if (m->row > screen_row) break;
+        PtColor *mc = (int)k == t->search_current ? &th_match_cur
+                                                  : &th_match;
+        gtk_snapshot_append_color(snapshot,
+            &(GdkRGBA){ mc->r / 255.0f, mc->g / 255.0f, mc->b / 255.0f,
+                        (float)mc->a },
+            &GRAPHENE_RECT_INIT(pad_x + m->start_col * t->cell_w, y,
+                                (m->end_col - m->start_col) * t->cell_w,
+                                t->cell_h));
+      }
+    }
 
     /* SGR underline and overline next, under the glyphs that are about to go
      * down — see the ---- decorations ---- comment for why this pass has to
@@ -1725,6 +1900,10 @@ static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
    * mode 1004 focus reports, and the notification suppression in the core. */
   if (t->core != NULL) pt_term_core_focus_report(t->core, FALSE, FALSE);
   gtk_widget_remove_css_class(GTK_WIDGET(t), "focused");
+  /* Find in scrollback is per focused pane: whatever the user was looking
+     at here is gone the moment another pane takes the keyboard. The bar
+     itself stays up; typing again searches the newly focused pane. */
+  pt_terminal_search_clear(t);
   gtk_widget_queue_draw(GTK_WIDGET(t));
   /* A key let go of while some other widget holds the keyboard never produces
    * a release here, so its bit would sit set until the pane is destroyed and
@@ -2662,6 +2841,9 @@ static void pt_terminal_dispose(GObject *obj) {
   g_clear_pointer(&t->last_command, g_free);
   g_clear_pointer(&t->last_title, g_free);
   g_clear_pointer(&t->url_uri, g_free);
+  g_clear_pointer(&t->search_needle, g_free);
+  g_clear_pointer(&t->search_matches, g_array_unref);
+  pt_search_rows_clear(&t->search_rows);
   G_OBJECT_CLASS(pt_terminal_parent_class)->dispose(obj);
 }
 
