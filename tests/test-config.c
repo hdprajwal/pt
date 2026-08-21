@@ -15,6 +15,9 @@ static void test_defaults(void) {
   /* Clipboard writes from programs ship on: a yank on the far end of an ssh
    * session is meant to land on the local clipboard without setup. */
   g_assert_cmpint(c->osc52, ==, PT_OSC52_WRITE);
+  /* The attention dot, nothing louder: a bell you can see is the default,
+   * a beep is one you have to ask for. */
+  g_assert_cmpint(c->bell, ==, PT_BELL_VISUAL);
   /* Bytes of history per pane, ghostty's 10MB — a pane that keeps a session's
    * worth of output, not the ~10KB the old hardcoded number bought. */
   g_assert_cmpint(c->scrollback_limit, ==, 10000000);
@@ -125,8 +128,63 @@ static void test_parse_osc52(void) {
   pt_config_free(b);
 }
 
-static void test_rewrite_osc52(void) {
+static void test_parse_bell(void) {
+  const struct { const char *text; PtBellMode want; } ok[] = {
+    { "bell = visual\n",  PT_BELL_VISUAL },
+    { "bell = audible\n", PT_BELL_AUDIBLE },
+    { "bell = both\n",    PT_BELL_BOTH },
+    { "bell = off\n",     PT_BELL_OFF },
+    { "bell =  BOTH \n",  PT_BELL_BOTH },   /* trimmed and case-insensitive */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(ok); i++) {
+    PtConfig *c = pt_config_parse(ok[i].text);
+    g_assert_cmpint(c->bell, ==, ok[i].want);
+    pt_config_free(c);
+  }
+  /* Junk keeps the default. `true` is junk here: this key is a mode, and a
+   * typo must not be read as "turn something off" either. */
+  const char *bad[] = { "bell = sometimes\n", "bell = true\n",
+                        "bell = beep\n",      "bell = \n" };
+  for (gsize i = 0; i < G_N_ELEMENTS(bad); i++) {
+    PtConfig *c = pt_config_parse(bad[i]);
+    g_assert_cmpint(c->bell, ==, PT_BELL_VISUAL);
+    pt_config_free(c);
+  }
+
+  /* It takes part in copy/equal like the rest. */
+  PtConfig *a = pt_config_parse("bell = both\n");
+  PtConfig *b = pt_config_copy(a);
+  g_assert_cmpint(b->bell, ==, PT_BELL_BOTH);
+  g_assert_true(pt_config_equal(a, b));
+  b->bell = PT_BELL_OFF;
+  g_assert_false(pt_config_equal(a, b));
+  pt_config_free(a);
+  pt_config_free(b);
+}
+
+static void test_rewrite_bell(void) {
   /* Absent from the old text: appended, and round-trips. */
+  PtConfig *c = pt_config_new();
+  c->bell = PT_BELL_AUDIBLE;
+  char *out = pt_config_rewrite("theme = pt-dark\n", c);
+  g_assert_nonnull(strstr(out, "bell = audible\n"));
+  PtConfig *back = pt_config_parse(out);
+  g_assert_cmpint(back->bell, ==, PT_BELL_AUDIBLE);
+  g_assert_true(pt_config_equal(c, back));
+  g_free(out);
+  pt_config_free(back);
+
+  /* An existing line is rewritten in place, comments around it kept. */
+  c->bell = PT_BELL_OFF;
+  out = pt_config_rewrite("bell = both\n# tail\n", c);
+  g_assert_nonnull(strstr(out, "bell = off\n"));
+  g_assert_null(strstr(out, "bell = both\n"));
+  g_assert_nonnull(strstr(out, "# tail\n"));
+  g_free(out);
+  pt_config_free(c);
+}
+
+static void test_rewrite_osc52(void) {  /* Absent from the old text: appended, and round-trips. */
   PtConfig *c = pt_config_new();
   c->osc52 = PT_OSC52_ASK;
   char *out = pt_config_rewrite("theme = pt-dark\n", c);
@@ -450,6 +508,8 @@ int main(void) {
   test_parse_resume_agents();
   test_parse_osc52();
   test_rewrite_osc52();
+  test_parse_bell();
+  test_rewrite_bell();
   test_parse_term();
   test_parse_scrollback_limit();
   test_parse_window_padding();

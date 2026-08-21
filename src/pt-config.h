@@ -49,6 +49,18 @@ typedef enum {
 } PtOsc52Mode;
 #define PT_CONFIG_OSC52_DEFAULT PT_OSC52_WRITE
 
+/* What a program's BEL (0x07) is worth when it comes from a pane the user is
+ * not looking at. Visual is the attention dot on the pane's tab; audible is
+ * the system beep. A bell from the focused pane only ever beeps, under any
+ * setting but off — the user is already looking at that pane. */
+typedef enum {
+  PT_BELL_VISUAL = 0,  /* attention dot on the tab */
+  PT_BELL_AUDIBLE,     /* system beep */
+  PT_BELL_BOTH,        /* dot and beep */
+  PT_BELL_OFF,         /* drop it entirely */
+} PtBellMode;
+#define PT_CONFIG_BELL_DEFAULT PT_BELL_VISUAL
+
 /* Whether the info panel may look up Claude Code's plan usage, which means
  * sending the token Claude Code stored to Anthropic. Off, and only the user
  * can turn it on — every other reader in that panel reads a local file, and
@@ -98,6 +110,7 @@ typedef struct {
   gboolean claude_usage;     /* fetch Claude Code plan usage from Anthropic */
   gboolean resume_agents;    /* resume a restored pane's agent session */
   PtOsc52Mode osc52;         /* clipboard writes from programs (OSC 52) */
+  PtBellMode bell;           /* what a program's BEL does */
   GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
 } PtConfig;
 

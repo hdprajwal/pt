@@ -40,6 +40,7 @@ PtConfig *pt_config_new(void) {
   c->claude_usage = PT_CONFIG_CLAUDE_USAGE_DEFAULT;
   c->resume_agents = PT_CONFIG_RESUME_AGENTS_DEFAULT;
   c->osc52 = PT_CONFIG_OSC52_DEFAULT;
+  c->bell = PT_CONFIG_BELL_DEFAULT;
   c->app_overrides = g_hash_table_new_full(g_str_hash, g_str_equal,
                                            g_free, g_free);
   return c;
@@ -77,6 +78,8 @@ typedef struct {
 } PtConfigField;
 
 static const char *const osc52_names[] = { "off", "write", "ask", NULL };
+static const char *const bell_names[] = { "visual", "audible", "both", "off",
+                                          NULL };
 
 static const PtConfigField config_fields[] = {
   { "theme",           G_STRUCT_OFFSET(PtConfig, theme),
@@ -105,6 +108,8 @@ static const PtConfigField config_fields[] = {
     FLD_BOOL,   0, 0, NULL, NULL },
   { "osc52",           G_STRUCT_OFFSET(PtConfig, osc52),
     FLD_ENUM,   0, 0, osc52_names, "off, write or ask" },
+  { "bell",            G_STRUCT_OFFSET(PtConfig, bell),
+    FLD_ENUM,   0, 0, bell_names, "visual, audible, both or off" },
   /* Bytes of history, and the whole int range of them: 0 is a pane that keeps
    * none, which libghostty accepts, and the top end is far past what any pane
    * can fill. */
@@ -182,9 +187,10 @@ static gboolean field_parse(const PtConfigField *f, PtConfig *c,
     case FLD_ENUM:
       for (gsize i = 0; f->names[i] != NULL; i++)
         if (g_ascii_strcasecmp(value, f->names[i]) == 0) {
-          /* osc52 is the only enum here; naming its type beats assuming an
-           * enum is the same width as int. */
-          *(PtOsc52Mode *)p = (PtOsc52Mode)i;
+          /* Every enum here is small and non-negative, so int holds it on
+           * all the platforms GTK builds for; the enum types are named at
+           * the call sites, where they buy a real check. */
+          *(int *)p = (int)i;
           return TRUE;
         }
       return FALSE;
@@ -207,7 +213,7 @@ static char *field_value(const PtConfigField *f, const PtConfig *c) {
     case FLD_ENUM: {
       gsize n = 0;
       while (f->names[n] != NULL) n++;
-      gsize i = (gsize)*(const PtOsc52Mode *)p;
+      gsize i = (gsize)*(const int *)p;
       /* The parser can only produce values the names cover; one set from
        * anywhere else writes the first spelling rather than reading past the
        * list into whatever follows it. */
@@ -229,7 +235,7 @@ static void field_copy(const PtConfigField *f, PtConfig *dst,
     case FLD_INT:    *(int *)d = *(const int *)s; break;
     case FLD_DOUBLE: *(double *)d = *(const double *)s; break;
     case FLD_BOOL:   *(gboolean *)d = *(const gboolean *)s; break;
-    case FLD_ENUM:   *(PtOsc52Mode *)d = *(const PtOsc52Mode *)s; break;
+    case FLD_ENUM:   *(int *)d = *(const int *)s; break;
   }
 }
 
@@ -243,7 +249,7 @@ static gboolean field_equal(const PtConfigField *f, const PtConfig *a,
     case FLD_INT:    return *(const int *)x == *(const int *)y;
     case FLD_DOUBLE: return *(const double *)x == *(const double *)y;
     case FLD_BOOL:   return *(const gboolean *)x == *(const gboolean *)y;
-    case FLD_ENUM:   return *(const PtOsc52Mode *)x == *(const PtOsc52Mode *)y;
+    case FLD_ENUM:   return *(const int *)x == *(const int *)y;
   }
   return FALSE;
 }
