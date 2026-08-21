@@ -105,6 +105,7 @@ add_library(ptcore STATIC
   src/pt-split-tree.c
   src/pt-sprite.c
   src/pt-theme.c
+  src/pt-search.c
   src/pt-session.c
   src/pt-term-core.c
   src/pt-workspace.c
@@ -162,6 +163,10 @@ target_compile_definitions(test-term-core PRIVATE
   PT_TERMINFO_BUILD_DIR="${PT_TERMINFO_DIR}")
 add_dependencies(test-term-core pt-terminfo)
 add_test(NAME term-core COMMAND test-term-core)
+
+add_executable(test-search tests/test-search.c)
+target_link_libraries(test-search PRIVATE ptcore)
+add_test(NAME search COMMAND test-search)
 
 add_executable(test-config tests/test-config.c)
 target_link_libraries(test-config PRIVATE ptcore)

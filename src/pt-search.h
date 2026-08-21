@@ -66,8 +66,8 @@ GArray *pt_search_find(const char *const *rows, const GArray *const *col_maps,
  * ends. With no current match (-1) the walk starts near the viewport rather
  * than at an end: downward takes the first match at or below the viewport's
  * top row (`viewport_top_row`, a screen row — the same axis the matches
- * carry), upward the last one above it, and either falls back to the
- * nearest end when the viewport sits beyond every match. `n_rows` bounds
- * the viewport row to the area the matches were drawn from. */
+ * carry), upward the last one above it, and when the viewport sits beyond
+ * every match the walk wraps the way a repeat search would: downward to
+ * the first match overall, upward to the last. */
 int pt_search_step(GArray *matches, int current, int direction,
                    int n_rows, int viewport_top_row);
