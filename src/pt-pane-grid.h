@@ -82,6 +82,10 @@ void pt_pane_grid_queue_input(PtPaneGrid *g, const char *line);
 gboolean pt_pane_grid_any_running(PtPaneGrid *g);
 /* TRUE when any pane in the grid is still owed its bell's attention dot. */
 gboolean pt_pane_grid_any_bell_pending(PtPaneGrid *g);
+/* Answer every pane's bell at once. Called when the tab becomes visible:
+ * the user looking at the tab sees all of it, and a split's ringing pane
+ * never regains focus on the way back, so focus alone would leave its dot. */
+void pt_pane_grid_clear_bell_pending(PtPaneGrid *g);
 void pt_pane_grid_sync_cwds(PtPaneGrid *g); /* leaf->cwd ← live terminal cwd */
 /* leaf->agent/agent_session ← the pane's validated agent report. Called on
  * the save path, like sync_cwds: a report is only kept when the agent it

@@ -97,6 +97,11 @@ void pt_terminal_set_pane_bell(PtTerminal *t, PtBellMode mode);
 /* A bell arrived from this pane while it was unfocused and focus has not come
  * back since — the tab strip's attention dot. */
 gboolean pt_terminal_bell_pending(PtTerminal *t);
+/* Answer that bell without focus: the tab the pane lives in has become
+ * visible, so every one of its panes' unanswered bells is answered at once —
+ * a split's ringing pane never gets focus back on a tab switch, and its dot
+ * would otherwise survive the visit. */
+void pt_terminal_clear_bell_pending(PtTerminal *t);
 /* The audio half of a bell, per-pane rate limit included: TRUE at most once a
  * second, consuming the slot when it answers. */
 gboolean pt_terminal_take_bell_audio(PtTerminal *t);

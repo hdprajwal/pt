@@ -58,6 +58,7 @@ struct _PtWindow {
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
   guint sidebar_idle;   /* pending coalesced refresh_sidebar; 0 = none */
+  guint tabstrip_idle;  /* pending coalesced refresh_tabstrip; 0 = none */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
   PtConfig *config;
   GFileMonitor *config_monitor;
@@ -498,6 +499,24 @@ static void refresh_tabstrip(PtWindow *w) {
   g_free(infos);
 }
 
+/* Same coalescing as the sidebar walk above: BEL can burst (a program
+ * ringing many times a second, several panes at once), and the strip walk
+ * visits every tab of the project. However many bells land in one
+ * main-loop iteration, the walk happens once. The pending source id doubles
+ * as the dirty flag; dispose removes it, so the callback can never see a
+ * dead window. */
+static gboolean tabstrip_refresh_idle(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->tabstrip_idle = 0;
+  refresh_tabstrip(w);
+  return G_SOURCE_REMOVE;
+}
+
+static void queue_refresh_tabstrip(PtWindow *w) {
+  if (w->tabstrip_idle == 0)
+    w->tabstrip_idle = g_idle_add(tabstrip_refresh_idle, w);
+}
+
 /* The pane the status bar speaks for: focused pane of the active tab of the
  * active project. NULL when there is no project or no tab. */
 static PtTerminal *focused_terminal(PtWindow *w) {
@@ -672,6 +691,10 @@ static void show_active_grid(PtWindow *w) {
   PtTabUI *t = active_tab(active_project(w));
   if (t != NULL) {
     gtk_box_append(GTK_BOX(w->content), t->grid);
+    /* The user is looking at this tab again, all of it: every pane's
+     * unanswered bell is answered, not just the focused pane's (which
+     * focus-enter clears). The strip repaint below drops the dots. */
+    pt_pane_grid_clear_bell_pending(PT_PANE_GRID(t->grid));
     pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
   } else {
     PtProjectUI *ap = active_project(w);
@@ -1338,14 +1361,17 @@ static void on_grid_bell(PtPaneGrid *g, guint64 pane_id, gpointer user) {
     if (surface != NULL) gdk_surface_beep(surface);
   }
 
-  /* A pending flag may just have been set on one of this grid's panes. Same
-   * rule as the command and title handlers: only the active project's strip
-   * is live on screen, and a switch back refreshes it anyway. */
+  /* A pending flag may just have been set on one of this grid's panes. The
+   * strip repaint is queued rather than synchronous: unlike the command and
+   * title handlers, whose upstream comm poll already throttles them, a bell
+   * can burst, so however many land in one main-loop iteration share one
+   * walk. Only the active project's strip is live on screen, and a switch
+   * back refreshes it anyway. */
   PtTabUI *t = find_grid_tab(w, g);
   if (t == NULL) return;
   if (pt_workspace_tab_project(w->ws, t->id) ==
       pt_workspace_active_project(w->ws))
-    refresh_tabstrip(w);
+    queue_refresh_tabstrip(w);
 }
 
 /* ---------- agent lifecycle reports ----------
@@ -2567,6 +2593,10 @@ static void pt_window_dispose(GObject *obj) {
   if (w->sidebar_idle != 0) {
     g_source_remove(w->sidebar_idle);
     w->sidebar_idle = 0;
+  }
+  if (w->tabstrip_idle != 0) {
+    g_source_remove(w->tabstrip_idle);
+    w->tabstrip_idle = 0;
   }
   /* Before the config goes: render_config pushes into this, and a late reload
    * landing on a freed monitor would be the one path that outlives it. */

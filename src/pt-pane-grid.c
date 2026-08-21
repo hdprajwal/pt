@@ -691,6 +691,21 @@ gboolean pt_pane_grid_any_bell_pending(PtPaneGrid *g) {
   return any_bell_pending_walk(g->tree);
 }
 
+static void clear_bell_pending_walk(PtSplitNode *n) {
+  if (n == NULL) return;
+  if (n->kind == PT_SPLIT_LEAF) {
+    if (n->user != NULL)
+      pt_terminal_clear_bell_pending(PT_TERMINAL(n->user));
+    return;
+  }
+  clear_bell_pending_walk(n->a);
+  clear_bell_pending_walk(n->b);
+}
+
+void pt_pane_grid_clear_bell_pending(PtPaneGrid *g) {
+  clear_bell_pending_walk(g->tree);
+}
+
 static void sync_cwd_walk(PtSplitNode *n) {
   if (n == NULL) return;
   if (n->kind == PT_SPLIT_LEAF) {

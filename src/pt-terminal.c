@@ -363,13 +363,14 @@ static void core_notification(PtTermCore *core, const char *title,
  * window decides what the bell is worth; here only the visual half is
  * settled, because it needs the pane's own focus state: a dot on the tab of
  * the pane the user is reading tells them nothing, so an unfocused bell is
- * what sets the flag. The focused pane's bell still emits — that is the one
- * case where a beep is worth hearing under every setting but off. */
+ * what sets the flag (the pure rule lives in pt_bell_attention). The
+ * focused pane's bell still emits — that is the one case where a beep is
+ * worth hearing under every setting but off. */
 static void core_bell(PtTermCore *core, gpointer user) {
   (void)core;
   PtTerminal *t = PT_TERMINAL(user);
   if (t->bell == PT_BELL_OFF) return;
-  if (!t->focused && pt_bell_visual(t->bell)) t->bell_pending = TRUE;
+  if (pt_bell_attention(t->focused, t->bell)) t->bell_pending = TRUE;
   g_signal_emit(t, signals[SIG_BELL], 0);
 }
 
@@ -2642,6 +2643,9 @@ void pt_terminal_set_osc52(PtOsc52Mode mode) {
 }
 
 void pt_terminal_set_pane_bell(PtTerminal *t, PtBellMode mode) {
+  /* Dropping the visual half answers any bell still showing: with no dot
+   * ever coming, a pending flag would sit there pointing at nothing. */
+  if (!pt_bell_visual(mode)) t->bell_pending = FALSE;
   t->bell = mode;
 }
 
@@ -2652,15 +2656,14 @@ void pt_terminal_set_bell(PtBellMode mode) {
 
 gboolean pt_terminal_bell_pending(PtTerminal *t) { return t->bell_pending; }
 
-/* The audio half of a bell, gated here because the limit is per pane: TRUE
-   at most once a second, and only when the answer is yes does the timestamp
-   move — a suppressed beep must not push the next one further away, or a
-   program that rings twice a second would never be heard at all. */
+void pt_terminal_clear_bell_pending(PtTerminal *t) { t->bell_pending = FALSE; }
+
+/* The audio half of a bell, gated here because the limit is per pane. The
+   contract — TRUE at most once a second, and the stamp moves only when the
+   answer is yes, so a suppressed beep never pushes the next one away — is
+   pure logic pinned by the tests (pt_bell_audio_take). */
 gboolean pt_terminal_take_bell_audio(PtTerminal *t) {
-  gint64 now = g_get_monotonic_time();
-  if (now - t->bell_audio_at < G_USEC_PER_SEC) return FALSE;
-  t->bell_audio_at = now;
-  return TRUE;
+  return pt_bell_audio_take(&t->bell_audio_at, g_get_monotonic_time());
 }
 
 void pt_terminal_reset(PtTerminal *t) {

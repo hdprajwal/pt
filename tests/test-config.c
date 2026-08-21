@@ -199,7 +199,47 @@ static void test_bell_halves(void) {
   }
 }
 
-static void test_rewrite_osc52(void) {  /* Absent from the old text: appended, and round-trips. */
+static void test_bell_attention(void) {
+  /* The pane's bell_pending rule, pure part: a bell raises the tab's
+   * attention flag only when the visual half is on and the pane is not the
+   * one the user is reading. */
+  const struct { PtBellMode m; gboolean focused; gboolean want; } cases[] = {
+    { PT_BELL_VISUAL,  FALSE, TRUE  },
+    { PT_BELL_VISUAL,  TRUE,  FALSE },
+    { PT_BELL_AUDIBLE, FALSE, FALSE },   /* no dot under this setting at all */
+    { PT_BELL_AUDIBLE, TRUE,  FALSE },
+    { PT_BELL_BOTH,    FALSE, TRUE  },
+    { PT_BELL_BOTH,    TRUE,  FALSE },
+    { PT_BELL_OFF,     FALSE, FALSE },   /* off never gets this far anyway */
+    { PT_BELL_OFF,     TRUE,  FALSE },
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS(cases); i++)
+    g_assert_cmpint(pt_bell_attention(cases[i].focused, cases[i].m), ==,
+                    cases[i].want);
+  /* The clear side of the lifecycle — pt_terminal_set_pane_bell dropping a
+   * pending flag when the visual half goes away, and show_active_grid
+   * answering a whole tab's panes at once — lives in the widgets and needs a
+   * display, so it is not pinned here. pt_bell_visual is the predicate both
+   * of them ask, and test_bell_halves already covers it. */
+}
+
+static void test_bell_audio_rate_limit(void) {
+  gint64 last = 0;
+  /* First ring after forever: heard. */
+  gint64 t0 = 1000 * G_USEC_PER_SEC;
+  g_assert_true(pt_bell_audio_take(&last, t0));
+  g_assert_cmpint(last, ==, t0);
+  /* Half a second later: suppressed — and crucially the stamp did not move,
+   * or a program ringing twice a second would never be heard at all. */
+  g_assert_false(pt_bell_audio_take(&last, t0 + G_USEC_PER_SEC / 2));
+  g_assert_cmpint(last, ==, t0);
+  /* One second on from the *heard* ring: allowed again. */
+  g_assert_true(pt_bell_audio_take(&last, t0 + G_USEC_PER_SEC));
+  g_assert_cmpint(last, ==, t0 + G_USEC_PER_SEC);
+}
+
+static void test_rewrite_osc52(void) {
+  /* Absent from the old text: appended, and round-trips. */
   PtConfig *c = pt_config_new();
   c->osc52 = PT_OSC52_ASK;
   char *out = pt_config_rewrite("theme = pt-dark\n", c);
@@ -526,6 +566,8 @@ int main(void) {
   test_parse_bell();
   test_rewrite_bell();
   test_bell_halves();
+  test_bell_attention();
+  test_bell_audio_rate_limit();
   test_parse_term();
   test_parse_scrollback_limit();
   test_parse_window_padding();

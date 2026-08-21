@@ -62,8 +62,11 @@ typedef struct {
    * the core has no opinion about which bells are worth acting on: a bell
    * from the pane the user is reading may still deserve its beep, and what a
    * bell should look like is pure presentation anyway. Fires inside the pty-
-   * read path, so keep the handler to forwarding and let the main loop do
-   * whatever UI work the bell turns into. */
+   * read path, and the consumer answers there like every other callback —
+   * pt's handlers refresh their widgets synchronously, as on_grid_title and
+   * on_grid_command do; work that can burst (a program ringing many times a
+   * second) is what those consumers coalesce onto an idle, not something the
+   * core defers for them. */
   void (*bell)(PtTermCore *core, gpointer user);
 } PtTermCoreCallbacks;
 
