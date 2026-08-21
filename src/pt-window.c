@@ -60,6 +60,14 @@ struct _PtWindow {
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
   guint search_source;  /* find-bar debounce timer; 0 = none pending */
+  /* Which pane the highlights on screen belong to; NULL when none do. A
+   * search outlives the focus that started it — the bar's entry takes the
+   * keyboard as the bar opens, so the searched pane is already unfocused
+   * before the first character is typed — so the pane cannot tear its own
+   * search down on focus-leave the way it does its held-key set. The window
+   * holds the answer instead, weakly, so a pane closed mid-search leaves NULL
+   * here rather than a clear aimed at freed memory. */
+  PtTerminal *search_term;
   guint sidebar_idle;   /* pending coalesced refresh_sidebar; 0 = none */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
   PtConfig *config;
@@ -542,9 +550,42 @@ static void refresh_statusline(PtWindow *w) {
 
 /* ---------- find in scrollback ---------- */
 
+/* Point the search at `term`, tearing down whatever the pane before it was
+   showing; NULL just tears down. This is the only place highlights are
+   dropped, which is what makes "switch panes or tabs and the highlights go
+   with it" true for every way focus can move — including the ones that fire
+   no focus event on the searched pane at all, because the search bar took
+   its focus long before the move happened.
+
+   Not covered by the test suite, and no test here pretends otherwise: the
+   bug this exists to fix is made of real GTK focus traffic between a window,
+   a revealer's entry and two live panes, which needs a display server the
+   suite does not have. What IS covered is the pure half underneath —
+   tests/test-search.c drives the matcher and the extraction. */
+static void search_set_term(PtWindow *w, PtTerminal *term) {
+  if (w->search_term == term) return;
+  if (w->search_term != NULL) {
+    pt_terminal_search_clear(w->search_term);
+    g_object_remove_weak_pointer(G_OBJECT(w->search_term),
+                                 (gpointer *)&w->search_term);
+    w->search_term = NULL;
+  }
+  if (term != NULL) {
+    w->search_term = term;
+    g_object_add_weak_pointer(G_OBJECT(term), (gpointer *)&w->search_term);
+  }
+}
+
 static void search_update_count(PtWindow *w) {
-  int cur = -1, count = 0;
   PtTerminal *term = focused_terminal(w);
+  /* The keyboard moved to a pane that is not the one being searched, so the
+     search is over: drop it here rather than from a focus signal, because
+     this runs on every refresh_statusline and those cover the moves a grid
+     focus signal misses — a tab or project switch swaps the whole grid out
+     under a pane that never saw focus leave. */
+  if (w->search_term != NULL && term != w->search_term)
+    search_set_term(w, NULL);
+  int cur = -1, count = 0;
   if (term != NULL) pt_terminal_search_status(term, &cur, &count);
   pt_search_bar_set_count(PT_SEARCH_BAR(w->searchbar), cur, count);
 }
@@ -553,6 +594,9 @@ static void search_update_count(PtWindow *w) {
    spot of every step, since a step after new output re-runs the search. */
 static void search_apply(PtWindow *w) {
   PtTerminal *term = focused_terminal(w);
+  /* Claim the pane before searching it: unfocused panes cannot be searched,
+     so this is the moment the previous one's highlights stop being wanted. */
+  search_set_term(w, term);
   if (term == NULL) return;
   pt_terminal_search_set_text(term,
       pt_search_bar_text(PT_SEARCH_BAR(w->searchbar)));
@@ -570,13 +614,12 @@ static gboolean search_debounced(gpointer user) {
 
 /* Closing is more than hiding: pending debounces are cancelled (a timer
    landing on a closed bar would start a search nobody asked for), the
-   focused pane drops its highlights, and the keyboard goes back to the
-   terminal. */
+   SEARCHED pane drops its highlights — not the focused one, which by now may
+   be some other pane entirely — and the keyboard goes back to the terminal. */
 static void close_search(PtWindow *w) {
   g_clear_handle_id(&w->search_source, g_source_remove);
   pt_search_bar_close(PT_SEARCH_BAR(w->searchbar));
-  PtTerminal *term = focused_terminal(w);
-  if (term != NULL) pt_terminal_search_clear(term);
+  search_set_term(w, NULL);
   focus_active_terminal(w);
 }
 
@@ -587,8 +630,7 @@ static void on_search_changed(PtSearchBar *sb, const char *text,
   /* An emptied entry is not worth a debounce round trip: clear now. */
   if (*text == '\0') {
     g_clear_handle_id(&w->search_source, g_source_remove);
-    PtTerminal *term = focused_terminal(w);
-    if (term != NULL) pt_terminal_search_clear(term);
+    search_set_term(w, NULL);
     pt_search_bar_set_count(PT_SEARCH_BAR(w->searchbar), -1, 0);
     return;
   }
@@ -2638,6 +2680,9 @@ static void pt_window_dispose(GObject *obj) {
     g_source_remove(w->search_source);
     w->search_source = 0;
   }
+  /* The weak pointer has to go before the panes do, or the terminal being
+   * finalized writes through a field on a window that is halfway gone. */
+  search_set_term(w, NULL);
   if (w->sidebar_idle != 0) {
     g_source_remove(w->sidebar_idle);
     w->sidebar_idle = 0;

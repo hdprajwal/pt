@@ -2976,7 +2976,21 @@ static void test_content_serial(void) {
 
   /* So does a pure viewport move, with no output at all. */
   pt_term_core_scroll_delta(core, -1);
-  g_assert_cmpuint(pt_term_core_content_serial(core), >, s1);
+  guint s2 = pt_term_core_content_serial(core);
+  g_assert_cmpuint(s2, >, s1);
+
+  /* And so does a reflow, again with no output — which is what lets a pane
+   * throw its find-in-scrollback highlights away at the resize site.
+   * Rewrapping moves matched text to other rows and columns, so every rect
+   * measured before it is wrong, and pt_terminal_size_allocate tells a real
+   * reshape from the many GTK allocations that reshape nothing by reading
+   * this number either side of the resize. Both halves matter: a resize to
+   * the shape the core already has must NOT move it, or every layout pass
+   * would throw away the highlights of a search nobody touched. */
+  pt_term_core_resize(core, 80, 24, 8, 16);   /* the shape it already has */
+  g_assert_cmpuint(pt_term_core_content_serial(core), ==, s2);
+  pt_term_core_resize(core, 100, 30, 8, 16);
+  g_assert_cmpuint(pt_term_core_content_serial(core), >, s2);
   pt_term_core_free(core);
 }
 

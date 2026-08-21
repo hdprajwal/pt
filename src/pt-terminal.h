@@ -100,8 +100,13 @@ void pt_terminal_reset(PtTerminal *t);
  * index of the current match (-1 before the first step) and `count` the
  * total. `clear` drops needle and highlights both.
  *
- * A pane clears its own search when it loses focus — searching is per
- * focused pane — so callers only clear on bar close. */
+ * A pane never clears its own search. Searching is per pane, but the pane
+ * cannot see when it stops being the searched one: the search bar's entry
+ * holds the keyboard for the whole search, so the pane is already unfocused
+ * before the first character is typed and its focus-leave never fires again.
+ * Whoever drives the bar owns the lifetime — it is the side that knows which
+ * pane a search was aimed at — and calls `clear` when focus moves off that
+ * pane, when the query empties, and when the bar closes. */
 void pt_terminal_search_set_text(PtTerminal *t, const char *text);
 void pt_terminal_search_step(PtTerminal *t, int direction);
 void pt_terminal_search_status(PtTerminal *t, int *current, int *count);

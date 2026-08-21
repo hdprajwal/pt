@@ -1279,12 +1279,35 @@ static void pt_terminal_size_allocate(GtkWidget *widget, int width, int height,
   if (t->core == NULL) return;
   int cols, rows;
   grid_for_size(t, width, height, &cols, &rows);
+  guint before = pt_term_core_content_serial(t->core);
   pt_term_core_resize(t->core, (guint16)cols, (guint16)rows,
                       t->cell_w, t->cell_h);
   /* Reflow can carry a link away from a pointer that never moved, and a pane
    * that only ever gets resized (a split, a font change) sees no output to
    * catch it on. */
   update_link_cursor(t);
+  /* It carries the search highlights the same way: rewrapping moves matched
+   * text to a different row and column, so last frame's rects go on being
+   * painted over whatever sits at those coordinates now. core_output covers
+   * that staleness for new bytes, but a resize with no output behind it — a
+   * split, a font change, dragging the window edge — reaches only here, and
+   * the pane would otherwise keep the wrong rects up until the user happened
+   * to type or press Enter.
+   *
+   * Guarded on the serial rather than dropped outright because this runs on
+   * every GTK allocation, most of which move nothing: pt_term_core_resize
+   * returns early when the grid did not really change shape, and bumping the
+   * serial is exactly what it does when it did. The needle survives, as it
+   * does across output, and the next search action re-extracts — the cached
+   * rows in search_refresh are keyed on this same serial.
+   *
+   * Only the serial half of this is under test (/termcore/content-serial):
+   * that a real reshape moves it and a no-op resize does not, which is the
+   * whole basis of the guard. The GTK allocation traffic that gets here needs
+   * a display server the suite has none of, so nothing pretends to cover it. */
+  if (t->search_needle != NULL &&
+      pt_term_core_content_serial(t->core) != before)
+    search_drop_highlights(t);
 }
 
 /* ---- overlay scrollbar ----
@@ -1900,10 +1923,14 @@ static void on_focus_leave(GtkEventControllerFocus *ctl, gpointer user) {
    * mode 1004 focus reports, and the notification suppression in the core. */
   if (t->core != NULL) pt_term_core_focus_report(t->core, FALSE, FALSE);
   gtk_widget_remove_css_class(GTK_WIDGET(t), "focused");
-  /* Find in scrollback is per focused pane: whatever the user was looking
-     at here is gone the moment another pane takes the keyboard. The bar
-     itself stays up; typing again searches the newly focused pane. */
-  pt_terminal_search_clear(t);
+  /* Nothing about find-in-scrollback here, on purpose. A search is per pane
+   * and has to end when the user moves on, but focus-leave cannot be the
+   * signal: the search bar's entry takes the keyboard the moment the bar
+   * opens, so this fires on the pane about to be searched before it holds
+   * any search at all, and from then on that pane has no focus left to lose
+   * — the later move that really ends the search fires nothing here. The
+   * window tracks which pane a search belongs to instead (search_set_term in
+   * pt-window.c) and clears it there. */
   gtk_widget_queue_draw(GTK_WIDGET(t));
   /* A key let go of while some other widget holds the keyboard never produces
    * a release here, so its bit would sit set until the pane is destroyed and
