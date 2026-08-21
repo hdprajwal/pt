@@ -63,6 +63,21 @@ gboolean pt_pane_grid_focus_pane_by_id(PtPaneGrid *g, guint64 id);
  * that owns it. */
 PtTerminal *pt_pane_grid_pane_by_token(PtPaneGrid *g, const char *token);
 PtTerminal *pt_pane_grid_focused_terminal(PtPaneGrid *g);
+/* One line for the focused pane's shell, newline included by the caller —
+ * how a resume started from elsewhere in the UI reaches a pane. A pane whose
+ * shell has not spawned yet queues it as startup input (consumed right after
+ * the first spawn); a spawned shell gets it written to the pty, exactly as if
+ * the user had typed it at whatever the prompt holds.
+ * Caller invariant: call this before the pane's shell reaches its first
+ * prompt — in practice, in the same breath that created the pane (a fresh
+ * tab, a restore). The early pty write is safe because the tty queues bytes
+ * until the shell reads them, which is the same timing the startup-input
+ * flush itself relies on; past the first prompt this would type into
+ * whatever that prompt holds, so deliberate pasting is the tool for that,
+ * not this call. Nothing here can see the first-prompt edge, so the caller
+ * carries the invariant — misuse types into the focused program.
+ * No-op when the grid has no focused pane or the line is empty. */
+void pt_pane_grid_queue_input(PtPaneGrid *g, const char *line);
 /* TRUE when any pane in the grid has a foreground process other than the shell. */
 gboolean pt_pane_grid_any_running(PtPaneGrid *g);
 void pt_pane_grid_sync_cwds(PtPaneGrid *g); /* leaf->cwd ← live terminal cwd */

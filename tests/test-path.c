@@ -67,6 +67,41 @@ static void test_truncates(void) {
   g_assert_cmpint(none[0], ==, 'x');
 }
 
+/* Trailing slashes go, the root stays: this is what a project-path
+ * comparison runs both its sides through. */
+static void test_normalize(void) {
+  char *a = pt_path_normalize("/home/me/dev/pt/");
+  char *b = pt_path_normalize("/home/me/dev/pt");
+  g_assert_cmpstr(a, ==, "/home/me/dev/pt");
+  g_assert_cmpstr(b, ==, "/home/me/dev/pt");
+  g_assert_cmpstr(a, ==, b);   /* the whole point: equal under comparison */
+  g_free(a);
+  g_free(b);
+
+  char *many = pt_path_normalize("/tmp/a///");
+  g_assert_cmpstr(many, ==, "/tmp/a");
+  g_free(many);
+
+  /* The root is all slash and must survive as itself. */
+  char *root = pt_path_normalize("/");
+  g_assert_cmpstr(root, ==, "/");
+  g_free(root);
+  /* A path that is only slashes is the root too. */
+  char *slashes = pt_path_normalize("///");
+  g_assert_cmpstr(slashes, ==, "/");
+  g_free(slashes);
+
+  char *plain = pt_path_normalize("/no/trailing/slash");
+  g_assert_cmpstr(plain, ==, "/no/trailing/slash");
+  g_free(plain);
+
+  char *empty = pt_path_normalize("");
+  g_assert_cmpstr(empty, ==, "");
+  g_free(empty);
+
+  g_assert_null(pt_path_normalize(NULL));
+}
+
 int main(int argc, char *argv[]) {
   g_test_init(&argc, &argv, NULL);
   g_test_add_func("/path/exact-home", test_exact_home);
@@ -76,5 +111,6 @@ int main(int argc, char *argv[]) {
   g_test_add_func("/path/outside-home", test_outside_home);
   g_test_add_func("/path/null-and-empty", test_null_and_empty);
   g_test_add_func("/path/truncates", test_truncates);
+  g_test_add_func("/path/normalize", test_normalize);
   return g_test_run();
 }

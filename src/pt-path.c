@@ -20,3 +20,11 @@ void pt_path_home_abbrev(const char *path, const char *home,
   buf[0] = '~';
   g_strlcpy(buf + 1, path + n, cap - 1);
 }
+
+char *pt_path_normalize(const char *path) {
+  if (path == NULL) return NULL;
+  char *out = g_strdup(path);
+  gsize n = strlen(out);
+  while (n > 1 && out[n - 1] == '/') out[--n] = '\0';
+  return out;
+}

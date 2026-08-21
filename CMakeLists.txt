@@ -87,6 +87,7 @@ add_dependencies(pt pt-terminfo)
 add_library(ptcore STATIC
   src/pt-agent-latch.c
   src/pt-agent.c
+  src/pt-agent-history.c
   src/pt-agent-report.c
   src/pt-agent-session.c
   src/pt-claude-usage.c
@@ -193,6 +194,10 @@ add_test(NAME agent COMMAND test-agent)
 add_executable(test-agent-latch tests/test-agent-latch.c)
 target_link_libraries(test-agent-latch PRIVATE ptcore)
 add_test(NAME agent-latch COMMAND test-agent-latch)
+
+add_executable(test-agent-history tests/test-agent-history.c)
+target_link_libraries(test-agent-history PRIVATE ptcore)
+add_test(NAME agent-history COMMAND test-agent-history)
 
 add_executable(test-agent-session tests/test-agent-session.c)
 target_link_libraries(test-agent-session PRIVATE ptcore)

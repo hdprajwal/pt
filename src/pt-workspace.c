@@ -1,5 +1,6 @@
 #include "pt-workspace.h"
 
+#include "pt-path.h"
 #include "pt-session.h"   /* PT_ACCENT_COUNT */
 
 /* Two id namespaces would invite passing the wrong kind, so there is one:
@@ -283,6 +284,25 @@ const char *pt_workspace_project_path(const PtWorkspace *ws, PtWsId project) {
 int pt_workspace_project_accent(const PtWorkspace *ws, PtWsId project) {
   WsProject *p = project_ref(ws, project);
   return p != NULL ? p->accent : 0;
+}
+
+PtWsId pt_workspace_project_by_path(const PtWorkspace *ws, const char *path,
+                                    gboolean (*is_missing)(gpointer data)) {
+  g_return_val_if_fail(ws != NULL, PT_WS_ID_NONE);
+  if (path == NULL || path[0] == '\0') return PT_WS_ID_NONE;
+  char *want = pt_path_normalize(path);
+  PtWsId hit = PT_WS_ID_NONE;
+  for (guint i = 0; i < pt_workspace_project_count(ws); i++) {
+    PtWsId id = pt_workspace_project_at(ws, i);
+    if (is_missing != NULL && is_missing(pt_workspace_get_data(ws, id)))
+      continue;
+    char *have = pt_path_normalize(pt_workspace_project_path(ws, id));
+    gboolean same = g_strcmp0(have, want) == 0;
+    g_free(have);
+    if (same) { hit = id; break; }
+  }
+  g_free(want);
+  return hit;
 }
 
 /* ---------- data slots ---------- */
