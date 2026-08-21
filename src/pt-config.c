@@ -25,6 +25,20 @@ void pt_kv_parse(const char *text, PtKvFn fn, gpointer user) {
   g_strfreev(lines);
 }
 
+/* One raw `bind`/`unbind` line, kept verbatim (verb included) with where it
+ * sat in the file. Parsing into accelerators and actions is pt-bindings' job;
+ * this is only collection. */
+typedef struct {
+  char *text;
+  int line_no;
+} PtBindingSpec;
+
+static void binding_spec_free(gpointer p) {
+  PtBindingSpec *s = p;
+  g_free(s->text);
+  g_free(s);
+}
+
 PtConfig *pt_config_new(void) {
   PtConfig *c = g_new0(PtConfig, 1);
   c->theme = g_strdup(PT_CONFIG_THEME_DEFAULT);
@@ -42,6 +56,8 @@ PtConfig *pt_config_new(void) {
   c->osc52 = PT_CONFIG_OSC52_DEFAULT;
   c->app_overrides = g_hash_table_new_full(g_str_hash, g_str_equal,
                                            g_free, g_free);
+  c->binding_lines =
+      g_ptr_array_new_with_free_func((GDestroyNotify)binding_spec_free);
   return c;
 }
 
@@ -52,6 +68,7 @@ void pt_config_free(PtConfig *c) {
   g_free(c->ui_font_family);
   g_free(c->term);
   g_hash_table_unref(c->app_overrides);
+  g_ptr_array_unref(c->binding_lines);
   g_free(c);
 }
 
@@ -257,6 +274,13 @@ PtConfig *pt_config_copy(const PtConfig *c) {
   g_hash_table_iter_init(&it, c->app_overrides);
   while (g_hash_table_iter_next(&it, &k, &v))
     g_hash_table_insert(n->app_overrides, g_strdup(k), g_strdup(v));
+  for (guint i = 0; i < c->binding_lines->len; i++) {
+    const PtBindingSpec *s = g_ptr_array_index(c->binding_lines, i);
+    PtBindingSpec *copy = g_new0(PtBindingSpec, 1);
+    copy->text = g_strdup(s->text);
+    copy->line_no = s->line_no;
+    g_ptr_array_add(n->binding_lines, copy);
+  }
   return n;
 }
 
@@ -273,16 +297,63 @@ static gboolean tables_equal(GHashTable *a, GHashTable *b) {
 gboolean pt_config_equal(const PtConfig *a, const PtConfig *b) {
   for (gsize i = 0; i < G_N_ELEMENTS(config_fields); i++)
     if (!field_equal(&config_fields[i], a, b)) return FALSE;
-  return tables_equal(a->app_overrides, b->app_overrides);
+  if (!tables_equal(a->app_overrides, b->app_overrides)) return FALSE;
+  if (a->binding_lines->len != b->binding_lines->len) return FALSE;
+  /* Text only: where the lines sat in the file is not part of what they say. */
+  for (guint i = 0; i < a->binding_lines->len; i++)
+    if (g_strcmp0(pt_config_binding_line(a, i),
+                  pt_config_binding_line(b, i)) != 0)
+      return FALSE;
+  return TRUE;
+}
+
+/* Bindings are collected raw: what an accelerator and an action name are is
+ * pt-bindings' grammar, not this file's. A bind line carries no '=' on
+ * purpose — `=` is itself a bindable key — so it arrives through the
+ * malformed-line path below with the whole line as its key; the `bind =`
+ * spelling works too, for anyone whose fingers type one anyway. */
+static void collect_binding(PtConfig *c, const char *key, const char *value,
+                            int lineno) {
+  gboolean verb_bind = g_strcmp0(key, "bind") == 0;
+  gboolean verb_unbind = g_strcmp0(key, "unbind") == 0;
+  if (!verb_bind && !verb_unbind) return;
+  /* An empty value has nothing to bind, and unlike every managed string key
+   * it cannot read as "leave this alone". */
+  if (value == NULL || value[0] == '\0') {
+    g_warning("pt: config line %d: %s needs an accelerator — skipped",
+              lineno, key);
+    return;
+  }
+  PtBindingSpec *s = g_new0(PtBindingSpec, 1);
+  s->text = g_strdup_printf("%s %s", key, value);
+  s->line_no = lineno;
+  g_ptr_array_add(c->binding_lines, s);
 }
 
 static void on_kv(const char *key, const char *value, int lineno,
                   gpointer user) {
   PtConfig *c = user;
   if (value == NULL) {
+    /* No '=' anywhere: either a bare `bind <accel> [action]` line, which is
+     * spelled without one on purpose, or a genuinely malformed line. The
+     * line arrives stripped, so a lone `bind` with nothing after it means
+     * exactly what an empty value would have. */
+    if (g_strcmp0(key, "bind") == 0 || g_strcmp0(key, "unbind") == 0) {
+      collect_binding(c, key, "", lineno);
+      return;
+    }
+    if (g_str_has_prefix(key, "bind ")) {
+      collect_binding(c, "bind", g_strstrip((char *)key + 5), lineno);
+      return;
+    }
+    if (g_str_has_prefix(key, "unbind ")) {
+      collect_binding(c, "unbind", g_strstrip((char *)key + 7), lineno);
+      return;
+    }
     g_warning("pt: config line %d: no '=' — skipped", lineno);
     return;
   }
+  collect_binding(c, key, value, lineno);
   for (gsize i = 0; i < G_N_ELEMENTS(config_fields); i++) {
     const PtConfigField *f = &config_fields[i];
     if (g_strcmp0(key, f->key) != 0) continue;
@@ -298,9 +369,38 @@ static void on_kv(const char *key, const char *value, int lineno,
     }
     return;
   }
+  /* Bindings are collected raw: what an accelerator and an action name are
+   * is pt-bindings' grammar, not this file's. Unlike every managed key, an
+   * empty value is not "leave it alone" — there is nothing to leave alone. */
+  if (g_strcmp0(key, "bind") == 0 || g_strcmp0(key, "unbind") == 0) {
+    if (value[0] == '\0') {
+      g_warning("pt: config line %d: %s needs an accelerator — skipped",
+                lineno, key);
+      return;
+    }
+    PtBindingSpec *s = g_new0(PtBindingSpec, 1);
+    s->text = g_strdup_printf("%s %s", key, value);
+    s->line_no = lineno;
+    g_ptr_array_add(c->binding_lines, s);
+    return;
+  }
   if (g_str_has_prefix(key, "app-") && key[4] != '\0')
     g_hash_table_insert(c->app_overrides, g_strdup(key + 4), g_strdup(value));
   /* Unknown keys: ignored on read, preserved by rewrite. */
+}
+
+guint pt_config_n_binding_lines(const PtConfig *cfg) {
+  return cfg->binding_lines->len;
+}
+
+const char *pt_config_binding_line(const PtConfig *cfg, guint i) {
+  return ((const PtBindingSpec *)g_ptr_array_index(cfg->binding_lines, i))
+      ->text;
+}
+
+int pt_config_binding_line_no(const PtConfig *cfg, guint i) {
+  return ((const PtBindingSpec *)g_ptr_array_index(cfg->binding_lines, i))
+      ->line_no;
 }
 
 PtConfig *pt_config_parse(const char *text) {

@@ -98,8 +98,9 @@ typedef struct {
   gboolean claude_usage;     /* fetch Claude Code plan usage from Anthropic */
   gboolean resume_agents;    /* resume a restored pane's agent session */
   PtOsc52Mode osc52;         /* clipboard writes from programs (OSC 52) */
-  GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
-} PtConfig;
+   GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
+   GPtrArray *binding_lines;  /* raw `bind`/`unbind` lines, in file order; see pt-bindings.h */
+ } PtConfig;
 
 /* Generic `key = value` walker shared with pt-theme. Skips blank lines and
  * lines starting with '#'. Malformed lines (no '=') are reported with
@@ -123,3 +124,10 @@ PtConfig *pt_config_load(const char *path);
 /* Rewrites managed keys into the file's existing text (absent is fine) and
  * writes it back, creating the parent directory. */
 gboolean  pt_config_save(const PtConfig *c, const char *path, GError **err);
+
+/* The raw `bind` / `unbind` lines a parse collected, in file order, for
+ * pt_bindings_parse() to make sense of. Each line reads "bind <accel>
+ * [action]"; the number is where it sat in the file, for warnings. */
+guint      pt_config_n_binding_lines(const PtConfig *cfg);
+const char *pt_config_binding_line(const PtConfig *cfg, guint i);
+int        pt_config_binding_line_no(const PtConfig *cfg, guint i);
