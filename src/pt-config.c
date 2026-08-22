@@ -307,6 +307,24 @@ gboolean pt_config_equal(const PtConfig *a, const PtConfig *b) {
   return TRUE;
 }
 
+/* `key` starts with `verb` followed by whitespace: the rest of it, with that
+ * whitespace skipped. NULL when it does not, so `bind` alone and `binder`
+ * both decline. Tabs separate as well as spaces — a bind line is words, and
+ * a tab between two of them is not worth refusing over.
+ *
+ * Read-only on purpose. `key` points into pt_kv_parse's own buffer and
+ * pt-theme walks that same callback, so this trims by moving a pointer
+ * rather than writing through a const one. Only leading whitespace can be
+ * left to trim anyway: the line arrived stripped. */
+static const char *verb_rest(const char *key, const char *verb) {
+  gsize n = strlen(verb);
+  if (strncmp(key, verb, n) != 0) return NULL;
+  const char *p = key + n;
+  if (*p != ' ' && *p != '\t') return NULL;
+  while (*p == ' ' || *p == '\t') p++;
+  return p;
+}
+
 /* Bindings are collected raw: what an accelerator and an action name are is
  * pt-bindings' grammar, not this file's. A bind line carries no '=' on
  * purpose — `=` is itself a bindable key — so it arrives through the
@@ -342,18 +360,30 @@ static void on_kv(const char *key, const char *value, int lineno,
       collect_binding(c, key, "", lineno);
       return;
     }
-    if (g_str_has_prefix(key, "bind ")) {
-      collect_binding(c, "bind", g_strstrip((char *)key + 5), lineno);
+    const char *rest = verb_rest(key, "bind");
+    if (rest != NULL) {
+      collect_binding(c, "bind", rest, lineno);
       return;
     }
-    if (g_str_has_prefix(key, "unbind ")) {
-      collect_binding(c, "unbind", g_strstrip((char *)key + 7), lineno);
+    rest = verb_rest(key, "unbind");
+    if (rest != NULL) {
+      collect_binding(c, "unbind", rest, lineno);
       return;
     }
     g_warning("pt: config line %d: no '=' — skipped", lineno);
     return;
   }
   collect_binding(c, key, value, lineno);
+  /* A bind line whose accelerator carries a literal '=' split on it up in
+   * pt_kv_parse, so the verb and the front of the accelerator arrived as the
+   * key and the rest as a value. Nothing above matched it and nothing below
+   * will. Say why rather than letting `bind ctrl+= font-zoom-in` vanish: the
+   * grammar spells punctuation by name, and `equal` is the name. */
+  if (verb_rest(key, "bind") != NULL || verb_rest(key, "unbind") != NULL) {
+    g_warning("pt: config line %d: '=' in a bind line — spell punctuation by "
+              "name (equal, plus, minus) — skipped", lineno);
+    return;
+  }
   for (gsize i = 0; i < G_N_ELEMENTS(config_fields); i++) {
     const PtConfigField *f = &config_fields[i];
     if (g_strcmp0(key, f->key) != 0) continue;
@@ -367,21 +397,6 @@ static void on_kv(const char *key, const char *value, int lineno,
       else
         g_warning("pt: config line %d: bad %s '%s'", lineno, f->key, value);
     }
-    return;
-  }
-  /* Bindings are collected raw: what an accelerator and an action name are
-   * is pt-bindings' grammar, not this file's. Unlike every managed key, an
-   * empty value is not "leave it alone" — there is nothing to leave alone. */
-  if (g_strcmp0(key, "bind") == 0 || g_strcmp0(key, "unbind") == 0) {
-    if (value[0] == '\0') {
-      g_warning("pt: config line %d: %s needs an accelerator — skipped",
-                lineno, key);
-      return;
-    }
-    PtBindingSpec *s = g_new0(PtBindingSpec, 1);
-    s->text = g_strdup_printf("%s %s", key, value);
-    s->line_no = lineno;
-    g_ptr_array_add(c->binding_lines, s);
     return;
   }
   if (g_str_has_prefix(key, "app-") && key[4] != '\0')
