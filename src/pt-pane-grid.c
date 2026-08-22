@@ -41,10 +41,35 @@ static void on_term_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   GtkWidget *term =
       gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(ctl));
   PtSplitNode *leaf = g_object_get_data(G_OBJECT(term), "pt-leaf");
+  /* Answering the pane's bell lives here, not in the pane's own
+   * focus-enter, because only the repaint makes the answer visible and only
+   * a "focus-changed" gets the strip repainted. Focus can ENTER a pane
+   * without MOVING between panes: alt-tabbing back to the window, or
+   * clicking the sidebar and clicking back, re-enters the pane that already
+   * held focus. The test below sees no move and stays silent, so a flag
+   * cleared over in pt-terminal left the dot painted with nothing behind it
+   * — and on an idle shell nothing else repaints the strip, so it sat there.
+   * That is the commonest bell there is: step away, the build rings, step
+   * back.
+   *
+   * Read off the widget rather than leaf->user: a leaf can be freed while
+   * its pane is still alive, which is why everything else in this file
+   * compares leaves by pointer and never dereferences one it did not walk.
+   * `term` is the controller's own widget and is alive for this call.
+   *
+   * Not headlessly testable — GTK focus and window activation events, which
+   * the suite has no display for. */
+  PtTerminal *t = PT_TERMINAL(term);
+  gboolean answered = pt_terminal_bell_pending(t);
+  if (answered) pt_terminal_clear_bell_pending(t);
   if (leaf != NULL && leaf != g->focused) {
     g->focused = leaf;
     g_signal_emit(g, signals[SIG_FOCUS], 0);
     emit_focused_command(g);
+  } else if (answered) {
+    /* No move to report, but the strip is showing a dot that is now a lie.
+     * This is the signal the window repaints off. */
+    g_signal_emit(g, signals[SIG_FOCUS], 0);
   }
 }
 

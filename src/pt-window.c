@@ -144,6 +144,10 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
 /* Wired up in tab_ui_new like the one above; the body lands with the rest of
  * the bell code further on. */
 static void on_grid_bell(PtPaneGrid *g, guint64 pane_id, gpointer user);
+/* Coalesced tab-strip repaint; the body sits with the strip walk it defers.
+ * Declared up here because render_config, which is above that walk, retires
+ * attention flags and has to take the dots off the screen with them. */
+static void queue_refresh_tabstrip(PtWindow *w);
 
 /* ---------- config ---------- */
 
@@ -234,7 +238,14 @@ static void render_config(PtWindow *w, const PtConfig *cfg) {
   pt_terminal_set_font(cfg->font_family, cfg->font_size);
   pt_terminal_set_mouse_reporting(cfg->mouse_reporting);
   pt_terminal_set_osc52(cfg->osc52);
+  /* Turning the visual half off retires every pending attention flag, so
+   * the strip has to be repainted or the dots stay up with nothing behind
+   * them — the flag would be gone and no later bell could set it again to
+   * bring a repaint along. Coalesced, and a no-op walk when nothing had a
+   * dot, so the settings dialog's live preview can call this per keystroke
+   * as it already does. */
   pt_terminal_set_bell(cfg->bell);
+  queue_refresh_tabstrip(w);
   pt_terminal_set_padding(cfg->window_padding_x, cfg->window_padding_y);
   /* Spawn-time, so editing this reaches the next pane rather than the open
    * ones; ghostty's scrollback-limit works the same way. */

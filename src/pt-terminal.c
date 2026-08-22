@@ -1724,10 +1724,14 @@ static void on_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   t->focused = TRUE;
-  /* The user is reading this pane again, so its unanswered bell is answered:
-   * whatever it had to say is on screen now. The tab strip repaints off the
-   * "focus-changed" the grid emits for this same event. */
-  t->bell_pending = FALSE;
+  /* Nothing about bell_pending here, on purpose. Answering the bell is the
+   * grid's (on_term_focus_enter in pt-pane-grid.c): the flag is only worth
+   * anything once the tab strip repaints, the strip repaints off the grid's
+   * "focus-changed", and the grid is the side that knows whether it is
+   * about to emit one. Cleared here instead, a focus enter that moved
+   * between no panes — alt-tabbing back to the window, clicking the sidebar
+   * and clicking back — dropped the flag with no repaint behind it and left
+   * the dot on screen for good. */
   sync_blink_timer(t);         /* only the focused pane blinks */
   /* Deliberately synchronous, where ghostty defers to a glib idle
    * (apprt/gtk/class/surface.zig:2750): it does so to avoid re-entering
@@ -2756,6 +2760,9 @@ static void pt_terminal_init(PtTerminal *t) {
    * which calls the two setters below for every pane it has just built. */
   t->report_mouse = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
   t->osc52 = PT_CONFIG_OSC52_DEFAULT;
+  /* Written out like its two neighbours rather than left to GObject's zero
+   * fill, which only happens to be right while PT_BELL_VISUAL is 0. */
+  t->bell = PT_CONFIG_BELL_DEFAULT;
   t->blink_visible = TRUE;
   t->link_row = -2;          /* no cached link answer yet */
   live_terminals = g_slist_prepend(live_terminals, t);
