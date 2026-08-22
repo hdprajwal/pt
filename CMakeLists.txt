@@ -111,7 +111,7 @@ if(GIT_FOUND)
 endif()
 string(TIMESTAMP PT_BUILD_DATE "%Y-%m-%d")
 
-add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-command-palette.c src/pt-settings.c src/pt-overlay.c src/pt-rowlist.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c src/pt-agent-monitor.c ${PT_RES_C})
+add_executable(pt src/main.c src/pt-style.c src/pt-window.c src/pt-sidebar.c src/pt-info-panel.c src/pt-tab-strip.c src/pt-statusline.c src/pt-search-bar.c src/pt-project-bar.c src/pt-pane-grid.c src/pt-command-palette.c src/pt-settings.c src/pt-overlay.c src/pt-rowlist.c src/pt-terminal.c src/pt-keymap.c src/pt-git-monitor.c src/pt-agent-monitor.c ${PT_RES_C})
 target_link_libraries(pt PRIVATE ptcore PkgConfig::GTK PkgConfig::ADW)
 target_compile_definitions(pt PRIVATE
   PT_VERSION="${PROJECT_VERSION}"
@@ -143,6 +143,7 @@ add_library(ptcore STATIC
   src/pt-split-tree.c
   src/pt-sprite.c
   src/pt-theme.c
+  src/pt-search.c
   src/pt-session.c
   src/pt-term-core.c
   src/pt-workspace.c
@@ -200,6 +201,10 @@ target_compile_definitions(test-term-core PRIVATE
   PT_TERMINFO_BUILD_DIR="${PT_TERMINFO_DIR}")
 add_dependencies(test-term-core pt-terminfo)
 add_test(NAME term-core COMMAND test-term-core)
+
+add_executable(test-search tests/test-search.c)
+target_link_libraries(test-search PRIVATE ptcore)
+add_test(NAME search COMMAND test-search)
 
 add_executable(test-config tests/test-config.c)
 target_link_libraries(test-config PRIVATE ptcore)

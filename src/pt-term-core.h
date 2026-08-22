@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include "pt-config.h"   /* PtOsc52Mode: what OSC 52 may do to the clipboard */
 #include "pt-theme.h"    /* PtColor: the cell and palette color type */
+#include "pt-search.h"   /* PtSearchRows: scrollback search extraction payload */
 
 typedef struct PtTermCore PtTermCore;
 
@@ -433,6 +434,43 @@ typedef struct {
  * is the general answer, and the arithmetic is not. */
 gboolean pt_term_core_line_at(PtTermCore *c, int row, PtLine *out);
 void pt_term_core_line_clear(PtLine *l);
+
+/* ---- scrollback search extraction ----
+ *
+ * The rows find-in-scrollback matches against: every row of the scrollable
+ * area — scrollback and active screen alike, the whole GHOSTTY_POINT_TAG_
+ * SCREEN space — as case-folded text plus a byte -> cell-column map per
+ * row. See PtSearchRows (pt-search.h) for the exact shape of the payload
+ * and why folding happens per cell.
+ *
+ * This is the one grid read that reaches past the viewport. It walks the
+ * full screen coordinate space through ghostty_terminal_grid_ref, whose own
+ * docs warn that a `screen` lookup may traverse the whole page list per
+ * call — so this costs O(total_rows x cols) ref resolutions and is meant
+ * for a debounced search, never a render loop.
+ *
+ * Two caps decide how far back a search reaches, both documented so the
+ * answer to "why did it not find X" is always one of them. The library's
+ * own limit comes first: TOTAL_ROWS only ever counts what the
+ * `scrollback-limit` config key let the pane retain at spawn time, and
+ * anything pruned before this call is simply gone. On top of that sits
+ * PT_SEARCH_MAX_ROWS below — a pane whose retained history is longer than
+ * that searches only its newest rows, because a full walk of a huge buffer
+ * would hold the UI thread for seconds on every query. Rows older than the
+ * cap come back as NULL entries — present, so match rows keep their absolute
+ * SCREEN index (the axis pt_term_core_scrollbar's offset is counted from),
+ * but neither walked nor allocated for: an empty string and an empty GArray
+ * per row skipped is two allocations to say nothing, and a pane whose limit
+ * lets it run well past the cap pays them thousands of times per query.
+ * Nothing about them can match.
+ *
+ * Answers the terminal's live state (the parser's own view), not the cached
+ * render state a frame draws from. FALSE, leaving *out untouched, when the
+ * total cannot be read or there are no rows; an all-blank grid still
+ * answers TRUE with n_rows blank texts. Caller clears it with
+ * pt_search_rows_clear. */
+#define PT_SEARCH_MAX_ROWS 20000
+gboolean pt_term_core_search_rows(PtTermCore *c, PtSearchRows *out);
 
 typedef struct {
   PtColor bg, fg, cursor;

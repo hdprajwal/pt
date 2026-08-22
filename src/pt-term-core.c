@@ -2656,6 +2656,134 @@ void pt_term_core_line_clear(PtLine *l) {
   l->len = 0;
 }
 
+/* ---- scrollback search extraction ----
+ *
+ * One grid-ref resolution per cell over the whole SCREEN space — the
+ * expensive walk the header warns about, and the reason the search bar
+ * debounces. Everything else about the shape follows pt_term_core_line_at:
+ * blanks become spaces, a wide character's spacer tail contributes no byte,
+ * and every byte appended lands in the map beside the column that drew it.
+ * The one difference is folding: each cell's cluster is case-folded before
+ * its bytes are appended, so "ß" grows into "ss" under its own column's
+ * entries and the map never has to be re-aligned after the fact. */
+gboolean pt_term_core_search_rows(PtTermCore *c, PtSearchRows *out) {
+  if (c == NULL || out == NULL) return FALSE;
+  size_t total = 0;
+  if (ghostty_terminal_get(c->terminal, GHOSTTY_TERMINAL_DATA_TOTAL_ROWS,
+                           &total) != GHOSTTY_SUCCESS)
+    return FALSE;
+  if (total == 0 || c->cols <= 0) return FALSE;
+
+  memset(out, 0, sizeof *out);
+  out->n_rows = (int)total;
+  out->rows = g_new0(char *, out->n_rows);
+  out->maps = g_new0(GArray *, out->n_rows);
+
+  /* The row cap keeps a query bounded: the oldest rows past it are left as
+     the NULLs g_new0 already put there instead of being walked, so the
+     payload's indices — and therefore every match's row — stay absolute
+     SCREEN rows. NULL rather than an empty row on purpose. The cap only
+     binds on a pane given a scrollback-limit well above the 10MB default,
+     which at eighty columns retains under ten thousand rows; when it does
+     bind, though, an empty string plus an empty GArray per row skipped is two
+     heap allocations to say nothing, thousands of them on every keystroke the
+     search bar debounces into a query. pt_search_find skips NULL entries and
+     pt_search_rows_clear frees over them. */
+  int first = out->n_rows > PT_SEARCH_MAX_ROWS
+                  ? out->n_rows - PT_SEARCH_MAX_ROWS : 0;
+
+  for (int y = first; y < out->n_rows; y++) {
+    GString *text = g_string_sized_new((gsize)c->cols + 1);
+    GArray *map = g_array_sized_new(FALSE, FALSE, sizeof(guint16),
+                                    (guint)c->cols);
+    for (int x = 0; x < c->cols; x++) {
+      GhosttyPoint pt = { .tag = GHOSTTY_POINT_TAG_SCREEN,
+                          .value = { .coordinate = { .x = (guint16)x,
+                                                     .y = (guint32)y } } };
+      GhosttyGridRef ref = GHOSTTY_INIT_SIZED(GhosttyGridRef);
+      /* A ref the library refuses ends the row: nothing reliable is known
+       * past it, and what came before still matches. */
+      if (ghostty_terminal_grid_ref(c->terminal, pt, &ref) != GHOSTTY_SUCCESS)
+        break;
+
+      uint32_t cps_stack[16];
+      uint32_t *cps = cps_stack;
+      size_t glen = 0;
+      if (ghostty_grid_ref_graphemes(&ref, cps, G_N_ELEMENTS(cps_stack),
+                                     &glen) == GHOSTTY_OUT_OF_SPACE) {
+        /* Far past anything a real grapheme carries; retried at the size
+         * the library asked for rather than truncated mid-cluster.
+         *
+         * The retry's answer is checked where the first call's is not, and
+         * the asymmetry is the point: on the first call a refusal leaves
+         * glen the 0 it was initialized to and the cell simply reads blank,
+         * while here a refusal would leave g_new's uninitialized heap under
+         * a glen the encode loop below trusts — an out-of-bounds read
+         * feeding invalid code points (surrogates included) into
+         * g_utf8_casefold. A count larger than the buffer that was asked
+         * for says the same thing. Either way the cell reads blank, which
+         * keeps the text and its column map in lockstep. */
+        size_t cap = glen;
+        cps = g_new(uint32_t, cap);
+        if (ghostty_grid_ref_graphemes(&ref, cps, cap, &glen) !=
+                GHOSTTY_SUCCESS ||
+            glen > cap)
+          glen = 0;
+      }
+
+      guint16 colx = (guint16)x;
+      if (glen == 0) {
+        /* A blank cell reads as a space — unless it is the spacer half of
+         * a wide character, whose head already carried the whole cluster:
+         * it contributes no byte, same rule as line_at. */
+        GhosttyCell cell;
+        GhosttyCellWide wide = GHOSTTY_CELL_WIDE_NARROW;
+        gboolean spacer = FALSE;
+        if (ghostty_grid_ref_cell(&ref, &cell) == GHOSTTY_SUCCESS &&
+            ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &wide) ==
+                GHOSTTY_SUCCESS)
+          spacer = wide == GHOSTTY_CELL_WIDE_SPACER_TAIL ||
+                   wide == GHOSTTY_CELL_WIDE_SPACER_HEAD;
+        if (!spacer) {
+          g_array_append_val(map, colx);
+          g_string_append_c(text, ' ');
+        }
+      } else {
+        /* Four bytes is the most any code point encodes to, so glen * 4 holds
+         * the whole cluster whatever glen is. The encode buffer has to grow
+         * with the retry above: sized at the stack cps count instead, a
+         * cluster long enough to need the retry would be cut off partway
+         * through — exactly the truncation the retry exists to avoid, and
+         * silently, since the bytes that did fit still fold and still match.
+         * Same stack-then-heap shape as the code point buffer, and the
+         * common case (glen 1 or 2) never leaves the stack. */
+        char u8_stack[G_N_ELEMENTS(cps_stack) * 4];
+        char *u8 = glen <= G_N_ELEMENTS(cps_stack) ? u8_stack
+                                                   : g_new(char, glen * 4);
+        gsize nbytes = 0;
+        for (size_t i = 0; i < glen; i++)
+          nbytes += (gsize)utf8_encode_cp(cps[i], u8 + nbytes);
+        gchar *folded = g_utf8_casefold(u8, (gssize)nbytes);
+        for (const char *p = folded; *p != '\0'; p++)
+          g_array_append_val(map, colx);
+        g_string_append_len(text, folded, -1);
+        g_free(folded);
+        if (u8 != u8_stack) g_free(u8);
+      }
+      if (cps != cps_stack) g_free(cps);
+    }
+    /* Trailing blanks go off both strings together: map and text are built
+     * in lockstep, so their lengths always agree. */
+    while (text->len > 0 && text->str[text->len - 1] == ' ') {
+      g_string_truncate(text, text->len - 1);
+      g_array_set_size(map, map->len - 1);
+    }
+    out->rows[y] = g_string_free(text, FALSE);
+    out->maps[y] = map;
+  }
+  return TRUE;
+}
+
 gboolean pt_term_core_last_nonempty_row(PtTermCore *c, char *buf, gsize cap) {
   if (cap == 0) return FALSE;
   buf[0] = '\0';

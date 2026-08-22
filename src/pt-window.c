@@ -9,6 +9,7 @@
 #include "pt-info-panel.h"
 #include "pt-tab-strip.h"
 #include "pt-statusline.h"
+#include "pt-search-bar.h"
 #include "pt-project-bar.h"
 #include "pt-pane-grid.h"
 #include "pt-command-palette.h"
@@ -52,12 +53,22 @@ struct _PtWindow {
   AdwApplicationWindow parent_instance;
   PtWorkspace *ws;      /* NULL after dispose, like projects used to be */
   GtkWidget *sidebar, *tabstrip, *content, *statusline, *projectbar;
+  GtkWidget *searchbar; /* find-in-scrollback revealer; above the statusline */
   GtkWidget *infopanel;  /* right rail; hidden until ⌃I */
   PtAgentMonitor *agents; /* the panel's agent-usage block; polls only while shown */
   GtkWidget *palette;   /* overlay child; hidden unless ⌃K is up */
   GtkWidget *settings;  /* overlay child, same stack as the palette; ⌃, */
   guint save_source;    /* debounce timer; used from Task 12 */
   guint status_source;  /* 500ms progress poll for the status bar */
+  guint search_source;  /* find-bar debounce timer; 0 = none pending */
+  /* Which pane the highlights on screen belong to; NULL when none do. A
+   * search outlives the focus that started it — the bar's entry takes the
+   * keyboard as the bar opens, so the searched pane is already unfocused
+   * before the first character is typed — so the pane cannot tear its own
+   * search down on focus-leave the way it does its held-key set. The window
+   * holds the answer instead, weakly, so a pane closed mid-search leaves NULL
+   * here rather than a clear aimed at freed memory. */
+  PtTerminal *search_term;
   guint sidebar_idle;   /* pending coalesced refresh_sidebar; 0 = none */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
   PtConfig *config;
@@ -504,6 +515,9 @@ static PtTerminal *focused_terminal(PtWindow *w) {
 
 static gboolean active_pane_zoomed(PtWindow *w);   /* body below, with the actions */
 
+static void search_update_count(PtWindow *w);   /* find-bar count, below */
+static void focus_active_terminal(PtWindow *w); /* defined with the focus handlers */
+
 static void refresh_statusline(PtWindow *w) {
   PtProjectUI *p = active_project(w);
   PtTerminal *term = focused_terminal(w);
@@ -527,6 +541,171 @@ static void refresh_statusline(PtWindow *w) {
                        has_prog ? &prog : NULL, task,
                        p != NULL ? proj_accent(p) : 0,
                        active_pane_zoomed(w));
+  /* The find bar's count belongs to whatever pane is focused now, and focus
+     moves without any search action happening — so it rides the same
+     refreshes the statusline gets. No-op while the bar is closed. */
+  if (w->searchbar != NULL &&
+      pt_search_bar_is_open(PT_SEARCH_BAR(w->searchbar)))
+    search_update_count(w);
+}
+
+/* ---------- find in scrollback ---------- */
+
+/* Point the search at `term`, tearing down whatever the pane before it was
+   showing; NULL just tears down. This is the only place highlights are
+   dropped, which is what makes "switch panes or tabs and the highlights go
+   with it" true for every way focus can move — including the ones that fire
+   no focus event on the searched pane at all, because the search bar took
+   its focus long before the move happened.
+
+   Not covered by the test suite, and no test here pretends otherwise: the
+   bug this exists to fix is made of real GTK focus traffic between a window,
+   a revealer's entry and two live panes, which needs a display server the
+   suite does not have. What IS covered is the pure half underneath —
+   tests/test-search.c drives the matcher and the extraction. */
+static void search_set_term(PtWindow *w, PtTerminal *term) {
+  if (w->search_term == term) return;
+  if (w->search_term != NULL) {
+    pt_terminal_search_clear(w->search_term);
+    g_object_remove_weak_pointer(G_OBJECT(w->search_term),
+                                 (gpointer *)&w->search_term);
+    w->search_term = NULL;
+  }
+  if (term != NULL) {
+    w->search_term = term;
+    g_object_add_weak_pointer(G_OBJECT(term), (gpointer *)&w->search_term);
+  }
+}
+
+static void search_update_count(PtWindow *w) {
+  PtTerminal *term = focused_terminal(w);
+  /* The keyboard moved to a pane that is not the one being searched, so the
+     search is over: drop it here rather than from a focus signal, because
+     this runs on every refresh_statusline and those cover the moves a grid
+     focus signal misses — a tab or project switch swaps the whole grid out
+     under a pane that never saw focus leave. */
+  if (w->search_term != NULL && term != w->search_term)
+    search_set_term(w, NULL);
+  int cur = -1, count = 0;
+  if (term != NULL) pt_terminal_search_status(term, &cur, &count);
+  pt_search_bar_set_count(PT_SEARCH_BAR(w->searchbar), cur, count);
+}
+
+/* Run the entry's text against the focused pane right now. Also the landing
+   spot of every step, since a step after new output re-runs the search. */
+static void search_apply(PtWindow *w) {
+  PtTerminal *term = focused_terminal(w);
+  /* Claim the pane before searching it: unfocused panes cannot be searched,
+     so this is the moment the previous one's highlights stop being wanted. */
+  search_set_term(w, term);
+  if (term == NULL) return;
+  pt_terminal_search_set_text(term,
+      pt_search_bar_text(PT_SEARCH_BAR(w->searchbar)));
+  search_update_count(w);
+}
+
+/* Typing fires per keystroke; one keystroke can mean walking every grid ref
+   in the scrollback, so the search waits for a 100ms pause first. */
+static gboolean search_debounced(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->search_source = 0;
+  search_apply(w);
+  return G_SOURCE_REMOVE;
+}
+
+/* Closing is more than hiding: pending debounces are cancelled (a timer
+   landing on a closed bar would start a search nobody asked for), the
+   SEARCHED pane drops its highlights — not the focused one, which by now may
+   be some other pane entirely — and the keyboard goes back to the terminal. */
+static void close_search(PtWindow *w) {
+  g_clear_handle_id(&w->search_source, g_source_remove);
+  pt_search_bar_close(PT_SEARCH_BAR(w->searchbar));
+  search_set_term(w, NULL);
+  focus_active_terminal(w);
+}
+
+static void on_search_changed(PtSearchBar *sb, const char *text,
+                              gpointer user) {
+  (void)sb;
+  PtWindow *w = PT_WINDOW(user);
+  /* An emptied entry is not worth a debounce round trip: clear now. */
+  if (*text == '\0') {
+    g_clear_handle_id(&w->search_source, g_source_remove);
+    search_set_term(w, NULL);
+    pt_search_bar_set_count(PT_SEARCH_BAR(w->searchbar), -1, 0);
+    return;
+  }
+  g_clear_handle_id(&w->search_source, g_source_remove);
+  w->search_source = g_timeout_add(100, search_debounced, w);
+}
+
+/* A step arriving with a debounce still pending means the user typed and hit
+   Enter inside the same 100ms — the ordinary way anyone searches, not a race
+   worth losing input over. Cancelling the timer alone dropped the query on
+   the floor: nothing had been searched yet, so the step found no needle,
+   stepped nowhere, and no further "changed" ever re-armed the timer. The
+   text sat in the bar matching nothing until another keystroke.
+
+   So a pending debounce is run here instead of discarded, and TRUE says the
+   caller should stop: applying a fresh query already lands on the first
+   match near the viewport, and stepping on top of that would skip it. With
+   nothing pending the query is already standing and the step is a real step.
+
+   Untestable headlessly, like the rest of this block: it is timer and focus
+   traffic between a GtkSearchEntry and a live pane. */
+static gboolean search_flush(PtWindow *w) {
+  if (w->search_source == 0) return FALSE;
+  g_clear_handle_id(&w->search_source, g_source_remove);
+  search_apply(w);
+  return TRUE;
+}
+
+static void on_search_next(PtSearchBar *sb, gpointer user) {
+  (void)sb;
+  PtWindow *w = PT_WINDOW(user);
+  if (search_flush(w)) return;
+  PtTerminal *term = focused_terminal(w);
+  if (term == NULL) return;
+  pt_terminal_search_step(term, +1);
+  search_update_count(w);
+}
+
+static void on_search_prev(PtSearchBar *sb, gpointer user) {
+  (void)sb;
+  PtWindow *w = PT_WINDOW(user);
+  /* Unlike next, a flush does not stand in for this step: a fresh query
+     enters downward, at the first match at or below the viewport, and
+     Shift+Enter asked to go the other way. Apply, then step off it. */
+  search_flush(w);
+  PtTerminal *term = focused_terminal(w);
+  if (term == NULL) return;
+  pt_terminal_search_step(term, -1);
+  search_update_count(w);
+}
+
+static void on_search_stopped(PtSearchBar *sb, gpointer user) {
+  (void)sb;
+  close_search(PT_WINDOW(user));
+}
+
+/* The toggle behind ⌃⇧F. Opening puts the keyboard in the entry — keys go
+   to the search until Esc or a second ⌃⇧F closes it — closing hands them
+   back to the terminal. */
+static void action_toggle_find(PtWindow *w) {
+  if (pt_search_bar_is_open(PT_SEARCH_BAR(w->searchbar))) {
+    close_search(w);
+    return;
+  }
+  pt_search_bar_open(PT_SEARCH_BAR(w->searchbar));
+  /* The entry keeps its last query across a close — deliberately, so a
+     repeat search is one keystroke — but the pane behind it does not: close
+     cleared the needle with the highlights. Reopening therefore showed a
+     query with nothing standing behind it, blank count and all, and Enter
+     stepped a pane with no needle and did nothing until the text was
+     edited. Run it again here so what the bar says is true the moment it
+     slides in. The text is selected, so typing still replaces it. */
+  if (*pt_search_bar_text(PT_SEARCH_BAR(w->searchbar)) != '\0')
+    search_apply(w);
 }
 
 /* ---------- info panel ---------- */
@@ -1886,7 +2065,7 @@ static void on_info_usage_enable(PtInfoPanel *ip, gpointer user) {
 /* Commands ride the same list as projects and shells, marked is_command with
  * `command` saying which one. */
 enum { PT_CMD_TOGGLE_MOUSE_REPORTING, PT_CMD_RESET_TERMINAL,
-       PT_CMD_TOGGLE_PANE_ZOOM };
+       PT_CMD_TOGGLE_PANE_ZOOM, PT_CMD_FIND_SCROLLBACK };
 
 /* Every project, each followed by its shells, then the commands. The palette
  * ranks this flat list and hands back the workspace ids the user picked —
@@ -2038,6 +2217,15 @@ static void action_open_palette(PtWindow *w) {
   g_array_append_val(arr, zm);
   g_free(pz_note);
 
+  PtCommandPaletteItem find = {
+    .name = g_strdup("Find in scrollback"),
+    .detail = g_strdup("search the focused pane's history · ⌃⇧F"),
+    .shortcut = NULL, .accent = 0, .is_shell = FALSE, .is_command = TRUE,
+    .project_id = PT_WS_ID_NONE, .tab_id = PT_WS_ID_NONE,
+    .command = PT_CMD_FIND_SCROLLBACK,
+  };
+  g_array_append_val(arr, find);
+
   append_recent_sessions_row(arr);
 
   int n = (int)arr->len;
@@ -2110,6 +2298,7 @@ static void on_palette_activated(PtCommandPalette *pal, guint project_id,
     case PT_CMD_TOGGLE_MOUSE_REPORTING: action_toggle_mouse_reporting(w); break;
     case PT_CMD_RESET_TERMINAL:         action_reset_terminal(w); break;
     case PT_CMD_TOGGLE_PANE_ZOOM:       action_toggle_pane_zoom(w); break;
+    case PT_CMD_FIND_SCROLLBACK:        action_toggle_find(w); break;
     default: break;
     }
     return;
@@ -2327,6 +2516,11 @@ static const struct {
     .id = PT_ACTION_FOCUS_DIRECTION, .arg = PT_PANE_DIR_DOWN },
   { .accel = "<Control><Shift>v", .name = "paste", .id = PT_ACTION_PASTE },
   { .accel = "<Control><Shift>c", .name = "copy", .id = PT_ACTION_COPY },
+  /* Find in scrollback (⌃⇧F): the bar is not one of the overlays
+     overlay_open() knows about, so its toggle has to be its own shortcut
+     row rather than something the blocking rule eats. */
+  { .accel = "<Control><Shift>f", .name = "find-scrollback",
+    .id = PT_ACTION_FIND },
   /* Font zoom: cover =, shifted + (both plain and explicit-shift forms),
    * and the keypad. All four aliases answer to font-zoom-in together. */
   { .accel = "<Control>equal", .name = "font-zoom-in",
@@ -2389,6 +2583,7 @@ static gboolean shortcut_dispatch(GtkWidget *wg, GVariant *a, gpointer u) {
       break;
     case PT_ACTION_PASTE:            action_paste(w); break;
     case PT_ACTION_COPY:             action_copy(w); break;
+    case PT_ACTION_FIND:             action_toggle_find(w); break;
     case PT_ACTION_ZOOM:             action_zoom(w, c->arg); break;
     case PT_ACTION_ZOOM_PANE:        action_toggle_pane_zoom(w); break;
   }
@@ -2708,6 +2903,13 @@ static void pt_window_dispose(GObject *obj) {
     g_source_remove(w->status_source);
     w->status_source = 0;
   }
+  if (w->search_source != 0) {
+    g_source_remove(w->search_source);
+    w->search_source = 0;
+  }
+  /* The weak pointer has to go before the panes do, or the terminal being
+   * finalized writes through a field on a window that is halfway gone. */
+  search_set_term(w, NULL);
   if (w->sidebar_idle != 0) {
     g_source_remove(w->sidebar_idle);
     w->sidebar_idle = 0;
@@ -2784,6 +2986,11 @@ static void pt_window_init(PtWindow *w) {
   w->content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_set_vexpand(w->content, TRUE);
   gtk_box_append(GTK_BOX(main_col), w->content);
+  /* The find bar sits between the grid and the status line: it slides out of
+     the bottom edge (SLIDE_UP) and, when open, the two read as one bottom
+     chrome strip. */
+  w->searchbar = pt_search_bar_new();
+  gtk_box_append(GTK_BOX(main_col), w->searchbar);
   w->statusline = pt_statusline_new();
   gtk_box_append(GTK_BOX(main_col), w->statusline);
   gtk_box_append(GTK_BOX(body), main_col);
@@ -2827,6 +3034,13 @@ static void pt_window_init(PtWindow *w) {
   g_signal_connect(w->palette, "history-activated",
                    G_CALLBACK(on_palette_history_activated), w);
   g_signal_connect(w->palette, "closed", G_CALLBACK(on_palette_closed), w);
+  g_signal_connect(w->searchbar, "changed",
+                   G_CALLBACK(on_search_changed), w);
+  g_signal_connect(w->searchbar, "next-match", G_CALLBACK(on_search_next), w);
+  g_signal_connect(w->searchbar, "previous-match",
+                   G_CALLBACK(on_search_prev), w);
+  g_signal_connect(w->searchbar, "stopped",
+                   G_CALLBACK(on_search_stopped), w);
   g_signal_connect(w->settings, "changed",
                    G_CALLBACK(on_settings_changed), w);
   g_signal_connect(w->settings, "committed",

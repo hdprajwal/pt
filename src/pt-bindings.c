@@ -46,6 +46,7 @@ static const PtBindingAction actions[] = {
   { "focus-prev",       PT_ACTION_FOCUS_PREV,       0 },
   { "paste",            PT_ACTION_PASTE,            0 },
   { "copy",             PT_ACTION_COPY,             0 },
+  { "find-scrollback",  PT_ACTION_FIND,             0 },
   { "font-zoom-in",     PT_ACTION_ZOOM,            +1 },
   { "font-zoom-out",    PT_ACTION_ZOOM,            -1 },
   { "font-zoom-reset",  PT_ACTION_ZOOM,             0 },

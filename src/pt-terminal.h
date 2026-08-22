@@ -84,6 +84,33 @@ gboolean pt_terminal_toggle_mouse_reporting(PtTerminal *t);
 /* ghostty's `reset` action, this pane only: see pt_term_core_reset. The shell
  * keeps running; only the terminal's state is thrown away. */
 void pt_terminal_reset(PtTerminal *t);
+/* ---- find in scrollback ----
+ *
+ * Draw-time highlighting of every case-insensitive match for `text` across
+ * the pane's whole retained history (see pt_term_core_search_rows), with
+ * the current one scrolled into view. Nothing about the terminal itself is
+ * touched — no selection, no clipboard — and the viewport only moves the
+ * way a wheel move would.
+ *
+ * `set_text` runs the search live; call it debounced from a typing handler.
+ * An empty or NULL text clears. `step` (+1 / -1) walks to the next or
+ * previous match, wrapping at the ends, and reveals it; when output has
+ * moved cells since the highlights were drawn, it re-runs the search
+ * first. `status` answers what the count label shows: `current` is the
+ * index of the current match (-1 before the first step) and `count` the
+ * total. `clear` drops needle and highlights both.
+ *
+ * A pane never clears its own search. Searching is per pane, but the pane
+ * cannot see when it stops being the searched one: the search bar's entry
+ * holds the keyboard for the whole search, so the pane is already unfocused
+ * before the first character is typed and its focus-leave never fires again.
+ * Whoever drives the bar owns the lifetime — it is the side that knows which
+ * pane a search was aimed at — and calls `clear` when focus moves off that
+ * pane, when the query empties, and when the bar closes. */
+void pt_terminal_search_set_text(PtTerminal *t, const char *text);
+void pt_terminal_search_step(PtTerminal *t, int direction);
+void pt_terminal_search_status(PtTerminal *t, int *current, int *count);
+void pt_terminal_search_clear(PtTerminal *t);
 /* The `osc52` config key: what a program in a pane may do to the clipboard with
  * OSC 52. Pushed into every live terminal, like the one above, and paired with
  * the same one-pane form. */
