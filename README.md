@@ -383,6 +383,19 @@ for a human and pt will not hold on to it to find out.
 `\033]9;4;...` is a progress report, not a notification, and does not raise
 one.
 
+The bell works the same way, for programs too old or too plain to speak OSC.
+Printing a BEL character (`printf '\a'` is the whole trick) lights an amber
+dot on the tab of the pane that rang it, so a long build in another tab can
+say it is done without saying anything else. The dot waits there until you
+look at the pane — switching back to the tab clears it, not just switching
+past it. The pane in front of you never grows a dot, because you are already
+reading it.
+
+What the bell does follows `bell` in the config. The default, `visual`, is the
+dot alone. `audible` plays your desktop's system beep instead, at most one per
+second per pane so a program in a loop cannot turn into an alarm. `both` does
+the dot and the beep. `off` drops bells entirely.
+
 ## Agent usage
 
 Run `claude` or `codex` in a pane and the info panel (⌃I) grows an AGENT USAGE
@@ -425,6 +438,7 @@ ui-font-family = IBM Plex Sans
 term = xterm-ghostty
 mouse-reporting = true
 osc52 = write
+bell = visual
 claude-usage = false
 resume-agents = true
 scrollback-limit = 10000000
@@ -432,10 +446,11 @@ window-padding-x = 20
 window-padding-y = 18
 ```
 
-Those thirteen keys plus `app-*` color-token overrides (e.g.
+Those fourteen keys plus `app-*` color-token overrides (e.g.
 `app-background = #101010`) are the entire config surface. Booleans accept
 `true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`. `osc52` takes `write`, `ask`
-or `off` (see above). `claude-usage` is the info panel's Claude Code opt-in
+or `off` (see above). `bell` takes `visual`, `audible`, `both` or `off`
+(see above). `claude-usage` is the info panel's Claude Code opt-in
 (see below); the Turn on button writes it here, and setting it back to `false`
 turns the lookups off again. `resume-agents` is on by default and restores a
 pane's agent conversation (see above). `scrollback-limit` is how much history

@@ -70,6 +70,7 @@ struct _PtWindow {
    * here rather than a clear aimed at freed memory. */
   PtTerminal *search_term;
   guint sidebar_idle;   /* pending coalesced refresh_sidebar; 0 = none */
+  guint tabstrip_idle;  /* pending coalesced refresh_tabstrip; 0 = none */
   gboolean close_confirm_open;  /* a close-shell dialog is up; do not stack */
   PtConfig *config;
   GFileMonitor *config_monitor;
@@ -152,6 +153,13 @@ static void mark_dirty(PtWindow *w);   /* persistence hook; body in Task 12 */
 static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
                                  const char *title, const char *body,
                                  gpointer user);
+/* Wired up in tab_ui_new like the one above; the body lands with the rest of
+ * the bell code further on. */
+static void on_grid_bell(PtPaneGrid *g, guint64 pane_id, gpointer user);
+/* Coalesced tab-strip repaint; the body sits with the strip walk it defers.
+ * Declared up here because render_config, which is above that walk, retires
+ * attention flags and has to take the dots off the screen with them. */
+static void queue_refresh_tabstrip(PtWindow *w);
 
 /* ---------- config ---------- */
 
@@ -242,6 +250,14 @@ static void render_config(PtWindow *w, const PtConfig *cfg) {
   pt_terminal_set_font(cfg->font_family, cfg->font_size);
   pt_terminal_set_mouse_reporting(cfg->mouse_reporting);
   pt_terminal_set_osc52(cfg->osc52);
+  /* Turning the visual half off retires every pending attention flag, so
+   * the strip has to be repainted or the dots stay up with nothing behind
+   * them — the flag would be gone and no later bell could set it again to
+   * bring a repaint along. Coalesced, and a no-op walk when nothing had a
+   * dot, so the settings dialog's live preview can call this per keystroke
+   * as it already does. */
+  pt_terminal_set_bell(cfg->bell);
+  queue_refresh_tabstrip(w);
   pt_terminal_set_padding(cfg->window_padding_x, cfg->window_padding_y);
   /* Spawn-time, so editing this reaches the next pane rather than the open
    * ones; ghostty's scrollback-limit works the same way. */
@@ -494,6 +510,7 @@ static void refresh_tabstrip(PtWindow *w) {
     infos[i].id = id;
     infos[i].running = pt_pane_grid_any_running(grid);
     infos[i].last_exit = foc != NULL ? pt_terminal_last_exit(foc) : -1;
+    infos[i].attention = pt_pane_grid_any_bell_pending(grid);
   }
   guint active_ti =
       p != NULL ? pt_workspace_tab_index(w->ws,
@@ -503,6 +520,24 @@ static void refresh_tabstrip(PtWindow *w) {
                         active_ti == PT_WS_INDEX_NONE ? -1 : (int)active_ti,
                         p != NULL ? proj_accent(p) : 0);
   g_free(infos);
+}
+
+/* Same coalescing as the sidebar walk above: BEL can burst (a program
+ * ringing many times a second, several panes at once), and the strip walk
+ * visits every tab of the project. However many bells land in one
+ * main-loop iteration, the walk happens once. The pending source id doubles
+ * as the dirty flag; dispose removes it, so the callback can never see a
+ * dead window. */
+static gboolean tabstrip_refresh_idle(gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  w->tabstrip_idle = 0;
+  refresh_tabstrip(w);
+  return G_SOURCE_REMOVE;
+}
+
+static void queue_refresh_tabstrip(PtWindow *w) {
+  if (w->tabstrip_idle == 0)
+    w->tabstrip_idle = g_idle_add(tabstrip_refresh_idle, w);
 }
 
 /* The pane the status bar speaks for: focused pane of the active tab of the
@@ -847,6 +882,10 @@ static void show_active_grid(PtWindow *w) {
   PtTabUI *t = active_tab(active_project(w));
   if (t != NULL) {
     gtk_box_append(GTK_BOX(w->content), t->grid);
+    /* The user is looking at this tab again, all of it: every pane's
+     * unanswered bell is answered, not just the focused pane's (which
+     * focus-enter clears). The strip repaint below drops the dots. */
+    pt_pane_grid_clear_bell_pending(PT_PANE_GRID(t->grid));
     pt_pane_grid_focus_terminal(PT_PANE_GRID(t->grid));
   } else {
     PtProjectUI *ap = active_project(w);
@@ -905,6 +944,9 @@ static void on_grid_focus(PtPaneGrid *g, gpointer user) {
     if (tok != NULL) pt_agent_latch_rearm(w->agent_notified, tok);
   }
   refresh_statusline(w);
+  /* Focus entering a pane is what clears its bell's attention flag (the pane
+   * does the clearing; this repaints the strip that showed it). */
+  refresh_tabstrip(w);
 }
 
 static void tab_ui_free(gpointer data);   /* body below, with tab_ui_new */
@@ -1113,12 +1155,17 @@ static PtOsc52Mode pane_osc52(PtWindow *w) {
   return w->config != NULL ? w->config->osc52 : PT_CONFIG_OSC52_DEFAULT;
 }
 
+static PtBellMode pane_bell(PtWindow *w) {
+  return w->config != NULL ? w->config->bell : PT_CONFIG_BELL_DEFAULT;
+}
+
 static PtTabUI *tab_ui_new(PtWindow *w, PtProjectUI *p, const char *title,
                            PtSplitNode *tree) {
   PtTabUI *t = g_new0(PtTabUI, 1);
   t->window = w;
   t->title = g_strdup(title);
-  t->grid = pt_pane_grid_new(tree, pane_mouse_reporting(w), pane_osc52(w));
+  t->grid = pt_pane_grid_new(tree, pane_mouse_reporting(w), pane_osc52(w),
+                             pane_bell(w));
   g_object_ref_sink(t->grid);
   /* The grid built its first panes above, so this is a back-fill — safe, and
    * still ahead of every spawn: the grid is not parented yet, and a pane only
@@ -1133,6 +1180,7 @@ static PtTabUI *tab_ui_new(PtWindow *w, PtProjectUI *p, const char *title,
   g_signal_connect(t->grid, "emptied", G_CALLBACK(on_grid_emptied), w);
   g_signal_connect(t->grid, "notification",
                    G_CALLBACK(on_grid_notification), w);
+  g_signal_connect(t->grid, "bell", G_CALLBACK(on_grid_bell), w);
   return t;
 }
 
@@ -1140,7 +1188,7 @@ static void tab_ui_free(gpointer data) {
   PtTabUI *t = data;
   g_free(t->title);
   if (t->grid != NULL) {
-    /* The six handlers above all carry the window, and the grid can outlive
+    /* The handlers above all carry the window, and the grid can outlive
      * this tab (pt-pane-grid's close idle holds its own ref). Drop them here
      * or a background shell exiting in the same frame as window close would
      * emit "emptied" into a finalized window. */
@@ -1479,6 +1527,44 @@ static void on_grid_notification(PtPaneGrid *g, guint64 pane_id,
   g_object_unref(n);
 }
 
+/* ---------- terminal bell (BEL) ----------
+ *
+ * A program rang the bell. The core forwarded it unfiltered, and the grid
+ * tagged the pane it came from; what a bell is worth is the `bell` config
+ * key's call — an attention dot on its tab (the flag itself was set in the
+ * pane, which knows whether it was focused), a beep through the desktop, or
+ * both. Off never gets this far out of the pane. */
+static void on_grid_bell(PtPaneGrid *g, guint64 pane_id, gpointer user) {
+  PtWindow *w = PT_WINDOW(user);
+  if (w->ws == NULL) return;
+  PtBellMode mode = pane_bell(w);
+  if (mode == PT_BELL_OFF) return;
+
+  /* The beep answers "now", so it goes before any repaint work, and it is
+   * rate-limited per pane rather than dropped wholesale: a program ringing
+   * every half second still gets heard once a second. gdk_surface_beep asks
+   * the compositor for the standard system beep — no sound library, no new
+   * dependency, and the user's desktop theme decides what it sounds like. */
+  PtTerminal *sender = pt_pane_grid_pane_by_id(g, pane_id);
+  if (sender != NULL && pt_bell_audio(mode) &&
+      pt_terminal_take_bell_audio(sender)) {
+    GdkSurface *surface = gtk_native_get_surface(GTK_NATIVE(w));
+    if (surface != NULL) gdk_surface_beep(surface);
+  }
+
+  /* A pending flag may just have been set on one of this grid's panes. The
+   * strip repaint is queued rather than synchronous: unlike the command and
+   * title handlers, whose upstream comm poll already throttles them, a bell
+   * can burst, so however many land in one main-loop iteration share one
+   * walk. Only the active project's strip is live on screen, and a switch
+   * back refreshes it anyway. */
+  PtTabUI *t = find_grid_tab(w, g);
+  if (t == NULL) return;
+  if (pt_workspace_tab_project(w->ws, t->id) ==
+      pt_workspace_active_project(w->ws))
+    queue_refresh_tabstrip(w);
+}
+
 /* ---------- agent lifecycle reports ----------
  *
  * The hooks drop their report files into one state directory; watching that
@@ -1748,7 +1834,8 @@ static void action_split(PtWindow *w, PtSplitKind kind) {
    * nothing else — the panes already in the grid are left as they are. */
   set_spawn_env_for(p, PT_PANE_GRID(t->grid));
   pt_pane_grid_set_pane_defaults(PT_PANE_GRID(t->grid),
-                                 pane_mouse_reporting(w), pane_osc52(w));
+                                 pane_mouse_reporting(w), pane_osc52(w),
+                                 pane_bell(w));
   pt_pane_grid_split(PT_PANE_GRID(t->grid), kind);
 }
 
@@ -2913,6 +3000,10 @@ static void pt_window_dispose(GObject *obj) {
   if (w->sidebar_idle != 0) {
     g_source_remove(w->sidebar_idle);
     w->sidebar_idle = 0;
+  }
+  if (w->tabstrip_idle != 0) {
+    g_source_remove(w->tabstrip_idle);
+    w->tabstrip_idle = 0;
   }
   /* Before the config goes: render_config pushes into this, and a late reload
    * landing on a freed monitor would be the one path that outlives it. */

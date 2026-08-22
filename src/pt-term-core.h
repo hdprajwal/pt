@@ -59,6 +59,16 @@ typedef struct {
    * core drops it before it can cost the rate limit anything. */
   void (*notification)(PtTermCore *core, const char *title, const char *body,
                        gpointer user);
+  /* A program rang the terminal bell (BEL, 0x07). Unlike notification above,
+   * the core has no opinion about which bells are worth acting on: a bell
+   * from the pane the user is reading may still deserve its beep, and what a
+   * bell should look like is pure presentation anyway. Fires inside the pty-
+   * read path, and the consumer answers there like every other callback —
+   * pt's handlers refresh their widgets synchronously, as on_grid_title and
+   * on_grid_command do; work that can burst (a program ringing many times a
+   * second) is what those consumers coalesce onto an idle, not something the
+   * core defers for them. */
+  void (*bell)(PtTermCore *core, gpointer user);
 } PtTermCoreCallbacks;
 
 /* ---- terminfo ----

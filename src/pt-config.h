@@ -49,6 +49,39 @@ typedef enum {
 } PtOsc52Mode;
 #define PT_CONFIG_OSC52_DEFAULT PT_OSC52_WRITE
 
+/* What a program's BEL (0x07) is worth when it comes from a pane the user is
+ * not looking at. Visual is the attention dot on the pane's tab; audible is
+ * the system beep. A bell from the focused pane only ever beeps, under any
+ * setting but off — the user is already looking at that pane. */
+typedef enum {
+  PT_BELL_VISUAL = 0,  /* attention dot on the tab */
+  PT_BELL_AUDIBLE,     /* system beep */
+  PT_BELL_BOTH,        /* dot and beep */
+  PT_BELL_OFF,         /* drop it entirely */
+} PtBellMode;
+#define PT_CONFIG_BELL_DEFAULT PT_BELL_VISUAL
+
+/* The two halves of a PtBellMode, named so no caller enumerates the modes
+ * itself — adding a mode means touching these two answers and nothing else.
+ * Pure functions of the mode, so the tests pin them. */
+gboolean pt_bell_visual(PtBellMode mode);  /* attention dot on the tab */
+gboolean pt_bell_audio(PtBellMode mode);   /* the system beep */
+
+/* Whether a bell under this setting raises the tab's attention flag at all:
+ * a pane the user is reading has nothing to say with a dot, so only an
+ * unfocused pane marks one — the caller adds its own focus state here.
+ * Pure part of the widget's bell_pending rule, so the tests pin it. */
+gboolean pt_bell_attention(gboolean pane_focused, PtBellMode mode);
+
+/* Minimum gap between two heard beeps from one pane, in microseconds. */
+#define PT_BELL_AUDIO_INTERVAL_USEC G_USEC_PER_SEC
+
+/* The audio rate limit as pure logic, so the tests can pin its contract:
+ * TRUE when a ring at `now` may beep given `last`, and *only then* does it
+ * move `last`. A suppressed ring leaves the stamp alone, so it never pushes
+ * the next heard beep further out. */
+gboolean pt_bell_audio_take(gint64 *last, gint64 now);
+
 /* Whether the info panel may look up Claude Code's plan usage, which means
  * sending the token Claude Code stored to Anthropic. Off, and only the user
  * can turn it on — every other reader in that panel reads a local file, and
@@ -98,6 +131,7 @@ typedef struct {
   gboolean claude_usage;     /* fetch Claude Code plan usage from Anthropic */
   gboolean resume_agents;    /* resume a restored pane's agent session */
   PtOsc52Mode osc52;         /* clipboard writes from programs (OSC 52) */
+  PtBellMode bell;           /* what a program's BEL does */
   GHashTable *app_overrides; /* "background" (app- prefix stripped) -> "#rrggbb"/"rgba(...)" strings, both g_strdup'd */
   GPtrArray *binding_lines;  /* raw `bind`/`unbind` lines, in file order; see pt-bindings.h */
 } PtConfig;

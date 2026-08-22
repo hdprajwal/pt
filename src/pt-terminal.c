@@ -74,7 +74,7 @@ static gboolean th_dark = TRUE;
 static char *font_family;   /* NULL -> PT_FONT_FAMILY_DEFAULT */
 
 enum { SIG_EXITED, SIG_TITLE_CHANGED, SIG_COMMAND_CHANGED,
-       SIG_NOTIFICATION, N_SIGNALS };
+       SIG_NOTIFICATION, SIG_BELL, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 /* Whether the per-frame/per-event g_debug lines run at all. g_debug formats
@@ -151,6 +151,16 @@ struct _PtTerminal {
   gboolean report_mouse;     /* this pane's copy of `mouse-reporting` */
   PtOsc52Mode osc52;         /* this pane's copy of `osc52` */
   gboolean osc52_asking;     /* a clipboard-write confirmation is up */
+  PtBellMode bell;           /* this pane's copy of `bell` */
+  /* A bell arrived while the pane was unfocused and nothing has answered it
+   * yet: the attention dot on this pane's tab. Set only by a bell, cleared
+   * only by focus — so it survives tab and project switches, which take
+   * focus away without anyone looking at the pane. */
+  gboolean bell_pending;
+  /* The last bell this pane was allowed to beep for (monotonic µs): the
+   * one-per-second audio rate limit, per pane rather than process-wide, so
+   * two panes building at once still both get heard. */
+  gint64 bell_audio_at;
   gboolean link_cursor;      /* the hand cursor is up: a link is under the pointer */
   /* What update_link_cursor last answered for: the pointer's cell and the
    * core's content serial as of that answer. While neither moves the answer
@@ -487,6 +497,21 @@ static void core_notification(PtTermCore *core, const char *title,
   (void)core;
   PtTerminal *t = PT_TERMINAL(user);
   g_signal_emit(t, signals[SIG_NOTIFICATION], 0, title, body);
+}
+
+/* A program in this pane rang the bell. The core gates nothing, and the
+ * window decides what the bell is worth; here only the visual half is
+ * settled, because it needs the pane's own focus state: a dot on the tab of
+ * the pane the user is reading tells them nothing, so an unfocused bell is
+ * what sets the flag (the pure rule lives in pt_bell_attention). The
+ * focused pane's bell still emits — that is the one case where a beep is
+ * worth hearing under every setting but off. */
+static void core_bell(PtTermCore *core, gpointer user) {
+  (void)core;
+  PtTerminal *t = PT_TERMINAL(user);
+  if (t->bell == PT_BELL_OFF) return;
+  if (pt_bell_attention(t->focused, t->bell)) t->bell_pending = TRUE;
+  g_signal_emit(t, signals[SIG_BELL], 0);
 }
 
 static void core_command(PtTermCore *core, const char *comm, gpointer user) {
@@ -1242,7 +1267,8 @@ static void ensure_core(PtTerminal *t) {
                               .exited = core_exited,
                               .title = core_title, .command = core_command,
                               .clipboard_write = core_clipboard_write,
-                              .notification = core_notification };
+                              .notification = core_notification,
+                              .bell = core_bell };
   pt_term_core_set_callbacks(t->core, &cbs, t);
   pt_term_core_set_osc52(t->core, t->osc52);
   /* Same reason as the scheme below: a pane spawned after a config change has
@@ -1896,6 +1922,14 @@ static void on_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   (void)ctl;
   PtTerminal *t = PT_TERMINAL(user);
   t->focused = TRUE;
+  /* Nothing about bell_pending here, on purpose. Answering the bell is the
+   * grid's (on_term_focus_enter in pt-pane-grid.c): the flag is only worth
+   * anything once the tab strip repaints, the strip repaints off the grid's
+   * "focus-changed", and the grid is the side that knows whether it is
+   * about to emit one. Cleared here instead, a focus enter that moved
+   * between no panes — alt-tabbing back to the window, clicking the sidebar
+   * and clicking back — dropped the flag with no repaint behind it and left
+   * the dot on screen for good. */
   sync_blink_timer(t);         /* only the focused pane blinks */
   /* Deliberately synchronous, where ghostty defers to a glib idle
    * (apprt/gtk/class/surface.zig:2750): it does so to avoid re-entering
@@ -2818,6 +2852,30 @@ void pt_terminal_set_osc52(PtOsc52Mode mode) {
     pt_terminal_set_pane_osc52(l->data, mode);
 }
 
+void pt_terminal_set_pane_bell(PtTerminal *t, PtBellMode mode) {
+  /* Dropping the visual half answers any bell still showing: with no dot
+   * ever coming, a pending flag would sit there pointing at nothing. */
+  if (!pt_bell_visual(mode)) t->bell_pending = FALSE;
+  t->bell = mode;
+}
+
+void pt_terminal_set_bell(PtBellMode mode) {
+  for (GSList *l = live_terminals; l != NULL; l = l->next)
+    pt_terminal_set_pane_bell(l->data, mode);
+}
+
+gboolean pt_terminal_bell_pending(PtTerminal *t) { return t->bell_pending; }
+
+void pt_terminal_clear_bell_pending(PtTerminal *t) { t->bell_pending = FALSE; }
+
+/* The audio half of a bell, gated here because the limit is per pane. The
+   contract — TRUE at most once a second, and the stamp moves only when the
+   answer is yes, so a suppressed beep never pushes the next one away — is
+   pure logic pinned by the tests (pt_bell_audio_take). */
+gboolean pt_terminal_take_bell_audio(PtTerminal *t) {
+  return pt_bell_audio_take(&t->bell_audio_at, g_get_monotonic_time());
+}
+
 void pt_terminal_reset(PtTerminal *t) {
   if (t->core == NULL) return;      /* nothing has been spawned in this pane */
   /* The core drops its half of the gesture; these are the widget's half, and
@@ -2891,6 +2949,8 @@ static void pt_terminal_class_init(PtTerminalClass *klass) {
   signals[SIG_NOTIFICATION] = g_signal_new("notification", PT_TYPE_TERMINAL,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2,
       G_TYPE_STRING, G_TYPE_STRING);
+  signals[SIG_BELL] = g_signal_new("bell", PT_TYPE_TERMINAL,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void pt_terminal_init(PtTerminal *t) {
@@ -2909,6 +2969,9 @@ static void pt_terminal_init(PtTerminal *t) {
    * which calls the two setters below for every pane it has just built. */
   t->report_mouse = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
   t->osc52 = PT_CONFIG_OSC52_DEFAULT;
+  /* Written out like its two neighbours rather than left to GObject's zero
+   * fill, which only happens to be right while PT_BELL_VISUAL is 0. */
+  t->bell = PT_CONFIG_BELL_DEFAULT;
   t->blink_visible = TRUE;
   t->link_row = -2;          /* no cached link answer yet */
   live_terminals = g_slist_prepend(live_terminals, t);

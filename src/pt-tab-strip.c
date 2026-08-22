@@ -94,7 +94,8 @@ static gboolean snapshot_equal(gpointer ap, guint na, gpointer bp, guint nb,
   for (guint i = 0; i < na; i++) {
     if (a->tabs[i].id != b->tabs[i].id ||
         a->tabs[i].running != b->tabs[i].running ||
-        a->tabs[i].last_exit != b->tabs[i].last_exit)
+        a->tabs[i].last_exit != b->tabs[i].last_exit ||
+        a->tabs[i].attention != b->tabs[i].attention)
       return FALSE;
   }
   return TRUE;
@@ -374,6 +375,10 @@ static GtkWidget *build_tab(gpointer items, guint idx, gpointer u) {
   gtk_widget_add_css_class(dot, info->running          ? "running"
                                 : info->last_exit > 0  ? "error"
                                                        : "idle");
+  /* A bell nobody has answered outranks the run-state color: it is asking
+   * for the user specifically, and the dot is the only thing on the tab that
+   * can ask back. Cleared when any pane of the tab is focused again. */
+  if (info->attention) gtk_widget_add_css_class(dot, "attention");
   gtk_widget_set_valign(dot, GTK_ALIGN_CENTER);
   gtk_box_append(GTK_BOX(row), dot);
 

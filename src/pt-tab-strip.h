@@ -9,6 +9,7 @@ typedef struct {
   guint id;           /* the tab's PtWsId: stable, never 0, never reused */
   gboolean running;   /* any pane has a foreground process */
   int last_exit;      /* -1 unknown/ok-so-far, 0 ok, >0 error */
+  gboolean attention; /* a pane rang the bell and nobody has looked yet */
 } PtTabInfo;
 
 #define PT_TYPE_TAB_STRIP (pt_tab_strip_get_type())

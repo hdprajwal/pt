@@ -5,7 +5,7 @@
 #include "pt-zoom-state.h"
 
 enum { SIG_STRUCTURE, SIG_FOCUS, SIG_COMMAND, SIG_TITLE,
-       SIG_EMPTIED, SIG_NOTIFICATION, N_SIGNALS };
+       SIG_EMPTIED, SIG_NOTIFICATION, SIG_BELL, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 struct _PtPaneGrid {
@@ -19,6 +19,7 @@ struct _PtPaneGrid {
    * that already exist — one of them may have been toggled by hand. */
   gboolean pane_mouse_reporting;
   PtOsc52Mode pane_osc52;
+  PtBellMode pane_bell;
   /* Pane zoom (view-level, never saved): the focused pane fills the grid while
    * the other panes stay alive but hidden. See pt-zoom-state.h for the two
    * fields and their rules. */
@@ -40,10 +41,35 @@ static void on_term_focus_enter(GtkEventControllerFocus *ctl, gpointer user) {
   GtkWidget *term =
       gtk_event_controller_get_widget(GTK_EVENT_CONTROLLER(ctl));
   PtSplitNode *leaf = g_object_get_data(G_OBJECT(term), "pt-leaf");
+  /* Answering the pane's bell lives here, not in the pane's own
+   * focus-enter, because only the repaint makes the answer visible and only
+   * a "focus-changed" gets the strip repainted. Focus can ENTER a pane
+   * without MOVING between panes: alt-tabbing back to the window, or
+   * clicking the sidebar and clicking back, re-enters the pane that already
+   * held focus. The test below sees no move and stays silent, so a flag
+   * cleared over in pt-terminal left the dot painted with nothing behind it
+   * — and on an idle shell nothing else repaints the strip, so it sat there.
+   * That is the commonest bell there is: step away, the build rings, step
+   * back.
+   *
+   * Read off the widget rather than leaf->user: a leaf can be freed while
+   * its pane is still alive, which is why everything else in this file
+   * compares leaves by pointer and never dereferences one it did not walk.
+   * `term` is the controller's own widget and is alive for this call.
+   *
+   * Not headlessly testable — GTK focus and window activation events, which
+   * the suite has no display for. */
+  PtTerminal *t = PT_TERMINAL(term);
+  gboolean answered = pt_terminal_bell_pending(t);
+  if (answered) pt_terminal_clear_bell_pending(t);
   if (leaf != NULL && leaf != g->focused) {
     g->focused = leaf;
     g_signal_emit(g, signals[SIG_FOCUS], 0);
     emit_focused_command(g);
+  } else if (answered) {
+    /* No move to report, but the strip is showing a dot that is now a lie.
+     * This is the signal the window repaints off. */
+    g_signal_emit(g, signals[SIG_FOCUS], 0);
   }
 }
 
@@ -74,6 +100,14 @@ static void on_term_notification(PtTerminal *t, const char *title,
                                  const char *body, gpointer user) {
   g_signal_emit(PT_PANE_GRID(user), signals[SIG_NOTIFICATION], 0,
                 pt_terminal_id(t), title, body);
+}
+
+/* Forwarded from every pane, like the notification above: the whole point of
+ * a bell is that it comes from a pane the user is not looking at. The pane id
+ * rides along because the window needs the pane back — to beep for it, and to
+ * ask whether it was focused. */
+static void on_term_bell(PtTerminal *t, gpointer user) {
+  g_signal_emit(PT_PANE_GRID(user), signals[SIG_BELL], 0, pt_terminal_id(t));
 }
 
 /* Is `leaf` still a live leaf of `n`? Compares by pointer identity only, so a
@@ -127,6 +161,7 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   pt_terminal_set_pane_mouse_reporting(PT_TERMINAL(term),
                                        g->pane_mouse_reporting);
   pt_terminal_set_pane_osc52(PT_TERMINAL(term), g->pane_osc52);
+  pt_terminal_set_pane_bell(PT_TERMINAL(term), g->pane_bell);
   /* A restored leaf that carried an agent session gets the resume command
    * queued for its first shell. Same window as the env: before the pane is
    * parented, so before it can allocate and spawn. */
@@ -143,6 +178,7 @@ static GtkWidget *ensure_terminal(PtPaneGrid *g, PtSplitNode *leaf) {
   g_signal_connect(term, "command-changed", G_CALLBACK(on_term_command), g);
   g_signal_connect(term, "title-changed", G_CALLBACK(on_term_title), g);
   g_signal_connect(term, "notification", G_CALLBACK(on_term_notification), g);
+  g_signal_connect(term, "bell", G_CALLBACK(on_term_bell), g);
   GtkEventController *focus = gtk_event_controller_focus_new();
   g_signal_connect(focus, "enter", G_CALLBACK(on_term_focus_enter), g);
   gtk_widget_add_controller(term, focus);
@@ -269,11 +305,12 @@ static void rebuild(PtPaneGrid *g) {
 }
 
 GtkWidget *pt_pane_grid_new(PtSplitNode *tree, gboolean mouse_reporting,
-                            PtOsc52Mode osc52) {
+                            PtOsc52Mode osc52, PtBellMode bell) {
   PtPaneGrid *g = g_object_new(PT_TYPE_PANE_GRID, NULL);
   /* Set before rebuild(): it is what builds this grid's first panes. */
   g->pane_mouse_reporting = mouse_reporting;
   g->pane_osc52 = osc52;
+  g->pane_bell = bell;
   g->tree = tree;
   g->focused = pt_split_first_leaf(tree);
   rebuild(g);
@@ -304,12 +341,13 @@ void pt_pane_grid_set_env(PtPaneGrid *g, const char *const *envv) {
 }
 
 void pt_pane_grid_set_pane_defaults(PtPaneGrid *g, gboolean mouse_reporting,
-                                    PtOsc52Mode osc52) {
+                                    PtOsc52Mode osc52, PtBellMode bell) {
   /* Deliberately no walk over the panes that exist: the config apply that
    * carries a change does its own re-arm of every live pane, and every other
    * caller is only saying what the *next* pane should start out with. */
   g->pane_mouse_reporting = mouse_reporting;
   g->pane_osc52 = osc52;
+  g->pane_bell = bell;
 }
 
 void pt_pane_grid_split(PtPaneGrid *g, PtSplitKind kind) {
@@ -667,6 +705,32 @@ gboolean pt_pane_grid_any_running(PtPaneGrid *g) {
   return any_running_walk(g->tree);
 }
 
+static gboolean any_bell_pending_walk(PtSplitNode *n) {
+  if (n == NULL) return FALSE;
+  if (n->kind == PT_SPLIT_LEAF)
+    return n->user != NULL && pt_terminal_bell_pending(PT_TERMINAL(n->user));
+  return any_bell_pending_walk(n->a) || any_bell_pending_walk(n->b);
+}
+
+gboolean pt_pane_grid_any_bell_pending(PtPaneGrid *g) {
+  return any_bell_pending_walk(g->tree);
+}
+
+static void clear_bell_pending_walk(PtSplitNode *n) {
+  if (n == NULL) return;
+  if (n->kind == PT_SPLIT_LEAF) {
+    if (n->user != NULL)
+      pt_terminal_clear_bell_pending(PT_TERMINAL(n->user));
+    return;
+  }
+  clear_bell_pending_walk(n->a);
+  clear_bell_pending_walk(n->b);
+}
+
+void pt_pane_grid_clear_bell_pending(PtPaneGrid *g) {
+  clear_bell_pending_walk(g->tree);
+}
+
 static void sync_cwd_walk(PtSplitNode *n) {
   if (n == NULL) return;
   if (n->kind == PT_SPLIT_LEAF) {
@@ -770,6 +834,9 @@ static void pt_pane_grid_class_init(PtPaneGridClass *klass) {
       G_TYPE_UINT64, G_TYPE_STRING, G_TYPE_STRING);
   signals[SIG_EMPTIED] = g_signal_new("emptied", PT_TYPE_PANE_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[SIG_BELL] = g_signal_new("bell", PT_TYPE_PANE_GRID,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1,
+      G_TYPE_UINT64);
 }
 
 static void pt_pane_grid_init(PtPaneGrid *g) {
@@ -777,6 +844,7 @@ static void pt_pane_grid_init(PtPaneGrid *g) {
    * grid can never hand a pane a zero-initialized "config". */
   g->pane_mouse_reporting = PT_CONFIG_MOUSE_REPORTING_DEFAULT;
   g->pane_osc52 = PT_CONFIG_OSC52_DEFAULT;
+  g->pane_bell = PT_CONFIG_BELL_DEFAULT;
   gtk_widget_set_hexpand(GTK_WIDGET(g), TRUE);
   gtk_widget_set_vexpand(GTK_WIDGET(g), TRUE);
 }

@@ -116,10 +116,29 @@ void pt_terminal_search_clear(PtTerminal *t);
  * the same one-pane form. */
 void pt_terminal_set_osc52(PtOsc52Mode mode);
 void pt_terminal_set_pane_osc52(PtTerminal *t, PtOsc52Mode mode);
+/* The `bell` config key, pushed into every live terminal like the one above,
+ * and paired with the same one-pane form for a pane built after the config
+ * was applied. */
+void pt_terminal_set_bell(PtBellMode mode);
+void pt_terminal_set_pane_bell(PtTerminal *t, PtBellMode mode);
+/* A bell arrived from this pane while it was unfocused and focus has not come
+ * back since — the tab strip's attention dot. */
+gboolean pt_terminal_bell_pending(PtTerminal *t);
+/* Answer that bell without focus: the tab the pane lives in has become
+ * visible, so every one of its panes' unanswered bells is answered at once —
+ * a split's ringing pane never gets focus back on a tab switch, and its dot
+ * would otherwise survive the visit. */
+void pt_terminal_clear_bell_pending(PtTerminal *t);
+/* The audio half of a bell, per-pane rate limit included: TRUE at most once a
+ * second, consuming the slot when it answers. */
+gboolean pt_terminal_take_bell_audio(PtTerminal *t);
 /* GObject signals: "exited" (int), "title-changed" (const char*),
  *                  "command-changed" (const char*) — fg program of the pane changed,
  *                  "notification" (const char* title, const char* body) — a
  *                      program asked for a desktop notification with OSC 9 or
  *                      OSC 777. Already filtered, capped and rate-limited by
  *                      the core, and never emitted while the pane is focused;
- *                      `title` is "" when the sequence carried none. */
+ *                      `title` is "" when the sequence carried none.
+ *                  "bell" (void) — a program rang the terminal bell (BEL).
+ *                      Unfiltered: every bell arrives here, focused pane or
+ *                      not, and what it turns into is decided downstream. */
